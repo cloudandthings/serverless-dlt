@@ -68,26 +68,66 @@ def snapshot_select(source: sa.FromClause, tc: TableConfig) -> sa.Select:
     return stmt.where(sa.text(tc.where)) if tc.where else stmt
 
 
+def _comparable(column: sa.ColumnElement, tc: TableConfig) -> sa.ColumnElement:
+    """The cursor column as the source compares it (see `_Timestamp`); other columns as they are."""
+    if tc.cursor and tc.cursor.type == "timestamp" and column.name == tc.cursor.column:
+        return _Timestamp(column)
+    return column
+
+
+def _literal(value: Any, column: sa.ColumnElement) -> sa.ColumnElement:
+    """A value bound with the column's type, or with a type inferred from the value when the column has none."""
+    return sa.literal(value, None if isinstance(column.type, sa.types.NullType) else column.type)
+
+
+def _cursor_filtered(source: sa.FromClause, tc: TableConfig, start: Any, end: Any) -> sa.Select:
+    """`SELECT <columns> FROM source WHERE (<cursor in [start, end)> [OR cursor IS NULL]) AND <where>`."""
+    cursor_col = source.c[tc.cursor.column]
+    cmp = _comparable(cursor_col, tc)
+    bound = cmp >= _value(start, cursor_col, tc)
+    if end is not None:
+        bound = sa.and_(bound, cmp < _value(end, cursor_col, tc))
+    if tc.cursor.include_null_cursor:
+        bound = sa.or_(bound, cursor_col.is_(None))
+    stmt = sa.select(*_projection(source, tc)).select_from(source).where(bound)
+    return stmt.where(sa.text(tc.where)) if tc.where else stmt
+
+
+def _value(value: Any, column: sa.ColumnElement, tc: TableConfig) -> sa.ColumnElement:
+    """A bound value compared against `column`, wrapped the same way the column is."""
+    literal = _literal(value, column)
+    return _Timestamp(literal) if isinstance(_comparable(column, tc), _Timestamp) else literal
+
+
 def cursor_select(source: sa.FromClause, tc: TableConfig, start: Any, end: Any = None) -> sa.Select:
     """`SELECT <columns> FROM source WHERE (<cursor in [start, end)> [OR cursor IS NULL]) AND <where> ORDER BY cursor`.
 
     The window is half-open; `end` None leaves it open-ended (incremental mode).
     """
-    cursor_col = source.c[tc.cursor.column]
-    columns = _projection(source, tc)
+    return _cursor_filtered(source, tc, start, end).order_by(source.c[tc.cursor.column])
 
-    def value(v):
-        return _Timestamp(v) if tc.cursor.type == "timestamp" else v
 
-    bound = value(cursor_col) >= value(sa.literal(start, cursor_col.type))
-    if end is not None:
-        bound = sa.and_(bound, value(cursor_col) < value(sa.literal(end, cursor_col.type)))
-    if tc.cursor.include_null_cursor:
-        bound = sa.or_(bound, cursor_col.is_(None))
-    stmt = sa.select(*columns).select_from(source).where(bound)
-    if tc.where:
-        stmt = stmt.where(sa.text(tc.where))
-    return stmt.order_by(cursor_col)
+def keyset_select(
+    source: sa.FromClause, tc: TableConfig, start: Any, end: Any, after: tuple | None
+) -> sa.Select:
+    """One keyset page (DESIGN-db.md 7.4): the cursor window, then rows after `after` in `order_by` order.
+
+    `after` holds the `order_by` values of the previous page's last row, or None
+    for the first page. The tie-break is spelled out, `c1 > v1 OR (c1 = v1 AND
+    c2 > v2) ...`, because Oracle and MSSQL have no row-value comparison. The row
+    limit comes from the dialect: `LIMIT`, `TOP` or `FETCH FIRST`. Each column is
+    ordered by the same expression it is compared with, so the order and the
+    seek always agree.
+    """
+    columns = [source.c[name] for name in tc.chunking.order_by]
+    stmt = _cursor_filtered(source, tc, start, end)
+    if after is not None:
+        terms = []
+        for i, column in enumerate(columns):
+            equal = [_comparable(c, tc) == _value(v, c, tc) for c, v in zip(columns[:i], after, strict=False)]
+            terms.append(sa.and_(*equal, _comparable(column, tc) > _value(after[i], column, tc)))
+        stmt = stmt.where(sa.or_(*terms))
+    return stmt.order_by(*(_comparable(c, tc) for c in columns)).limit(tc.chunking.page_size)
 
 
 def paged_rows(source: sa.FromClause, tc: TableConfig, start: Any = None) -> sa.Select:
@@ -98,7 +138,7 @@ def paged_rows(source: sa.FromClause, tc: TableConfig, start: Any = None) -> sa.
     """
     if tc.cursor is None:
         return snapshot_select(source, tc)
-    return cursor_select(source, tc, start).order_by(None)
+    return _cursor_filtered(source, tc, start, None)
 
 
 def count_select(rows: sa.Select) -> sa.Select:
@@ -116,7 +156,7 @@ def page_select(source: sa.FromClause, rows: sa.Select, tc: TableConfig, offset:
 
     `limit` None is the open-ended last page.
     """
-    stmt = rows.order_by(*(source.c[c] for c in page_order(tc))).offset(offset)
+    stmt = rows.order_by(*(_comparable(source.c[c], tc) for c in page_order(tc))).offset(offset)
     return stmt.limit(limit) if limit is not None else stmt
 
 

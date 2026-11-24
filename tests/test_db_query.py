@@ -8,8 +8,8 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.dialects import mssql, mysql, oracle, postgresql, sqlite
 
-from db_bronze.config import CursorConfig, TableConfig, to_source_time
-from db_bronze.query import cursor_select, literal_sql, page_select, paged_rows, query_source
+from db_bronze.config import ChunkingConfig, CursorConfig, TableConfig, to_source_time
+from db_bronze.query import cursor_select, keyset_select, literal_sql, page_select, paged_rows, query_source
 
 DIALECTS = {
     "sqlite": sqlite.dialect(),
@@ -120,6 +120,63 @@ def test_window_is_half_open():
 )
 def test_bounds_with_an_offset_convert_to_naive_source_time(value, naive_timezone, expected):
     assert to_source_time(datetime.fromisoformat(value), naive_timezone) == expected
+
+
+def keyset_config(order_by=("UpdatedAt", "TransactionId"), page_size=1000, **overrides) -> TableConfig:
+    chunking = ChunkingConfig(strategy="keyset", order_by=tuple(order_by), page_size=page_size)
+    return table_config(primary_key=("TransactionId",), chunking=chunking, **overrides)
+
+
+AFTER = (datetime(2026, 11, 20, 9, 30), 42)
+
+
+def flat(stmt: sa.Select, dialect) -> str:
+    return " ".join(str(stmt.compile(dialect=dialect)).split())
+
+
+@pytest.mark.parametrize(
+    ("dialect", "row_limit"),
+    [
+        ("sqlite", "LIMIT ? OFFSET ?"),
+        ("postgresql", "LIMIT %(param_"),
+        ("mysql", "LIMIT %s"),
+        ("mssql", "SELECT TOP __[POSTCOMPILE_param_"),
+        ("oracle", "FETCH FIRST __[POSTCOMPILE_param_"),
+        ("db2", "FETCH FIRST"),
+    ],
+)
+def test_keyset_page_compiles_offline_with_the_dialects_own_row_limit(dialect, row_limit):
+    d = db2_dialect() if dialect == "db2" else DIALECTS[dialect]
+    sql = flat(keyset_select(transactions(), keyset_config(), START, None, AFTER), d)
+    assert row_limit in sql
+    assert "ORDER BY" in sql and "OFFSET" not in sql.replace("LIMIT ? OFFSET ?", "")
+
+
+@pytest.mark.parametrize("dialect", [*DIALECTS, "db2"])
+def test_keyset_tie_break_is_the_expanded_form_not_a_row_value_comparison(dialect):
+    d = db2_dialect() if dialect == "db2" else DIALECTS[dialect]
+    tc = keyset_config(order_by=("UpdatedAt", "TransactionId", "Branch Code"))
+    sql = flat(keyset_select(transactions(), tc, START, None, (*AFTER, "JHB")), d)
+    assert sql.count("TransactionId") >= 3 and ") > (" not in sql  # no (a, b) > (x, y)
+    assert sql.count(" OR ") == 2
+
+
+def test_mssql_keyset_page_is_the_documented_statement():
+    sql = flat(keyset_select(transactions(), keyset_config(), START, END, AFTER), DIALECTS["mssql"])
+    t = "dbo.[Transactions]"
+    assert sql == (
+        f"SELECT TOP __[POSTCOMPILE_param_1] {t}.[TransactionId], {t}.[UpdatedAt], {t}.[Branch Code] FROM {t} "
+        f"WHERE {t}.[UpdatedAt] >= :param_2 AND {t}.[UpdatedAt] < :param_3 "
+        f"AND ({t}.[UpdatedAt] > :param_4 OR {t}.[UpdatedAt] = :param_5 AND {t}.[TransactionId] > :param_6) "
+        f"ORDER BY {t}.[UpdatedAt], {t}.[TransactionId]"
+    )
+
+
+def test_the_first_keyset_page_has_no_seed():
+    sql = flat(keyset_select(transactions(), keyset_config(), START, END, None), DIALECTS["oracle"])
+    assert " OR " not in sql
+    assert sql.endswith('ORDER BY dbo."Transactions"."UpdatedAt", dbo."Transactions"."TransactionId" '
+                        "FETCH FIRST __[POSTCOMPILE_param_3] ROWS ONLY")
 
 
 PAGE_SYNTAX = {  # each dialect's own row-limit syntax for OFFSET 400 [and 100 rows]

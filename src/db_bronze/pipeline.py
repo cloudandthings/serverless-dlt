@@ -7,6 +7,7 @@ dropped and state is restored from bronze, as in `api_bronze`.
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import os
 from datetime import UTC, datetime
@@ -19,8 +20,9 @@ from dlt.destinations import filesystem
 from .config import ConfigError, RunRequest, SourceConfig, TableConfig
 from .manifest import finalize, new_snapshot_id, write_manifest
 from .plan import make_plan
+from .preflight import preflight, raise_on_findings
 from .query import page_order
-from .source import make_engine, make_resource
+from .source import RunStats, make_engine, make_resource
 
 log = logging.getLogger(__name__)
 
@@ -74,10 +76,70 @@ def check_run_start(cfg: SourceConfig, req: RunRequest, tables: tuple[TableConfi
                 f'table {tc.name} has no cursor, so it is a snapshot table; run it with "mode": "full", '
                 f'give it a cursor to run in {what}, or leave it out with "tables": [...]'
             )
+        if tc.partition and req.mode == "incremental":
+            raise ConfigError(
+                f"table {tc.name}: partition reads interleave batches, so rows do not arrive in cursor order, "
+                'which incremental runs need; run it in "full" or "backfill" mode, or remove "partition"'
+            )
 
 
-def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | None = None) -> dict[str, Any]:
-    """Run one invocation. Raises on any failure (cursor state then stays where it was)."""
+def time_budget(cfg: SourceConfig, req: RunRequest, tc: TableConfig, max_time_s: float | None) -> float | None:
+    """The seconds `tc` may spend extracting this run, or None for no limit (section 7.4).
+
+    Incremental only. The smaller of the caller's budget and `cfg.max_time_s`
+    wins. A ConnectorX stream table is never split-loaded: dropping its stream
+    leaves the query running with the connection open (prototype S1). Validation
+    keeps `max_time_s` away from such tables, so only the caller's budget is
+    skipped here, and that is logged.
+    """
+    limits = [x for x in (max_time_s, cfg.max_time_s) if x is not None]
+    if not limits or req.mode != "incremental":
+        return None
+    if cfg.backend(tc) == "connectorx" and tc.chunking.strategy == "stream":
+        log.warning(
+            json.dumps(
+                {
+                    "event": "time budget skipped",
+                    "table": tc.name,
+                    "reason": "a ConnectorX stream cannot be stopped early without leaving its query running; "
+                    'use "chunking": {"strategy": "keyset", ...} to split-load this table',
+                }
+            ),
+        )
+        return None
+    return min(limits)
+
+
+def validate(cfg: SourceConfig, req: RunRequest) -> dict[str, Any]:
+    """`mode=validate`: the preflight for every table, and a report. Extracts and writes nothing."""
+    tables = cfg.tables_for(req)
+    check_run_start(cfg, req, tables)
+    engine = make_engine(cfg)
+    try:
+        server, reports = preflight(cfg, tables, engine)
+    finally:
+        engine.dispose()
+    return {
+        "pipeline_name": cfg.pipeline_name,
+        "mode": "validate",
+        "ok": not server and not any(r.findings for r in reports),
+        "server_findings": server,
+        "tables": [r.as_dict() for r in reports],
+    }
+
+
+def run_pipeline(
+    cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | None = None, max_time_s: float | None = None
+) -> dict[str, Any]:
+    """Run one invocation. Raises on any failure (cursor state then stays where it was).
+
+    `max_time_s` is the caller's time budget (the handler derives it from
+    Lambda's remaining time); see `time_budget`. `time_limited` in the result
+    says a budget applied to at least one table: callers loop while `is_empty`
+    is false.
+    """
+    if req.mode == "validate":
+        return validate(cfg, req)
     if req.mode == "finalize":
         return finalize(cfg, req)
     tables = cfg.tables_for(req)
@@ -95,8 +157,15 @@ def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | Non
     )
     pipe = pipe.drop()  # every invocation is a cold start: state comes from bronze
     engine = make_engine(cfg)
+    stats = RunStats()
     try:
-        resources = [make_resource(cfg, tc, req, engine, run_started) for tc in tables]
+        server, reports = preflight(cfg, tables, engine)
+        raise_on_findings(server, reports)  # before anything is extracted
+        budgets = {tc.name: time_budget(cfg, req, tc, max_time_s) for tc in tables}
+        resources = [
+            make_resource(cfg, tc, req, engine, run_started, r.table, stats, max_time_s=budgets[tc.name])
+            for tc, r in zip(tables, reports, strict=True)
+        ]
         info = pipe.run(resources, loader_file_format="parquet", schema=bronze_schema(cfg))
     finally:
         engine.dispose()
@@ -118,6 +187,9 @@ def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | Non
         "snapshot_id": snapshot_id,
         "load_ids": load_ids,
         "rows": rows,
+        "backends": {tc.name: cfg.backend(tc) for tc in tables},
+        "null_cursor_rows": {tc.name: stats.null_cursor_rows.get(tc.name, 0) for tc in tables},
         "is_empty": not any(rows.values()),
+        "time_limited": any(b is not None for b in budgets.values()),
         "started_at": run_started.isoformat(),
     }
