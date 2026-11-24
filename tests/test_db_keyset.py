@@ -153,3 +153,34 @@ def test_a_traditional_stream_table_is_split_loaded_by_dlts_time_limit(db, bucke
         assert len(runs) < 30
     assert runs[0]["time_limited"] and runs[0]["rows"] == {"transactions": 12}  # one batch, then the limit
     assert ids(landed(bucket)) == expected
+
+
+class LambdaContext:
+    def __init__(self, remaining_s: float) -> None:
+        self.remaining_s = remaining_s
+
+    def get_remaining_time_in_millis(self) -> int:
+        return int(self.remaining_s * 1000)
+
+
+STREAM = {"chunking": {"strategy": "stream"}}
+
+
+@pytest.mark.parametrize("backend", ["connectorx"])
+def test_a_connectorx_stream_table_is_not_time_limited_under_the_lambda_budget_and_the_log_says_so(
+    db, bucket, invoke, caplog
+):
+    expected = insert_with_ties(db, 1, 53)
+    with caplog.at_level("WARNING", logger="db_bronze"):
+        result = invoke(context=LambdaContext(900), **STREAM)
+    assert not result["time_limited"]
+    assert ids(landed(bucket)) == expected
+    [skipped] = [r.getMessage() for r in caplog.records if "time budget skipped" in r.getMessage()]
+    assert '"table": "transactions"' in skipped and "keyset" in skipped
+
+
+@pytest.mark.parametrize("table", [STREAM | {"backend": "pyarrow"}, {}], ids=["pyarrow-stream", "keyset"])
+def test_other_tables_get_the_budget_derived_from_lambdas_remaining_time(db, bucket, invoke, table):
+    insert_with_ties(db, 1, 20)
+    assert invoke(context=LambdaContext(900), **table)["time_limited"]
+    assert not invoke(**table)["time_limited"]  # no context, no configured max_time_s: no budget
