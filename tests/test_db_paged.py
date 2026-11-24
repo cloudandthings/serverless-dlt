@@ -172,3 +172,31 @@ def test_page_orders_by_keyset_order_by_when_set(db, bucket, config, invoke):
     db.insert(*[(i, f"2026-11-20 08:00:{60 - i:02d}", "JHB", i) for i in range(1, 11)])  # cursor order != key order
     result = invoke(**page_event({"table": "transactions", "offset": 0, "limit": 3}))
     assert ids(load_rows(bucket, result["load_ids"])) == [8, 9, 10]
+
+
+PAGE = page_event({"table": "transactions", "offset": 0, "limit": 2})
+
+
+@pytest.mark.parametrize(
+    ("event", "message"),
+    [
+        ({"mode": "plan"}, r'needs "plan" in'),
+        ({"mode": "plan", "plan": "snapshot"}, r'needs "page_size"'),
+        ({"mode": "full", "page_size": 3}, r"only valid with mode=plan"),
+        ({k: v for k, v in PAGE.items() if k != "snapshot_id"}, r"missing \['snapshot_id'\]"),
+        (PAGE | {"tables": ["transactions", "branches"]}, r"exactly one table"),
+        (PAGE | {"page": {"offset": -1, "limit": 2}}, r"page.offset"),
+        (PAGE | {"page": {"offset": 0, "limit": 0}}, r"page.limit"),
+        (PAGE | {"page": {"offset": 0, "size": 2}}, r"unknown keys \['size'\]"),
+        (PAGE | {"partition_date": "24/11/2026"}, r"partition_date"),
+        (PAGE | {"snapshot_id": "../evil"}, r"snapshot_id"),
+        (PAGE | {"mode": "incremental"}, r"only valid with mode=full"),
+        ({"mode": "finalize", "snapshot_id": "s1", "load_ids": ["1.2"]}, r'needs "table"'),
+        ({"mode": "finalize", "table": "transactions", "snapshot_id": "s1", "load_ids": []}, r'needs "load_ids"'),
+        ({"mode": "finalize", "table": "nope", "snapshot_id": "s1", "load_ids": ["1.2"]}, r"unknown table 'nope'"),
+    ],
+)
+def test_bad_orchestration_event_fails_with_config_error(bucket, invoke, event, message):
+    with pytest.raises(ConfigError, match=message):
+        invoke(**event)
+    assert not any(bucket.iterdir())
