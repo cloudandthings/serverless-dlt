@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 # backend is never switched silently. Postgres 11 and MySQL 8.0 are the oldest series
 # the whole integration suite has passed on (11.16, 8.0.46; DESIGN-db.md section 11).
 MIN_SERVER_VERSION: dict[str, tuple[int, ...] | None] = {
-    "mssql": None,
+    "mssql": (16,),
     "postgres": (11,),
     "mysql": (8, 0),
     "oracle": None,
