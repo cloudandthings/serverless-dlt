@@ -131,8 +131,9 @@ class SourceConfig:
             if backend not in BACKENDS:
                 raise ConfigError(f"table {t.name}: backend {backend!r} not in {BACKENDS}")
 
-    def backend(self, table: TableConfig) -> str | None:
-        return table.backend or self.defaults.backend
+    def backend(self, table: TableConfig) -> str:
+        """The table's backend, resolved from the config alone (D3): table, then defaults, then the dialect."""
+        return table.backend or self.defaults.backend or default_backend(self.connection.dialect)
 
     def batch_size(self, table: TableConfig) -> int:
         return table.batch_size or self.defaults.batch_size
