@@ -12,6 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from db_bronze import ConfigError
 from db_bronze.handler import handler
 
 DDL = """
@@ -139,3 +140,28 @@ def test_column_names_land_exactly_as_in_the_source(db, bucket, invoke, caplog):
     [f] = files(bucket)
     assert pq.read_schema(f).names == ["TransactionId", "UpdatedAt", "Branch Code", "amountCents", "_extracted_at"]
     assert "warn_unsafe_layout_separators" not in caplog.text
+
+
+@pytest.mark.parametrize("name", ["Transactions", "core/transactions", "1tx", "tx-raw"])
+def test_table_names_must_be_lowercase_identifiers(invoke, name):
+    with pytest.raises(ConfigError, match="must match"):
+        invoke(name=name)
+
+
+def test_naive_source_timestamp_lands_naive_and_unchanged(db, bucket, invoke):
+    db.insert((1, "2026-11-20 08:00:00", "JHB", 100))
+    invoke()
+    [f] = files(bucket)
+    assert pq.read_schema(f).field("UpdatedAt").type == pa.timestamp("us")
+    assert [r["UpdatedAt"] for r in landed(bucket)] == [datetime(2026, 11, 20, 8, 0)]
+
+
+def test_extracted_at_is_utc_and_one_value_per_run(db, bucket, invoke):
+    db.insert(*[(i, f"2026-11-20 08:00:{i:02}", "JHB", i) for i in range(1, 6)])
+    before = datetime.now(UTC)
+    invoke(batch_size=2)
+    after = datetime.now(UTC)
+    for f in files(bucket):
+        assert pq.read_schema(f).field("_extracted_at").type == pa.timestamp("us", tz="UTC")
+    [extracted_at] = {r["_extracted_at"] for r in landed(bucket)}
+    assert before <= extracted_at <= after
