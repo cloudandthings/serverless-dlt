@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 from .config import RunRequest, SourceConfig, TableConfig, to_source_time
 from .extract import column_specs, naive_timestamp_columns, read_connectorx, read_pyarrow, with_extracted_at
-from .query import cursor_select, probe_columns, query_source, snapshot_select
+from .query import cursor_select, keyset_select, probe_columns, query_source, snapshot_select
 from .urls import connectorx_url, sqlalchemy_url
 
 log = logging.getLogger(__name__)
@@ -113,6 +113,22 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, req: RunRequest, engine: s
             on_cursor_value_missing="include" if tc.cursor.include_null_cursor else "raise",
         ),
     ):
-        yield from extract(cursor_select(table, tc, cursor.start_value, cursor.end_value))
+        if tc.chunking.strategy == "keyset":
+            yield from keyset_pages(cursor.start_value, cursor.end_value)
+        else:
+            yield from extract(cursor_select(table, tc, cursor.start_value, cursor.end_value))
+
+    def keyset_pages(start, end):
+        """Page after page, each seeded by the last row of the one before; a short page is the last (7.4)."""
+        after = None
+        while True:
+            count, last = 0, None
+            for batch in extract(keyset_select(table, tc, start, end, after)):
+                count += batch.num_rows
+                last = batch if batch.num_rows else last
+                yield batch
+            if count < tc.chunking.page_size:
+                return
+            after = tuple(last.column(name)[last.num_rows - 1].as_py() for name in tc.chunking.order_by)
 
     return rows
