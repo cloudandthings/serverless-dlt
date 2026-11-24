@@ -111,3 +111,4 @@ def test_no_null_cursor_count_when_nulls_are_included(invoke):
     cursor = {"column": "UpdatedAt", "type": "timestamp", "initial_value": "2026-01-01", "include_null_cursor": True}
     report = invoke({"mode": "validate"}, cursor=cursor, backend="pyarrow")
     assert report["tables"][0]["null_cursor_count"] is None
+

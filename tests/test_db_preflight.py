@@ -144,3 +144,22 @@ def test_a_server_below_the_minimum_is_a_finding():
 def test_no_minimum_means_no_check():
     assert server_version_finding("postgres", (1,), {"postgres": None}) is None
     assert server_version_finding("postgres", None, {"postgres": (13,)}) is None
+
+
+def test_a_query_tables_columns_are_not_checked_their_types_are_not_reflected(tmp_path):
+    # A server dialect's rules over a SQLite engine: a query's result columns carry no reflected type,
+    # which must not read as "a type SQLAlchemy does not recognise".
+    from db_bronze.config import SourceConfig
+    from db_bronze.preflight import preflight
+
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 's.sqlite'}")
+    with engine.begin() as conn:
+        conn.exec_driver_sql("CREATE TABLE t (id INTEGER PRIMARY KEY, at DATETIME, label TEXT)")
+    cfg = SourceConfig.from_dict({
+        "pipeline_name": "p", "dataset_name": "p", "bucket_url": "file:///b",
+        "connection": {"dialect": "postgres", "host": "h", "database": "d"},
+        "tables": [{"name": "q", "query": "SELECT id, at, label FROM t", "backend": "connectorx",
+                    "cursor": {"column": "at", "type": "timestamp", "initial_value": "2026-01-01"}}],
+    })
+    _, [report] = preflight(cfg, cfg.tables, engine)
+    assert report.findings == []

@@ -9,16 +9,32 @@ is not available.
 Each test gets a fresh database on its engine, dropped afterwards, and runs the
 handler against it into a `file://` bucket, the same seam as the SQLite suite.
 Later engines join by adding a service to compose.yaml and an `Engine` below.
+
+Image mode: with `DB_BRONZE_IT_IMAGE=<tag>` (`mise run test:integration --image`)
+the same tests invoke the handler inside that built image, through the Lambda
+Runtime Interface Emulator, instead of in-process. The container joins the
+compose network and reaches each engine by its service name; the buckets live
+in a folder mounted at the same path inside the container. A failed invocation
+raises an exception named after the Lambda `errorType`, so `fails()` checks
+both modes alike. The session reports the peak memory of the run (spike S7).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
+import resource
+import socket
 import subprocess
+import sys
+import time
+import urllib.request
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -27,6 +43,10 @@ import sqlalchemy as sa
 
 COMPOSE_FILE = Path(__file__).with_name("compose.yaml")
 PASSWORD = "bronze-it"
+ENGINES_STARTED = False  # an integration test ran: report peak memory at the end
+IMAGE = os.environ.get("DB_BRONZE_IT_IMAGE")  # image mode when set: run the handler inside this image
+# Each engine's port inside the compose network, where Engine.container_port is not set.
+SERVER_PORTS = {"postgres": 5432, "mysql": 3306, "mssql": 1433, "oracle": 1521, "db2": 50000}
 
 
 @dataclass(frozen=True)
@@ -39,6 +59,7 @@ class Engine:
     admin_user: str
     admin_database: str
     sqlalchemy_driver: str
+    container_port: int | None = None  # the port inside the compose network; None: SERVER_PORTS[dialect]
 
     def url(self, database: str) -> sa.URL:
         return sa.URL.create(
@@ -50,12 +71,12 @@ class Engine:
             database=database,
         )
 
-    def connection(self, database: str) -> dict:
-        """The config's `connection` block for `database`."""
+    def connection(self, database: str, *, in_network: bool = False) -> dict:
+        """The config's `connection` block for `database`, from the host or from inside the compose network."""
         return {
             "dialect": self.dialect,
-            "host": "127.0.0.1",
-            "port": self.port,
+            "host": self.service if in_network else "127.0.0.1",
+            "port": (self.container_port or SERVER_PORTS[self.dialect]) if in_network else self.port,
             "database": database,
             "username": self.admin_user,
             "password": PASSWORD,
@@ -83,8 +104,10 @@ def _docker_available() -> bool:
 @pytest.fixture(scope="session")
 def compose() -> None:
     """The engines, up and healthy. Skips the integration suite when Docker is not available."""
+    global ENGINES_STARTED
     if not _docker_available():
         pytest.skip("integration tests need Docker")
+    ENGINES_STARTED = True
     subprocess.run(
         ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "--wait", *(e.service for e in ENGINES.values())],
         check=True,
@@ -123,20 +146,85 @@ class SourceDB:
         with self.sa.begin() as conn:
             conn.execute(table.insert(), rows)
 
+    def insert_into(self, name: str, rows: list[dict]) -> None:
+        """Insert into a table by name, with bound values (portable), e.g. after DDL the metadata does not know."""
+        table = sa.table(name, *(sa.column(c) for c in rows[0]))
+        with self.sa.begin() as conn:
+            conn.execute(table.insert(), rows)
+
     def execute(self, *statements: str) -> None:
         with self.sa.begin() as conn:
             for statement in statements:
                 conn.exec_driver_sql(statement)
 
+    def transactions(self, *rows: tuple, nullable_cursor: bool = False) -> sa.Table:
+        """`Transactions` as in the SQLite suite (created on first use), plus `rows` of (id, UpdatedAt, branch, cents).
+
+        Mixed-case and spaced names on purpose: they must land exactly as in the source.
+        """
+        if "Transactions" not in self.metadata.tables:
+            self.create(
+                lambda metadata: sa.Table(
+                    "Transactions",
+                    metadata,
+                    sa.Column("TransactionId", sa.Integer, primary_key=True, autoincrement=False),
+                    sa.Column("UpdatedAt", sa.DateTime, nullable=nullable_cursor),
+                    sa.Column("Branch Code", sa.String(10)),
+                    sa.Column("amountCents", sa.BigInteger),
+                )
+            )
+        table = self.metadata.tables["Transactions"]
+        if rows:
+            self.insert(table, [
+                {"TransactionId": i, "UpdatedAt": ts and datetime.fromisoformat(ts), "Branch Code": b, "amountCents": a}
+                for i, ts, b, a in rows
+            ])
+        return table
+
+    def quote(self, name: str) -> str:
+        """`name` as an identifier in this engine's SQL, for `where` and `query` in configs."""
+        return self.sa.dialect.identifier_preparer.quote(name)
+
     def files(self, table: str) -> list[Path]:
         root = self.bucket / "it" / table
         return sorted(root.rglob("*.parquet")) if root.exists() else []
 
-    def landed(self, table: str) -> list[dict]:
-        return [r for f in self.files(table) for r in pq.read_table(f).to_pylist()]
+    def landed(self, table: str, mode: str | None = None, load_ids: list[str] | None = None) -> list[dict]:
+        """Rows landed for `table`, optionally only under `mode=` or only from the given loads."""
+        files = [
+            f for f in self.files(table)
+            if (mode is None or f"/mode={mode}/" in f.as_posix())
+            and (load_ids is None or f.name.rsplit(".", 2)[0] in load_ids)
+        ]
+        return [r for f in files for r in pq.read_table(f).to_pylist()]
 
-    def landed_ids(self, table: str, column: str) -> list:
-        return sorted(r[column] for r in self.landed(table))
+    def landed_ids(self, table: str, column: str, **only) -> list:
+        return sorted(r[column] for r in self.landed(table, **only))
+
+    def partitions(self, table: str) -> set[str]:
+        return {f.parent.relative_to(self.bucket / "it" / table).as_posix() for f in self.files(table)}
+
+    def manifests(self) -> dict[str, dict]:
+        root = self.bucket / "it" / "_manifests"
+        return {f.relative_to(root).as_posix(): json.loads(f.read_text()) for f in sorted(root.rglob("*.json"))}
+
+    def nothing_landed(self) -> bool:
+        return not any(p.is_file() for p in self.bucket.rglob("*"))
+
+
+def today_partition(mode: str) -> str:
+    today = datetime.now(UTC)
+    return f"mode={mode}/year={today:%Y}/month={today:%m}/day={today:%d}"
+
+
+@contextmanager
+def fails(error_type: str, match: str | None = None) -> Iterator[pytest.ExceptionInfo]:
+    """The invocation fails with Lambda `errorType` `error_type` (the raised class name), its message matching."""
+    with pytest.raises(BaseException) as failure:
+        yield failure
+    assert type(failure.value).__name__ == error_type, f"{type(failure.value).__name__}: {failure.value}"
+    if match is not None:
+        assert re.search(match, str(failure.value)), str(failure.value)
 
 
 @pytest.fixture(params=list(ENGINES))
@@ -168,9 +256,123 @@ def backend(request) -> str:
     return request.param
 
 
+class LambdaImage:
+    """The db_bronze image under the Runtime Interface Emulator, on the compose network, for the whole session."""
+
+    def __init__(self, image: str) -> None:
+        self.image = image
+        # inside the project, not $TMPDIR: Docker Desktop does not share macOS /var/folders by default
+        self.shared = Path(__file__).parents[2] / ".smoke" / f"it-{uuid.uuid4().hex[:8]}"
+        self.shared.mkdir(parents=True)
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            self.port = s.getsockname()[1]
+        service = next(iter(ENGINES.values())).service
+        [container] = _compose("ps", "-q", service).split()
+        network = subprocess.run(
+            ["docker", "inspect", "-f", "{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}", container],
+            check=True, capture_output=True, text=True,
+        ).stdout.split()[0]
+        self.container = subprocess.run(
+            ["docker", "run", "-d", "--platform", "linux/amd64", "--network", network,
+             "-p", f"127.0.0.1:{self.port}:8080", "-v", f"{self.shared}:{self.shared}",
+             "-e", "AWS_LAMBDA_FUNCTION_TIMEOUT=900",
+             # the emulator is a Go binary; under QEMU Go's async preemption intermittently crashes it
+             "-e", "GODEBUG=asyncpreemptoff=1", image],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+    def invoke(self, event: dict) -> dict:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/2015-03-31/functions/function/invocations",
+            data=json.dumps(event).encode(),
+            method="POST",
+        )
+        for attempt in range(240):  # the emulator takes a moment to listen, longer under emulation
+            try:
+                with urllib.request.urlopen(request, timeout=900) as response:
+                    result = json.loads(response.read() or b"null")
+                break
+            except OSError:
+                if attempt == 239:
+                    raise
+                time.sleep(0.5)
+        if isinstance(result, dict) and "errorType" in result and "errorMessage" in result:
+            raise type(result["errorType"], (Exception,), {})(result["errorMessage"])
+        return result
+
+    def peak_memory(self) -> int | None:
+        """The container's peak memory (cgroup v2 memory.peak, or v1), in bytes."""
+        for path in ("/sys/fs/cgroup/memory.peak", "/sys/fs/cgroup/memory/memory.max_usage_in_bytes"):
+            out = subprocess.run(["docker", "exec", self.container, "cat", path], capture_output=True, text=True)
+            if out.returncode == 0 and out.stdout.strip().isdigit():
+                return int(out.stdout.strip())
+        return None
+
+    def stop(self) -> None:
+        subprocess.run(["docker", "rm", "-f", self.container], capture_output=True)
+
+
+def _compose(*args: str) -> str:
+    return subprocess.run(
+        ["docker", "compose", "-f", str(COMPOSE_FILE), *args], check=True, capture_output=True, text=True
+    ).stdout
+
+
+PEAK_MEMORY: dict[str, int] = {}  # reported at the end of the session (spike S7)
+
+
+@pytest.fixture(scope="session")
+def lambda_image(compose) -> Iterator[LambdaImage]:
+    image = LambdaImage(IMAGE)
+    try:
+        yield image
+    finally:
+        if (peak := image.peak_memory()) is not None:
+            PEAK_MEMORY[f"image {IMAGE} (container peak)"] = peak
+        image.stop()
+
+
 @pytest.fixture
-def run(source: SourceDB, bucket: Path, tmp_path: Path, pipelines_dir: str, monkeypatch):
-    """Invoke the handler with an inline config of the given tables against `source`."""
+def bucket(request, tmp_path: Path) -> Path:
+    """In image mode the bucket lives in the folder shared with the container, at the same path."""
+    root = request.getfixturevalue("lambda_image").shared / uuid.uuid4().hex[:12] if IMAGE else tmp_path
+    path = root / "bronze"
+    path.mkdir(parents=True)
+    return path
+
+
+def pytest_terminal_summary(terminalreporter) -> None:
+    if not ENGINES_STARTED:
+        return
+    # macOS reports ru_maxrss in bytes, Linux in KiB
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * (1 if sys.platform == "darwin" else 1024)
+    PEAK_MEMORY.setdefault("host pytest process (peak RSS)", rss)
+    terminalreporter.section("db_bronze peak memory (spike S7)")
+    for what, size in PEAK_MEMORY.items():
+        terminalreporter.write_line(f"{what}: {size / 2**20:.0f} MiB")
+
+
+@pytest.fixture
+def run(request, source: SourceDB, bucket: Path, tmp_path: Path, pipelines_dir: str, monkeypatch):
+    """Invoke the handler with a config of the given tables against `source`: in-process, or in the image."""
+    if IMAGE:
+        image = request.getfixturevalue("lambda_image")
+
+        def invoke_image(event: dict, *tables: dict, connection: dict | None = None, context=None, **settings):
+            # The emulator always passes a context with the function timeout's remaining time.
+            cfg = {
+                "pipeline_name": "it",
+                "dataset_name": "it",
+                "bucket_url": bucket.as_uri(),
+                "connection": source.engine.connection(source.database, in_network=True) | (connection or {}),
+                "tables": list(tables),
+                **settings,
+            }
+            return image.invoke({**event, "config": cfg})
+
+        return invoke_image
+
     from db_bronze.handler import handler
 
     monkeypatch.setenv("DLT_DATA_DIR", pipelines_dir)
@@ -178,7 +380,8 @@ def run(source: SourceDB, bucket: Path, tmp_path: Path, pipelines_dir: str, monk
     config_dir.mkdir()
     monkeypatch.setenv("CONFIG_URI", config_dir.as_uri())
 
-    def invoke(event: dict, *tables: dict, connection: dict | None = None, **settings) -> dict:
+    def invoke(event: dict, *tables: dict, connection: dict | None = None, context=None, **settings) -> dict:
+        """`context`: a Lambda context, for the time budget it derives; `settings`: top-level config keys."""
         cfg = {
             "pipeline_name": "it",
             "dataset_name": "it",
@@ -188,6 +391,6 @@ def run(source: SourceDB, bucket: Path, tmp_path: Path, pipelines_dir: str, monk
             **settings,
         }
         (config_dir / f"{event['source_id']}.json").write_text(json.dumps(cfg))
-        return handler(event, None)
+        return handler(event, context)
 
     return invoke

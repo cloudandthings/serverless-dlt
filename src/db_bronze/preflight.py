@@ -233,7 +233,8 @@ def preflight(
         backend = cfg.backend(tc)
         table = reflect(engine, tc)
         wanted = set(tc.columns) if tc.columns else None
-        columns = [(c.name, c.type) for c in table.columns if wanted is None or c.name in wanted]
+        # A query's result columns are not reflected: their types are unknown (None), not unrecognised.
+        columns = [(c.name, None if tc.query else c.type) for c in table.columns if wanted is None or c.name in wanted]
         report = TableReport(tc.name, backend, column_findings(dialect, backend, columns), table=table)
         report.null_cursor_count = count_null_cursor(engine, table, tc)
         log.info("preflight %s", json.dumps(report.as_dict()))
