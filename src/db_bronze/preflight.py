@@ -6,14 +6,18 @@ fake metadata. `preflight()` applies them to a live engine.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import sqlalchemy as sa
 from sqlalchemy.dialects import oracle
 from sqlalchemy.dialects import postgresql as pg
 
+from .config import SourceConfig, TableConfig
 from .extract import EXTRACTED_AT
+from .source import reflect
 
 log = logging.getLogger(__name__)
 
@@ -98,7 +102,10 @@ def server_version_finding(
     if minimum is None or version is None or tuple(version) >= minimum:
         return None
     have, need = ".".join(map(str, version)), ".".join(map(str, minimum))
-    return f"{dialect} server {have} is below the minimum {need}; upgrade the server (the backend is never switched silently)"
+    return (
+        f"{dialect} server {have} is below the minimum {need}; "
+        "upgrade the server (the backend is never switched silently)"
+    )
 
 
 def column_findings(dialect: str, backend: str, columns: list[tuple[str, sa.types.TypeEngine | None]]) -> list[str]:
@@ -122,3 +129,62 @@ def column_findings(dialect: str, backend: str, columns: list[tuple[str, sa.type
                 findings.append(f"column {name}: type {label} is not supported by ConnectorX on {dialect}")
                 break
     return findings
+
+
+@dataclass
+class TableReport:
+    """What preflight learned about one table."""
+
+    name: str
+    backend: str
+    findings: list[str] = field(default_factory=list)
+    null_cursor_count: int | None = None  # None: not applicable (no cursor, or NULL cursors are included)
+    table: sa.FromClause | None = field(default=None, repr=False)  # the reflection, reused by the run
+
+    def as_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "backend": self.backend,
+            "findings": self.findings,
+            "null_cursor_count": self.null_cursor_count,
+        }
+
+
+def count_null_cursor(engine: sa.Engine, table: sa.FromClause, tc: TableConfig) -> int | None:
+    """Rows the cursor filter will never see (NULL cursor), or None when they are included or there is no cursor."""
+    if tc.cursor is None or tc.cursor.include_null_cursor:
+        return None
+    stmt = sa.select(sa.func.count()).select_from(table).where(table.c[tc.cursor.column].is_(None))
+    if tc.where:
+        stmt = stmt.where(sa.text(tc.where))
+    with engine.connect() as conn:
+        return int(conn.execute(stmt).scalar_one())
+
+
+def preflight(
+    cfg: SourceConfig, tables: tuple[TableConfig, ...], engine: sa.Engine
+) -> tuple[list[str], list[TableReport]]:
+    """Reflect each table and apply the rules. Returns (server findings, one report per table). Never extracts."""
+    dialect = cfg.connection.dialect
+    with engine.connect():  # the dialect learns the server version on first connect
+        version = engine.dialect.server_version_info
+    server = server_version_finding(dialect, version)
+    reports = []
+    for tc in tables:
+        backend = cfg.backend(tc)
+        table = reflect(engine, tc)
+        wanted = set(tc.columns) if tc.columns else None
+        columns = [(c.name, c.type) for c in table.columns if wanted is None or c.name in wanted]
+        report = TableReport(tc.name, backend, column_findings(dialect, backend, columns), table=table)
+        report.null_cursor_count = count_null_cursor(engine, table, tc)
+        log.info("preflight %s", json.dumps(report.as_dict()))
+        reports.append(report)
+    return ([server] if server else []), reports
+
+
+def raise_on_findings(server: list[str], reports: list[TableReport]) -> None:
+    findings = {r.name: r.findings for r in reports if r.findings}
+    if server:  # the server is the same for every table
+        findings = {r.name: server + r.findings for r in reports}
+    if findings:
+        raise PreflightError(findings)

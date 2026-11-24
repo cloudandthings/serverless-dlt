@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from . import secrets
 from .extract import EXTRACTED_AT
 
-MODES = ("incremental", "full", "backfill")
+MODES = ("incremental", "full", "backfill", "validate")
 BACKENDS = ("connectorx", "pyarrow", "sqlalchemy")
 # Engines ConnectorX reads (section 3.1); these default to it (D3, section 5.3). Db2 is not supported.
 CONNECTORX_DIALECTS = ("mssql", "postgres", "mysql", "oracle", "sqlite")

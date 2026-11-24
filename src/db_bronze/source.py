@@ -55,13 +55,20 @@ def window(cfg: SourceConfig, tc: TableConfig, req: RunRequest, run_started: dat
     return initial, max(initial, top + 1) if top is not None else initial
 
 
-def make_resource(cfg: SourceConfig, tc: TableConfig, req: RunRequest, engine: sa.Engine, run_started: datetime):
+def make_resource(
+    cfg: SourceConfig,
+    tc: TableConfig,
+    req: RunRequest,
+    engine: sa.Engine,
+    run_started: datetime,
+    table: sa.FromClause | None = None,  # the reflection preflight already did
+):
     backend = cfg.backend(tc)
     if backend == "sqlalchemy":  # stopgap until the sqlalchemy backend lands
         raise NotImplementedError(
             f'table {tc.name}: backend "sqlalchemy" is not implemented yet; set "backend": "pyarrow"'
         )
-    table = reflect(engine, tc)
+    table = table if table is not None else reflect(engine, tc)
     specs = column_specs(table)
     log.info("table %s", json.dumps({"table": tc.name, "backend": backend}))
     batch_size = cfg.batch_size(tc)

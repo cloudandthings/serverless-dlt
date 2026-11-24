@@ -17,6 +17,7 @@ from dlt.destinations import filesystem
 
 from .config import ConfigError, RunRequest, SourceConfig, TableConfig
 from .manifest import new_snapshot_id, write_manifest
+from .preflight import preflight, raise_on_findings
 from .source import make_engine, make_resource
 
 log = logging.getLogger(__name__)
@@ -58,15 +59,35 @@ def check_run_start(cfg: SourceConfig, req: RunRequest, tables: tuple[TableConfi
             'for what adding it involves, or use {"type": "password"}'
         )
     for tc in tables:
-        if tc.cursor is None and req.mode != "full":
+        if tc.cursor is None and req.mode not in ("full", "validate"):
             raise ConfigError(
                 f'table {tc.name} has no cursor, so it is a snapshot table; run it with "mode": "full", '
                 f'give it a cursor to run in {req.mode!r} mode, or leave it out with "tables": [...]'
             )
 
 
+def validate(cfg: SourceConfig, req: RunRequest) -> dict[str, Any]:
+    """`mode=validate`: the preflight for every table, and a report. Extracts and writes nothing."""
+    tables = cfg.tables_for(req)
+    check_run_start(cfg, req, tables)
+    engine = make_engine(cfg)
+    try:
+        server, reports = preflight(cfg, tables, engine)
+    finally:
+        engine.dispose()
+    return {
+        "pipeline_name": cfg.pipeline_name,
+        "mode": "validate",
+        "ok": not server and not any(r.findings for r in reports),
+        "server_findings": server,
+        "tables": [r.as_dict() for r in reports],
+    }
+
+
 def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | None = None) -> dict[str, Any]:
     """Run one invocation. Raises on any failure (cursor state then stays where it was)."""
+    if req.mode == "validate":
+        return validate(cfg, req)
     tables = cfg.tables_for(req)
     check_run_start(cfg, req, tables)
     os.environ["DATA_WRITER__COMPRESSION"] = cfg.parquet_compression
@@ -81,7 +102,11 @@ def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | Non
     pipe = pipe.drop()  # every invocation is a cold start: state comes from bronze
     engine = make_engine(cfg)
     try:
-        resources = [make_resource(cfg, tc, req, engine, run_started) for tc in tables]
+        server, reports = preflight(cfg, tables, engine)
+        raise_on_findings(server, reports)  # before anything is extracted
+        resources = [
+            make_resource(cfg, tc, req, engine, run_started, r.table) for tc, r in zip(tables, reports, strict=True)
+        ]
         info = pipe.run(resources, loader_file_format="parquet", schema=bronze_schema(cfg))
     finally:
         engine.dispose()

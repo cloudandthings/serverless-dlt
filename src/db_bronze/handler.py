@@ -6,6 +6,7 @@ Event:
                                             writes _manifests/<name>/<snapshot_id>.json on success
     {"source_id": ..., "mode": "backfill", "window_start": ..., "window_end": ...}
                                             [start, end), ISO-8601 or integer to match the cursor
+    {"source_id": ..., "mode": "validate"}  preflight only: per-table report, nothing extracted or written
     "tables": [...]                         on any event: run only these tables
     {"config": {...}}                       inline config (tests, ad hoc)
 
