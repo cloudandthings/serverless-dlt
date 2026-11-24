@@ -58,6 +58,7 @@ class GEOMETRY(_ClrType):
 
 MSSQL_CLR_TYPES = {"hierarchyid": HIERARCHYID, "geography": GEOGRAPHY, "geometry": GEOMETRY}
 SQL_SS_UDT = -151  # the ODBC type of a CLR column, which pyodbc does not read without a converter
+DB2_DIALECT = "ibm_db_sa"  # the name ibm_db_sa's dialect reports for itself (config and URL say "db2")
 
 
 def register_mssql_types(dialect: sa.Dialect) -> None:
@@ -65,8 +66,22 @@ def register_mssql_types(dialect: sa.Dialect) -> None:
     dialect.ischema_names = {**dialect.ischema_names, **MSSQL_CLR_TYPES}
 
 
+def _db2_current_schema(connection: sa.Connection) -> str:
+    """Db2's CURRENT SCHEMA, as SQLAlchemy spells names (lower case when case-insensitive)."""
+    schema = connection.exec_driver_sql("VALUES CURRENT SCHEMA").scalar_one()
+    return connection.dialect.normalize_name(schema.strip())
+
+
 def prepare_engine(engine: sa.Engine) -> sa.Engine:
-    """Dialect-specific setup of the engine used for reflection and the traditional backends."""
+    """Dialect-specific setup of the engine used for reflection and the traditional backends.
+
+    Db2: ibm_db_sa takes the default schema (where a table without `schema` is
+    reflected) from the connecting user, ignoring the `CurrentSchema` driver
+    option, so reflection would look in the wrong schema while queries run in
+    the right one (integration, Db2). The default schema is CURRENT SCHEMA instead.
+    """
+    if engine.dialect.name == DB2_DIALECT:
+        engine.dialect._get_default_schema_name = _db2_current_schema
     if engine.dialect.name == "mssql":
         register_mssql_types(engine.dialect)
         if engine.dialect.driver == "pyodbc":

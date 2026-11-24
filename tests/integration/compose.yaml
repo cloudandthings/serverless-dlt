@@ -82,8 +82,12 @@ services:
       DBNAME: BRONZE
       ARCHIVE_LOGS: "false"
       AUTOCONFIG: "false"
-      PERSISTENT_HOME: "false"
     ports: ["127.0.0.1:${DB_BRONZE_IT_DB2_PORT:-55000}:50000"]
+    # The image's setup runs `su - db2inst1 -c "db2start"` and so on, relying on a login shell to read
+    # the instance profile. Under Rosetta without binfmt's preserve-argv0 flag (colima --vz-rosetta)
+    # su's "-bash" loses its dash: no login shell, no profile, "db2start: command not found", and no
+    # database. su reads /etc/environment (pam_env), so BASH_ENV makes every such shell read the profile.
+    volumes: ["./db2-environment:/etc/environment:ro"]
     healthcheck:
       test: ["CMD-SHELL", "su - db2inst1 -c 'db2 connect to BRONZE' >/dev/null 2>&1"]
       interval: 10s

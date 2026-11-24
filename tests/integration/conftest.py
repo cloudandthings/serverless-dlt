@@ -58,6 +58,7 @@ import sqlalchemy as sa
 # Before any Oracle connection: with ORACLE_CLIENT_LIB_DIR set (inside the image), the handler
 # module puts oracledb into thick mode, process-wide, as a Lambda cold start does (D10).
 import db_bronze.handler  # noqa: F401
+from db_bronze.extract import prepare_engine
 
 COMPOSE_FILE = Path(__file__).with_name("compose.yaml")
 PASSWORD = "bronze-it"
@@ -240,7 +241,7 @@ class Db2Engine(Engine):
         return super().url(self.admin_database).update_query_dict({"CurrentSchema": database.upper()})
 
     def admin(self) -> sa.Engine:
-        return sa.create_engine(super().url(self.admin_database), isolation_level="AUTOCOMMIT")
+        return sa.create_engine(super().url(self.admin_database))  # ibm_db_sa has no AUTOCOMMIT level
 
     def connection(self, database: str, *, in_network: bool = IN_NETWORK) -> dict:
         return super().connection(self.admin_database, in_network=in_network) | {
@@ -248,20 +249,26 @@ class Db2Engine(Engine):
         }
 
     def create_database(self, admin: sa.Engine, database: str) -> None:
-        with admin.connect() as conn:
+        with admin.begin() as conn:
             conn.exec_driver_sql(f"CREATE SCHEMA {database}")
 
     def drop_database(self, admin: sa.Engine, database: str) -> None:
-        """Every object in the schema, then the schema (SYSPROC.ADMIN_DROP_SCHEMA, through ibm_db's callproc)."""
-        raw = admin.raw_connection()
-        try:
-            cursor = raw.cursor()
-            cursor.callproc("SYSPROC.ADMIN_DROP_SCHEMA", (database.upper(), None, "ERRORSCHEMA", "ERRORTABLE"))
-            cursor.close()
-            raw.commit()
-        finally:
-            raw.close()
+        """Every routine, view and table in the schema, then the schema.
 
+        Not SYSPROC.ADMIN_DROP_SCHEMA: it runs fenced, and the Community image's
+        fenced user cannot read the instance directory under Rosetta (SQL1646N).
+        """
+        schema = database.upper()
+        with admin.begin() as conn:
+            objects = conn.exec_driver_sql(
+                "SELECT 'SPECIFIC FUNCTION', specificname FROM SYSCAT.ROUTINES WHERE routineschema = ? "
+                "UNION ALL SELECT CASE type WHEN 'V' THEN 'VIEW' ELSE 'TABLE' END, tabname FROM SYSCAT.TABLES "
+                "WHERE tabschema = ? ORDER BY 1",
+                (schema, schema),
+            ).all()
+            for kind, name in objects:
+                conn.exec_driver_sql(f'DROP {kind} "{schema}"."{name}"')
+            conn.exec_driver_sql(f'DROP SCHEMA "{schema}" RESTRICT')
 
 ENGINES = {
     "postgres": Engine(
@@ -328,7 +335,7 @@ class SourceDB:
         self.dialect = engine.dialect
         self.database = database
         self.bucket = bucket
-        self.sa = sa.create_engine(engine.url(database))
+        self.sa = prepare_engine(sa.create_engine(engine.url(database)))  # set up as db_bronze sets up its own
         self.metadata = sa.MetaData()
 
     def connection(self, **overrides) -> dict:
