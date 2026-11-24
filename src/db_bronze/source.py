@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 from .config import RunRequest, SourceConfig, TableConfig, to_source_time
 from .extract import column_specs, naive_timestamp_columns, read_connectorx, read_pyarrow, with_extracted_at
-from .query import cursor_select, probe_columns, query_source, snapshot_select
+from .query import cursor_select, page_select, paged_rows, probe_columns, query_source, snapshot_select
 from .urls import connectorx_url, sqlalchemy_url
 
 log = logging.getLogger(__name__)
@@ -84,6 +84,15 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, req: RunRequest, engine: s
             batches = read_pyarrow(engine, stmt, specs, batch_size)
         for batch in batches:
             yield with_extracted_at(batch, run_started)
+
+    if req.page is not None:  # one page of a planned snapshot: no incremental, so the cursor state is untouched
+
+        @resource
+        def page():
+            start = tc.cursor.initial_cursor_value(cfg.connection.naive_timezone) if tc.cursor else None
+            yield from extract(page_select(table, paged_rows(table, tc, start), tc, req.page.offset, req.page.limit))
+
+        return page
 
     if tc.cursor is None:  # a snapshot table: everything, every time (mode=full only)
 

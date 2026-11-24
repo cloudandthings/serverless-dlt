@@ -6,6 +6,7 @@ dropped and state is restored from bronze, as in `api_bronze`.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 from datetime import UTC, datetime
@@ -91,8 +92,8 @@ def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | Non
     finally:
         engine.dispose()
     load_ids = list(info.loads_ids)
-    snapshot_id = None
-    if req.mode == "full":
+    snapshot_id = req.snapshot_id  # a page: the plan's; finalize writes the manifest
+    if req.mode == "full" and req.page is None:
         # Only now, after every load succeeded: a full load without a manifest is ignored by silver (section 12).
         snapshot_id = new_snapshot_id(run_started)
         for tc in tables:
@@ -104,6 +105,7 @@ def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | Non
         "mode": req.mode,
         "window_start": req.window_start,
         "window_end": req.window_end,
+        "page": dataclasses.asdict(req.page) if req.page else None,
         "snapshot_id": snapshot_id,
         "load_ids": load_ids,
         "rows": rows,

@@ -11,8 +11,9 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pyarrow.parquet as pq
 import pytest
-from test_db_incremental import SourceDB, ids
+from test_db_incremental import SourceDB, files, ids
 
 from db_bronze.handler import handler
 
@@ -83,3 +84,29 @@ def test_plan_snapshot_pages_every_table_with_an_open_ended_last_page(db, bucket
     assert re.fullmatch(r"\d{8}T\d{6}Z-[0-9a-f]{8}", plan["snapshot_id"])
     assert plan["partition_date"] == f"{datetime.now(UTC):%Y-%m-%d}"
     assert not any(bucket.iterdir())  # a plan extracts nothing and writes nothing
+
+
+def page_event(page: dict, snapshot_id: str = "20261124T093000Z-0123abcd", partition_date: str = "2026-11-24") -> dict:
+    return {
+        "mode": "full",
+        "tables": [page["table"]],
+        "page": {"offset": page["offset"], "limit": page["limit"]},
+        "snapshot_id": snapshot_id,
+        "partition_date": partition_date,
+    }
+
+
+def load_rows(bucket: Path, load_ids: list[str], table: str = "transactions") -> list[dict]:
+    """The rows the given loads landed."""
+    return [r for f in files(bucket, table) if f.name.rsplit(".", 2)[0] in load_ids for r in pq.read_table(f).to_pylist()]
+
+
+def test_page_lands_its_slice_in_key_order_under_the_partition_date(db, bucket, invoke):
+    db.insert(*[(i, f"2026-11-20 08:00:{60 - i:02d}", "JHB", i) for i in range(1, 11)])  # cursor order != key order
+    result = invoke(**page_event({"table": "transactions", "offset": 3, "limit": 4}))
+    assert result["mode"] == "full" and result["snapshot_id"] == "20261124T093000Z-0123abcd"
+    assert ids(load_rows(bucket, result["load_ids"])) == [4, 5, 6, 7]
+    assert {f.parent.relative_to(bucket / "core_banking" / "transactions").as_posix() for f in files(bucket)} == {
+        "mode=full/year=2026/month=11/day=24"
+    }
+    assert not (bucket / "core_banking" / "_manifests").exists()  # finalize writes the manifest, not a page
