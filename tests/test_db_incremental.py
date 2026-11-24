@@ -165,3 +165,33 @@ def test_extracted_at_is_utc_and_one_value_per_run(db, bucket, invoke):
         assert pq.read_schema(f).field("_extracted_at").type == pa.timestamp("us", tz="UTC")
     [extracted_at] = {r["_extracted_at"] for r in landed(bucket)}
     assert before <= extracted_at <= after
+
+
+def chain(exc: BaseException) -> list[str]:
+    names = []
+    while exc is not None:
+        names.append(type(exc).__name__)
+        exc = exc.__cause__ or exc.__context__
+    return names
+
+
+def test_new_source_column_lands(db, bucket, invoke):
+    db.insert((1, "2026-11-20 08:00:00", "JHB", 100))
+    invoke()
+    db.execute('ALTER TABLE "Transactions" ADD COLUMN "Narrative" TEXT')
+    db.execute('INSERT INTO "Transactions" VALUES (2, \'2026-11-21 08:00:00\', \'CPT\', 200, \'salary\')')
+    invoke()
+    [r1, r2] = sorted(landed(bucket), key=lambda r: r["TransactionId"])
+    assert "Narrative" not in r1 and r2["Narrative"] == "salary"
+
+
+def test_type_change_on_existing_column_fails_the_run(db, bucket, invoke):
+    db.insert((1, "2026-11-20 08:00:00", "JHB", 100))
+    invoke()
+    db.execute('ALTER TABLE "Transactions" RENAME TO "Old"')
+    db.execute(DDL.replace('"amountCents" INTEGER', '"amountCents" TEXT'))
+    db.execute('INSERT INTO "Transactions" VALUES (2, \'2026-11-21 08:00:00\', \'CPT\', \'two hundred\')')
+    with pytest.raises(Exception) as failure:
+        invoke()
+    assert "DataValidationError" in chain(failure.value)
+    assert ids(landed(bucket)) == [1]
