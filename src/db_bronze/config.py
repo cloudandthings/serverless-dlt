@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field, fields
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -19,7 +19,16 @@ from . import secrets
 from .errors import DbBronzeError
 from .extract import EXTRACTED_AT
 
-MODES = ("incremental", "full", "backfill", "validate")
+MODES = ("incremental", "full", "backfill", "validate", "plan", "finalize")
+PLANS = ("snapshot", "backfill")
+# Every key a Lambda event may carry; any other key is a typo, so it fails instead of being ignored.
+EVENT_KEYS = frozenset({
+    "source_id", "config", "mode", "tables",  # every event
+    "window_start", "window_end",  # backfill
+    "plan", "page_size", "windows", "window_size",  # plan
+    "page", "snapshot_id", "partition_date",  # a page of a planned snapshot (mode=full)
+    "table", "load_ids",  # finalize
+})
 BACKENDS = ("connectorx", "pyarrow", "sqlalchemy")
 # Engines ConnectorX reads (section 3.1); these default to it (D3, section 5.3). Db2 is not supported.
 CONNECTORX_DIALECTS = ("mssql", "postgres", "mysql", "oracle", "sqlite")
@@ -498,10 +507,21 @@ class RunRequest:
     tables: tuple[str, ...] | None = None  # a subset of the config's table names; None runs them all
     window_start: str | int | None = None  # backfill only, inclusive; ISO-8601 or integer, as the cursor
     window_end: str | int | None = None  # backfill only, exclusive
+    plan: str | None = None  # mode=plan: "snapshot" (pages) or "backfill" (windows)
+    page_size: int | None = None  # plan=snapshot: rows per page
+    windows: int | None = None  # plan=backfill: split [MIN, MAX] into this many windows...
+    window_size: int | float | None = None  # ...or into windows this wide (seconds, or an integer delta)
+    page: Page | None = None  # mode=full: one page of a planned snapshot
+    snapshot_id: str | None = None  # page and finalize: the snapshot the loads belong to (from the plan)
+    partition_date: str | None = None  # page: the date in the bronze path (from the plan), YYYY-MM-DD
+    table: str | None = None  # finalize: the table the snapshot is of
+    load_ids: tuple[str, ...] = ()  # finalize: every page's load ids
 
     @property
     def partition_datetime(self) -> datetime | None:
         """The date bronze paths carry instead of the load date: a timestamp backfill's window start (UTC)."""
+        if self.page is not None:
+            return datetime.combine(date.fromisoformat(self.partition_date), time(), UTC)
         if self.mode != "backfill" or not isinstance(self.window_start, str):
             return None
         dt = parse_iso(self.window_start, "window_start")
@@ -509,6 +529,9 @@ class RunRequest:
 
     @classmethod
     def from_event(cls, event: dict) -> RunRequest:
+        unknown = sorted(set(event) - EVENT_KEYS)
+        if unknown:
+            raise ConfigError(f"unknown event keys {unknown}; allowed {sorted(EVENT_KEYS)}")
         mode = event.get("mode", "incremental")
         if mode not in MODES:
             raise ConfigError(f"mode {mode!r} not in {MODES}")
@@ -522,7 +545,106 @@ class RunRequest:
             if not isinstance(tables, list) or not tables or not all(isinstance(n, str) for n in tables):
                 raise ConfigError(f'event "tables": expected a non-empty list of table names, got {tables!r}')
             tables = tuple(tables)
-        return cls(mode, tables=tables, window_start=start, window_end=end)
+        plan, page_size = event.get("plan"), event.get("page_size")
+        if mode == "plan":
+            if plan not in PLANS:
+                raise ConfigError(f'mode=plan needs "plan" in {PLANS}, got {plan!r}')
+            if plan == "snapshot" and not _positive_int(page_size):
+                raise ConfigError(f'plan=snapshot needs "page_size", a positive number of rows: {page_size!r}')
+        windows, window_size = event.get("windows"), event.get("window_size")
+        if mode == "plan" and plan == "backfill":
+            if (windows is None) == (window_size is None):
+                raise ConfigError('plan=backfill needs exactly one of "windows" (how many) or "window_size" (how wide)')
+            if windows is not None and not _positive_int(windows):
+                raise ConfigError(f'"windows" must be a positive integer: {windows!r}')
+            if window_size is not None and not (_number(window_size) and window_size > 0):
+                raise ConfigError(
+                    f'"window_size" must be a positive number (seconds, or an integer delta): {window_size!r}'
+                )
+        _only_with(event, ("plan",), mode == "plan", "mode=plan")
+        _only_with(event, ("page_size",), mode == "plan" and plan == "snapshot", "plan=snapshot")
+        _only_with(event, ("windows", "window_size"), mode == "plan" and plan == "backfill", "plan=backfill")
+        page = _page(event, tables) if mode == "full" else None
+        _only_with(event, ("page", "partition_date"), mode == "full", "mode=full (a page of a planned snapshot)")
+        _only_with(event, ("snapshot_id",), mode in ("full", "finalize"), "mode=full (a page) or mode=finalize")
+        _only_with(event, ("table", "load_ids"), mode == "finalize", "mode=finalize")
+        table, load_ids = event.get("table"), event.get("load_ids")
+        if mode == "finalize":
+            if not isinstance(table, str) or not table:
+                raise ConfigError(f'mode=finalize needs "table", the table the snapshot is of: {table!r}')
+            check_snapshot_id(event.get("snapshot_id"))
+            if not isinstance(load_ids, list) or not load_ids or not all(isinstance(i, str) and i for i in load_ids):
+                raise ConfigError(
+                    f'mode=finalize needs "load_ids", a non-empty list of every page\'s load ids: {load_ids!r}'
+                )
+            if tables is not None:
+                raise ConfigError('mode=finalize takes "table", not "tables"')
+        return cls(
+            mode,
+            tables=tables,
+            window_start=start,
+            window_end=end,
+            plan=plan,
+            page_size=page_size,
+            windows=windows,
+            window_size=window_size,
+            page=page,
+            snapshot_id=event.get("snapshot_id"),
+            partition_date=event.get("partition_date"),
+            table=table,
+            load_ids=tuple(load_ids or ()),
+        )
+
+
+@dataclass(frozen=True)
+class Page:
+    """One page of a planned snapshot: `offset` rows skipped, then `limit` rows (None: to the end)."""
+
+    offset: int
+    limit: int | None = None
+
+
+_SNAPSHOT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def check_snapshot_id(value: Any) -> None:
+    """A snapshot id names a manifest file, so it must be a plain file name."""
+    if not isinstance(value, str) or not _SNAPSHOT_ID.match(value):
+        raise ConfigError(f'"snapshot_id" must be the snapshot_id from the plan (letters, digits, "_.-"): {value!r}')
+
+
+def _page(event: dict, tables: tuple[str, ...] | None) -> Page | None:
+    """A page event: `page`, `snapshot_id` and `partition_date` together, for exactly one table."""
+    keys = ("page", "snapshot_id", "partition_date")
+    given = [k for k in keys if event.get(k) is not None]
+    if not given:
+        return None
+    if len(given) < len(keys):
+        missing = [k for k in keys if k not in given]
+        raise ConfigError(
+            f"a page of a planned snapshot needs {list(keys)}; missing {missing} (copy them from the plan)"
+        )
+    if tables is None or len(tables) != 1:
+        raise ConfigError(f'a page event names exactly one table in "tables" (the page\'s "table"): {tables!r}')
+    raw = event["page"]
+    page = _build(Page, raw, "page")
+    if not (_is_int(page.offset) and page.offset >= 0):
+        raise ConfigError(f"page.offset must be an integer >= 0: {page.offset!r}")
+    if page.limit is not None and not _positive_int(page.limit):
+        raise ConfigError(f"page.limit must be a positive integer, or null for the last page: {page.limit!r}")
+    check_snapshot_id(event["snapshot_id"])
+    try:
+        date.fromisoformat(event["partition_date"])
+    except (TypeError, ValueError):
+        raise ConfigError(f'"partition_date" must be a date, YYYY-MM-DD: {event["partition_date"]!r}') from None
+    return page
+
+
+def _only_with(event: dict, keys: tuple[str, ...], allowed: bool, what: str) -> None:
+    """Reject event keys that belong to another kind of event, so a mistyped event fails instead of being ignored."""
+    given = [k for k in keys if event.get(k) is not None]
+    if given and not allowed:
+        raise ConfigError(f"event keys {given} are only valid with {what}; remove them")
 
 
 def _check_window(start: Any, end: Any) -> None:

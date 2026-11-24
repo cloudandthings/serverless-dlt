@@ -14,7 +14,16 @@ import sqlalchemy as sa
 from .config import RunRequest, SourceConfig, TableConfig, to_source_time
 from .errors import BackendChanged, PreflightError
 from .extract import column_specs, naive_timestamp_columns, read_connectorx, read_pyarrow, with_extracted_at
-from .query import cursor_select, keyset_select, probe_columns, query_source, snapshot_select
+from .query import (
+    cursor_select,
+    keyset_select,
+    literal_sql,
+    page_select,
+    paged_rows,
+    probe_columns,
+    query_source,
+    snapshot_select,
+)
 from .urls import connectorx_url, sqlalchemy_url
 
 log = logging.getLogger(__name__)
@@ -124,7 +133,7 @@ def make_resource(
         state["backend"] = backend
         if backend == "connectorx":
             # ConnectorX takes SQL text, so values are inlined, as dlt's own sql_table does.
-            sql = str(stmt.compile(engine, compile_kwargs={"literal_binds": True}))
+            sql = literal_sql(stmt, engine.dialect)
             partition = (tc.partition.column, tc.partition.num) if tc.partition else None
             batches = read_connectorx(connectorx_url(cfg.connection), sql, specs, batch_size, tc.name, partition)
         else:
@@ -134,6 +143,15 @@ def make_resource(
                 nulls = batch.column(tc.cursor.column).null_count
                 stats.null_cursor_rows[tc.name] = stats.null_cursor_rows.get(tc.name, 0) + nulls
             yield with_extracted_at(batch, run_started)
+
+    if req.page is not None:  # one page of a planned snapshot: no incremental, so the cursor state is untouched
+
+        @resource
+        def page():
+            start = tc.cursor.initial_cursor_value(cfg.connection.naive_timezone) if tc.cursor else None
+            yield from extract(page_select(table, paged_rows(table, tc, start), tc, req.page.offset, req.page.limit))
+
+        return page
 
     if tc.cursor is None:  # a snapshot table: everything, every time (mode=full only)
 
