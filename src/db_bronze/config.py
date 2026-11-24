@@ -88,6 +88,7 @@ class TableConfig:
     cursor: CursorConfig | None = None
     backend: str | None = None  # overrides defaults.backend
     batch_size: int | None = None  # rows per Arrow batch; overrides defaults.batch_size
+    columns: tuple[str, ...] | None = None  # projection; None is every reflected column
     where: str | None = None  # static predicate, ANDed with the cursor filter
 
     def __post_init__(self) -> None:
@@ -146,7 +147,9 @@ class SourceConfig:
             cur = t.get("cursor") if isinstance(t, dict) else None
             cursor = _build(CursorConfig, cur, f"{where}.cursor") if cur is not None else None
             pk = tuple(t.get("primary_key") or ()) if isinstance(t, dict) else ()
-            tables.append(_build(TableConfig, t, where, cursor=cursor, primary_key=pk))
+            columns = t.get("columns") if isinstance(t, dict) else None
+            columns = tuple(columns) if columns is not None else None
+            tables.append(_build(TableConfig, t, where, cursor=cursor, primary_key=pk, columns=columns))
         return _build(
             cls, data, "config", connection=connection, defaults=defaults, tables=tuple(tables)
         )

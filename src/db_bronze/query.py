@@ -40,14 +40,15 @@ def _timestamp_sqlite(element, compiler, **kw):
 
 
 def cursor_select(source: sa.FromClause, tc: TableConfig, start: Any) -> sa.Select:
-    """`SELECT * FROM source WHERE cursor >= start AND <where> ORDER BY cursor`."""
+    """`SELECT <columns> FROM source WHERE cursor >= start AND <where> ORDER BY cursor`."""
     cursor_col = source.c[tc.cursor.column]
+    columns = [source.c[c] for c in tc.columns] if tc.columns else list(source.c)
 
     def value(v):
         return _Timestamp(v) if tc.cursor.type == "timestamp" else v
 
     bound = value(cursor_col) >= value(sa.literal(start, cursor_col.type))
-    stmt = sa.select(source).where(bound)
+    stmt = sa.select(*columns).select_from(source).where(bound)
     if tc.where:
         stmt = stmt.where(sa.text(tc.where))
     return stmt.order_by(cursor_col)

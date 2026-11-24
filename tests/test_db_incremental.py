@@ -249,3 +249,10 @@ def test_where_is_anded_with_the_cursor_filter(db, bucket, invoke):
     )
     invoke(where="\"Branch Code\" <> 'TEST'")
     assert ids(landed(bucket)) == [3]
+
+
+def test_columns_projects_the_selected_columns(db, bucket, invoke):
+    db.insert((1, "2026-11-20 08:00:00", "JHB", 100))
+    invoke(columns=["TransactionId", "UpdatedAt", "amountCents"])
+    [f] = files(bucket)
+    assert pq.read_schema(f).names == ["TransactionId", "UpdatedAt", "amountCents", "_extracted_at"]
