@@ -256,3 +256,25 @@ def test_columns_projects_the_selected_columns(db, bucket, invoke):
     invoke(columns=["TransactionId", "UpdatedAt", "amountCents"])
     [f] = files(bucket)
     assert pq.read_schema(f).names == ["TransactionId", "UpdatedAt", "amountCents", "_extracted_at"]
+
+
+def test_query_table_with_a_cursor(db, bucket, invoke):
+    db.execute('CREATE TABLE "Branches" ("Code" TEXT PRIMARY KEY, "Region" TEXT)')
+    db.execute("INSERT INTO \"Branches\" VALUES ('JHB', 'Gauteng'), ('CPT', 'Western Cape')")
+    query = (
+        'SELECT t."TransactionId", t."UpdatedAt", b."Region" '
+        'FROM "Transactions" t JOIN "Branches" b ON b."Code" = t."Branch Code"'
+    )
+    db.insert((1, "2026-11-20 08:00:00", "JHB", 100), (2, "2026-11-20 09:00:00", "CPT", 200))
+    invoke(table=None, query=query)
+    db.insert((3, "2026-11-20 09:00:00", "JHB", 300), (4, "2026-11-21 08:00:00", "CPT", 400))
+    r2 = invoke(table=None, query=query)
+    assert r2["rows"] == {"transactions": 2}
+    rows = sorted(landed(bucket), key=lambda r: r["TransactionId"])
+    assert [(r["TransactionId"], r["Region"]) for r in rows] == [
+        (1, "Gauteng"), (2, "Western Cape"), (3, "Gauteng"), (4, "Western Cape")
+    ]
+    [f, *_] = files(bucket)
+    assert pq.read_schema(f).names == ["TransactionId", "UpdatedAt", "Region", "_extracted_at"]
+    assert pq.read_schema(f).field("UpdatedAt").type == pa.timestamp("us")
+    assert rows[0]["UpdatedAt"] == datetime(2026, 11, 20, 8, 0)

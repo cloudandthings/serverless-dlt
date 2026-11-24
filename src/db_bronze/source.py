@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 from .config import SourceConfig, TableConfig
 from .extract import column_specs, naive_timestamp_columns, read_pyarrow, with_extracted_at
-from .query import cursor_select
+from .query import cursor_select, probe_columns, query_source
 
 log = logging.getLogger(__name__)
 
@@ -22,7 +22,12 @@ def make_engine(cfg: SourceConfig) -> sa.Engine:
     return sa.create_engine(sa.URL.create("sqlite", database=cfg.connection.path))
 
 
-def reflect(engine: sa.Engine, tc: TableConfig) -> sa.Table:
+def reflect(engine: sa.Engine, tc: TableConfig) -> sa.FromClause:
+    """The reflected source table, or for a `query` table a subquery over its result columns."""
+    if tc.query:
+        with engine.connect() as conn:
+            columns = list(conn.execute(probe_columns(tc)).keys())
+        return query_source(tc, columns)
     return sa.Table(tc.table, sa.MetaData(), schema=tc.schema, autoload_with=engine)
 
 

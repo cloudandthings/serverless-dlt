@@ -82,7 +82,7 @@ class Defaults:
 @dataclass(frozen=True)
 class TableConfig:
     name: str  # bronze table name (path prefix)
-    table: str  # source table name, exactly as in the database
+    table: str | None = None  # source table name, exactly as in the database
     schema: str | None = None  # source schema; None is the connection's default
     primary_key: tuple[str, ...] = ()
     cursor: CursorConfig | None = None
@@ -90,12 +90,15 @@ class TableConfig:
     batch_size: int | None = None  # rows per Arrow batch; overrides defaults.batch_size
     columns: tuple[str, ...] | None = None  # projection; None is every reflected column
     where: str | None = None  # static predicate, ANDed with the cursor filter
+    query: str | None = None  # instead of schema + table: a view or join; needs a cursor
 
     def __post_init__(self) -> None:
         if not _NAME.match(self.name):
             raise ConfigError(f"table name {self.name!r} must match {_NAME.pattern}")
         if self.cursor is None:
             raise ConfigError(f"table {self.name}: a cursor is required (snapshot tables are not supported yet)")
+        if (self.table is None) == (self.query is None):
+            raise ConfigError(f"table {self.name}: set either `table` (with optional `schema`) or `query`")
         if self.batch_size is not None and (not isinstance(self.batch_size, int) or self.batch_size < 1):
             raise ConfigError(f"table {self.name}: batch_size must be a positive integer")
 

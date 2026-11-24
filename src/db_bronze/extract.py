@@ -56,11 +56,12 @@ class ColumnSpec:
     nullable: bool
 
 
-def column_specs(table: sa.Table) -> dict[str, ColumnSpec]:
-    return {c.name: ColumnSpec(arrow_type(c.type), bool(c.nullable)) for c in table.columns}
+def column_specs(table: sa.FromClause) -> dict[str, ColumnSpec]:
+    """Specs for a reflected table, or for a `query` subquery (whose columns carry no nullability)."""
+    return {c.name: ColumnSpec(arrow_type(c.type), bool(getattr(c, "nullable", True))) for c in table.columns}
 
 
-def naive_timestamp_columns(table: sa.Table) -> list[str]:
+def naive_timestamp_columns(table: sa.FromClause) -> list[str]:
     """Columns the reflection reports as timestamps without a time zone."""
     return [c.name for c in table.columns if isinstance(c.type, sa.DateTime) and not c.type.timezone]
 

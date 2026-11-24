@@ -39,6 +39,23 @@ def _timestamp_sqlite(element, compiler, **kw):
     return f"julianday({compiler.process(list(element.clauses)[0], **kw)})"
 
 
+def query_source(tc: TableConfig, columns: list[str]) -> sa.Subquery:
+    """A `query` table as a subquery with the given result columns.
+
+    Only the cursor column has a type (from `cursor.type`), so the driver hands
+    back cursor values as timestamps or integers even on engines that report no
+    type for a computed column. The other columns' types come from the values.
+    """
+    cursor_type = sa.DateTime() if tc.cursor.type == "timestamp" else sa.Integer()
+    cols = [sa.column(c, cursor_type if c == tc.cursor.column else None) for c in columns]
+    return sa.text(tc.query).columns(*cols).subquery("q")
+
+
+def probe_columns(tc: TableConfig) -> sa.Select:
+    """A statement that returns no rows, only the result column names of a `query` table."""
+    return sa.select(sa.literal_column("*")).select_from(sa.text(tc.query).columns().subquery("q")).where(sa.false())
+
+
 def cursor_select(source: sa.FromClause, tc: TableConfig, start: Any) -> sa.Select:
     """`SELECT <columns> FROM source WHERE cursor >= start AND <where> ORDER BY cursor`."""
     cursor_col = source.c[tc.cursor.column]
