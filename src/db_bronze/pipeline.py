@@ -63,6 +63,11 @@ def check_run_start(cfg: SourceConfig, req: RunRequest, tables: tuple[TableConfi
                 f'table {tc.name} has no cursor, so it is a snapshot table; run it with "mode": "full", '
                 f'give it a cursor to run in {req.mode!r} mode, or leave it out with "tables": [...]'
             )
+        if tc.partition and req.mode == "incremental":
+            raise ConfigError(
+                f"table {tc.name}: partition reads interleave batches, so rows do not arrive in cursor order, "
+                'which incremental runs need; run it in "full" or "backfill" mode, or remove "partition"'
+            )
 
 
 def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | None = None) -> dict[str, Any]:

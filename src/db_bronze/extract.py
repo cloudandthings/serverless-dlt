@@ -94,13 +94,16 @@ def _is_connectorx_failure(exc: BaseException) -> bool:
     return isinstance(exc, RuntimeError) or type(exc).__name__ == "PanicException"
 
 
-def _guarded(url: str, sql: str, batch_size: int, table: str) -> Iterator[pa.RecordBatch]:
+def _guarded(
+    url: str, sql: str, batch_size: int, table: str, partition: tuple[str, int] | None = None
+) -> Iterator[pa.RecordBatch]:
     """ConnectorX's call and its iteration, and nothing else, with its failures as ConnectorXFailed.
 
     The consumer's own errors never pass through here: a generator only sees its own exceptions.
     """
     try:
-        yield from cx.read_sql(url, sql, return_type="arrow_stream", batch_size=batch_size)
+        options = {"partition_on": partition[0], "partition_num": partition[1]} if partition else {}
+        yield from cx.read_sql(url, sql, return_type="arrow_stream", batch_size=batch_size, **options)
     except BaseException as e:
         if _is_connectorx_failure(e):
             raise ConnectorXFailed(table, f"{type(e).__name__}: {e}") from e
@@ -108,7 +111,12 @@ def _guarded(url: str, sql: str, batch_size: int, table: str) -> Iterator[pa.Rec
 
 
 def read_connectorx(
-    url: str, sql: str, specs: dict[str, ColumnSpec], batch_size: int, table: str = "?"
+    url: str,
+    sql: str,
+    specs: dict[str, ColumnSpec],
+    batch_size: int,
+    table: str = "?",
+    partition: tuple[str, int] | None = None,
 ) -> Iterator[pa.RecordBatch]:
     """Stream `sql` through ConnectorX and yield its record batches, typed as ConnectorX returns them.
 
@@ -118,8 +126,12 @@ def read_connectorx(
     Callers read the stream to the end. Dropping it early returns at once, but
     ConnectorX's producer thread detaches and runs the query to the end with the
     connection open (prototype S1, section 7.4).
+
+    `partition` is (column, N): ConnectorX `partition_on` over N parallel
+    connections. Batches of different partitions interleave, so rows do not
+    arrive in cursor order (section 3.1).
     """
-    for batch in _guarded(url, sql, batch_size, table):
+    for batch in _guarded(url, sql, batch_size, table, partition):
         schema = pa.schema(f.with_nullable(specs[f.name].nullable) for f in batch.schema)
         yield pa.RecordBatch.from_arrays(batch.columns, schema=schema)
 

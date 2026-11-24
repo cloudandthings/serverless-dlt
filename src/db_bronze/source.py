@@ -11,7 +11,7 @@ import dlt
 import sqlalchemy as sa
 
 from .config import RunRequest, SourceConfig, TableConfig, to_source_time
-from .errors import BackendChanged
+from .errors import BackendChanged, PreflightError
 from .extract import column_specs, naive_timestamp_columns, read_connectorx, read_pyarrow, with_extracted_at
 from .query import cursor_select, probe_columns, query_source, snapshot_select
 from .urls import connectorx_url, sqlalchemy_url
@@ -42,6 +42,18 @@ def reflect(engine: sa.Engine, tc: TableConfig) -> sa.FromClause:
             columns = list(conn.execute(probe_columns(tc)).keys())
         return query_source(tc, columns)
     return sa.Table(tc.table, sa.MetaData(), schema=tc.schema, autoload_with=engine)
+
+
+def _check_partition_column(tc: TableConfig, table: sa.FromClause) -> None:
+    """ConnectorX `partition_on` needs an integer column; fail before anything is extracted."""
+    column = tc.partition.column
+    if column not in table.c:
+        raise PreflightError(f"table {tc.name}: partition column {column!r} is not a column of the table")
+    if not isinstance(table.c[column].type, sa.Integer):
+        raise PreflightError(
+            f"table {tc.name}: partition column {column!r} is not an integer ({table.c[column].type}). "
+            'Fix: partition on an integer column, or remove "partition"'
+        )
 
 
 def window(cfg: SourceConfig, tc: TableConfig, req: RunRequest, run_started: datetime, max_cursor):
@@ -79,6 +91,8 @@ def make_resource(
         )
     table = reflect(engine, tc)
     specs = column_specs(table)
+    if tc.partition:
+        _check_partition_column(tc, table)
     log.info("table %s", json.dumps({"table": tc.name, "backend": backend}))
     batch_size = cfg.batch_size(tc)
     # Without this hint dlt labels naive timestamps UTC without shifting them (prototype S5).
@@ -102,7 +116,8 @@ def make_resource(
         if backend == "connectorx":
             # ConnectorX takes SQL text, so values are inlined, as dlt's own sql_table does.
             sql = str(stmt.compile(engine, compile_kwargs={"literal_binds": True}))
-            batches = read_connectorx(connectorx_url(cfg.connection), sql, specs, batch_size, tc.name)
+            partition = (tc.partition.column, tc.partition.num) if tc.partition else None
+            batches = read_connectorx(connectorx_url(cfg.connection), sql, specs, batch_size, tc.name, partition)
         else:
             batches = read_pyarrow(engine, stmt, specs, batch_size)
         for batch in batches:
