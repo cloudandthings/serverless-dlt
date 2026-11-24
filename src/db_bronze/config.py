@@ -133,6 +133,19 @@ class SourceConfig:
         """The table's backend, resolved from the config alone (D3): table, then defaults, then the dialect."""
         return table.backend or self.defaults.backend or default_backend(self.connection.dialect)
 
+    def tables_for(self, req: RunRequest) -> tuple[TableConfig, ...]:
+        """The tables one invocation runs. Snapshot tables run in mode=full only."""
+        tables = self.tables
+        if req.mode != "full":
+            snapshots = [t.name for t in tables if t.cursor is None]
+            if snapshots:
+                raise ConfigError(
+                    f"mode={req.mode} needs a cursor on every table; {snapshots} have none. "
+                    "Tables without a cursor are snapshot tables and run in mode=full only: "
+                    'run them with {"mode": "full"}, and pass "tables" to leave them out of this mode.'
+                )
+        return tables
+
     def batch_size(self, table: TableConfig) -> int:
         return table.batch_size or self.defaults.batch_size
 

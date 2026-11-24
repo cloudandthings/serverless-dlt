@@ -10,6 +10,7 @@ import pyarrow.parquet as pq
 import pytest
 from test_db_incremental import SourceDB, files, ids, landed
 
+from db_bronze import ConfigError
 from db_bronze.handler import handler
 
 TRANSACTIONS = {
@@ -108,3 +109,9 @@ def test_full_lands_everything_for_a_snapshot_table(branches, bucket, invoke):
     assert result["rows"]["branches"] == 2
     assert sorted(r["BranchCode"] for r in landed(bucket, "branches")) == ["CPT", "JHB"]
     assert partitions(bucket, "branches") == {today_partition("full")}
+
+
+def test_snapshot_table_in_incremental_fails_with_config_error_and_nothing_lands(branches, bucket, invoke):
+    with pytest.raises(ConfigError, match=r"mode=incremental.*\['branches'\].*mode=full"):
+        invoke(tables=[TRANSACTIONS, BRANCHES])
+    assert files(bucket) == [] and files(bucket, "branches") == []

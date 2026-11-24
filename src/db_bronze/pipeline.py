@@ -48,6 +48,7 @@ def bronze_schema(cfg: SourceConfig) -> Schema:
 
 def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | None = None) -> dict[str, Any]:
     """Run one invocation. Raises on any failure (cursor state then stays where it was)."""
+    tables = cfg.tables_for(req)
     os.environ["DATA_WRITER__COMPRESSION"] = cfg.parquet_compression
 
     run_started = datetime.now(UTC)
@@ -60,7 +61,7 @@ def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | Non
     pipe = pipe.drop()  # every invocation is a cold start: state comes from bronze
     engine = make_engine(cfg)
     try:
-        resources = [make_resource(cfg, tc, req, engine, run_started) for tc in cfg.tables]
+        resources = [make_resource(cfg, tc, req, engine, run_started) for tc in tables]
         info = pipe.run(resources, loader_file_format="parquet", schema=bronze_schema(cfg))
     finally:
         engine.dispose()
