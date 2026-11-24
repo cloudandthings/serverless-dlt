@@ -81,7 +81,9 @@ def manifests(source) -> dict[str, dict]:
 # Modes ---------------------------------------------------------------------------------------------------------
 
 
-def test_full_lands_initial_value_to_run_start_with_a_manifest_and_leaves_the_cursor(source, run, backend, transactions):
+def test_full_lands_initial_value_to_run_start_with_a_manifest_and_leaves_the_cursor(
+    source, run, backend, transactions
+):
     transactions((1, "2025-12-31 23:59:59"), (2, "2026-01-01 00:00:01"), (3, "2026-11-20 10:00:00"))
     transactions((4, "2999-01-01 00:00:00"))  # after run start
     table = TRANSACTIONS | {"backend": backend}
