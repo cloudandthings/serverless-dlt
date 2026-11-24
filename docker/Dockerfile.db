@@ -1,0 +1,62 @@
+# Lambda container image for db_bronze (DESIGN-db.md section 9). One x86_64 image carries
+# every driver (D9); each Lambda function differs only by its event/config, and least
+# privilege is enforced per function through IAM, not by the image.
+#
+# Build from the repo root (the build context must contain src/ and docker/):
+#   mise run docker:build --db        (exports docker/requirements-db.lock, then builds)
+# linux/amd64 only: ibm_db has no aarch64 wheel. The function's architecture must be x86_64.
+#
+# Point the downloads at internal mirrors without editing this file (spike S8):
+#   docker build -f docker/Dockerfile.db --platform linux/amd64 \
+#     --build-arg MSSQL_REPO_URL=... --build-arg ORACLE_IC_URL=... --build-arg ORACLE_IC_SHA256=... .
+FROM public.ecr.aws/lambda/python:3.12
+
+# Microsoft's RHEL 9 repo definition: msodbcsql18 (with unixODBC) for pyodbc
+ARG MSSQL_REPO_URL=https://packages.microsoft.com/config/rhel/9/prod.repo
+# Oracle Instant Client Basic (not Basic Lite: fewer character sets). Used by oracledb in
+# thick mode (D10) and by ConnectorX, which loads libclntsh at runtime.
+ARG ORACLE_IC_URL=https://download.oracle.com/otn_software/linux/instantclient/2326400/instantclient-basic-linux.x64-23.26.4.0.0.zip
+ARG ORACLE_IC_SHA256=cab59aa3b411b3b50898e456fa9aabfe48d67e25cbc1bb23303800390ce7de26
+
+# OS packages. libaio is Instant Client's one system dependency on AL2023 (spike S6);
+# pam provides libpam.so.0, which ibm_db's bundled clidriver links against.
+RUN curl -fsSL "${MSSQL_REPO_URL}" -o /etc/yum.repos.d/mssql-release.repo \
+ && ACCEPT_EULA=Y dnf install -y unixODBC msodbcsql18 libaio pam unzip \
+ && dnf clean all \
+ && rm -rf /var/cache/dnf /var/cache/yum
+
+# Instant Client under /opt/oracle/instantclient, checked against the pinned digest.
+# Registered with the dynamic linker as well as on LD_LIBRARY_PATH, so libclntsh is found
+# even if the Lambda service sets its own LD_LIBRARY_PATH.
+RUN curl -fsSL "${ORACLE_IC_URL}" -o /tmp/instantclient.zip \
+ && echo "${ORACLE_IC_SHA256}  /tmp/instantclient.zip" | sha256sum -c - \
+ && mkdir -p /opt/oracle \
+ && unzip -q /tmp/instantclient.zip -d /opt/oracle \
+ && mv /opt/oracle/instantclient_* /opt/oracle/instantclient \
+ && rm -rf /tmp/instantclient.zip /opt/oracle/META-INF \
+ && echo /opt/oracle/instantclient > /etc/ld.so.conf.d/oracle-instantclient.conf \
+ && /sbin/ldconfig
+ENV LD_LIBRARY_PATH=/opt/oracle/instantclient:${LD_LIBRARY_PATH} \
+    ORACLE_CLIENT_LIB_DIR=/opt/oracle/instantclient
+
+# Kerberos (DESIGN-db.md section 8, docs/KERBEROS.md): not implemented in v1. A project that
+# needs it uncomments this block; only /tmp is writable on Lambda, hence the paths.
+# RUN dnf install -y krb5-libs krb5-workstation && dnf clean all
+# ENV KRB5_CONFIG=/tmp/krb5.conf \
+#     KRB5CCNAME=FILE:/tmp/krb5cc
+
+# Wheels only: an sdist build here would mean a dependency changed platform support.
+COPY docker/requirements-db.lock /tmp/requirements.lock
+RUN pip install --no-cache-dir --require-hashes --only-binary :all: -r /tmp/requirements.lock \
+      --target "${LAMBDA_TASK_ROOT}" \
+ && rm /tmp/requirements.lock
+
+COPY src/db_bronze "${LAMBDA_TASK_ROOT}/db_bronze"
+
+# Only /tmp is writable on Lambda. dlt would otherwise write under $HOME.
+ENV DLT_DATA_DIR=/tmp/dlt \
+    DLT_PROJECT_DIR=/tmp \
+    RUNTIME__DLTHUB_TELEMETRY=false \
+    PYTHONDONTWRITEBYTECODE=1
+
+CMD ["db_bronze.handler.handler"]
