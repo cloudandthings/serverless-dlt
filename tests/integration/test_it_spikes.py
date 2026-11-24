@@ -28,7 +28,7 @@ pytestmark = pytest.mark.integration
 
 ROWS = 2500  # at 2 ms a row, a slow query runs about 5 s
 # ConnectorX hands over its first SQL Server batch only after seconds, so the query must run on well past that
-ROWS_FOR = {"mssql": 10000, "oracle": 500, "db2": 2500}
+ROWS_FOR = {"mssql": 10000, "oracle": 500}
 SLOW = {
     "postgres": "SELECT g AS id, (pg_sleep(0.002) IS NULL)::int AS {marker} FROM generate_series(1, {rows}) g",
     "mysql": "SELECT /*+ SET_VAR(cte_max_recursion_depth=100000) */ seq AS id, SLEEP(0.002) AS {marker} "
@@ -38,8 +38,11 @@ SLOW = {
     "FROM sys.all_objects a CROSS JOIN sys.all_objects b",
     # DBMS_SESSION.SLEEP barely sleeps below 10 ms, so Oracle sleeps 10 ms a row, over fewer rows (ROWS_FOR)
     "oracle": "SELECT level AS id, it_sleep(level) AS {marker} FROM dual CONNECT BY level <= {rows}",
-    # Db2 allows WITH only at the top, and resolves an unqualified function by CURRENT PATH, not the schema
-    "db2": "SELECT ROW_NUMBER() OVER () AS id, {schema}.it_burn(BURN) AS {marker} "
+    # Db2: no per-row sleep either, so burn about 2 ms of CPU a row. The server sends rows in blocks of
+    # about 64 KB, so the rows are padded wide enough for the first block to be a fraction of the
+    # result. WITH is allowed only at the top, and an unqualified function is resolved by CURRENT
+    # PATH, not CURRENT SCHEMA.
+    "db2": "SELECT a.colno AS id, RPAD(VARCHAR({schema}.it_burn(30000)), 250) AS {marker} "
     "FROM SYSCAT.COLUMNS a, SYSCAT.COLUMNS b FETCH FIRST {rows} ROWS ONLY",
 }
 SLOW_SETUP = {
@@ -88,9 +91,12 @@ class SlowQuery:
             return list(conn.execute(sa.text(RUNNING[self.source.dialect]), {"q": f"%{self.marker}%"}).scalars())
 
     def cancel(self) -> None:
-        with self.source.sa.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:  # KILL: no transaction
+        with self.source.sa.connect() as conn:
+            if self.source.dialect != "db2":  # ibm_db_sa has no AUTOCOMMIT level; its CALL runs in a transaction
+                conn = conn.execution_options(isolation_level="AUTOCOMMIT")  # KILL: no transaction
             for session in self.running():
                 conn.exec_driver_sql(CANCEL[self.source.dialect].format(id=session))
+            conn.commit()
 
 
 def connectorx_here(source) -> None:
@@ -152,6 +158,7 @@ CLOSE = {
     "mysql": "drains",  # PyMySQL reads the rest of an unbuffered result: the close waits for the whole query
     "mssql": "ends",  # ODBC Driver 18 cancels the rest of the result: the query stops at once
     "oracle": "ends",  # oracledb closes the cursor: the query stops at once
+    "db2": "ends",  # ibm_db frees the statement: the query stops at once
 }
 
 
