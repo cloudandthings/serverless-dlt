@@ -201,7 +201,8 @@ MATRIX = {
         "c_decimal_31_12": ("decimal(31,12)", "1234567890123456789.123456789012", False),
         "c_decimal_31_0": ("decimal(31,0)", "1234567890123456789012345678901", False),
         "c_decfloat16": ("decfloat(16)", "1.234567890123456", False),
-        "c_decfloat34": ("decfloat(34)", "1.234567890123456789012345678901234", False),
+        # a numeric literal holds 31 digits at most
+        "c_decfloat34": ("decfloat(34)", "DECFLOAT('1.234567890123456789012345678901234', 34)", False),
         "c_real": ("real", "1.5", False),
         "c_double": ("double", "2.5", False),
         "c_boolean": ("boolean", "true", False),
@@ -332,6 +333,17 @@ LANDED = {
         "c_clob": "string", "c_blob": "large_binary",
         "c_date": "timestamp[us]", "c_timestamp": "timestamp[us]", "c_timestamp_3": "timestamp[us]",
     },
+    ("db2", "pyarrow"): {
+        "c_smallint": "int64", "c_integer": "int64", "c_bigint": "int64",
+        "c_decimal_18_4": "decimal128(18, 4)", "c_decimal_31_12": "decimal128(31, 12)",
+        "c_decimal_31_0": "decimal128(31, 0)", "c_decfloat16": "string", "c_decfloat34": "string",
+        "c_real": "double", "c_double": "double", "c_boolean": "bool",
+        "c_char": "string", "c_varchar": "string", "c_clob": "string", "c_graphic": "string",
+        "c_vargraphic": "string", "c_dbclob": "string", "c_char_bit": "binary", "c_varchar_bit": "binary",
+        "c_binary": "binary", "c_varbinary": "binary", "c_blob": "binary",
+        "c_date": "date32[day]", "c_time": "time64[us]", "c_timestamp": "timestamp[us]",
+        "c_timestamp_0": "timestamp[us]", "c_timestamp_12": "timestamp[us]", "c_xml": "string",
+    },
 }
 
 # Values that must survive exactly: the wide decimals, and what the pyarrow backend turns into text.
@@ -368,6 +380,19 @@ EXACT = {
         "c_date": datetime(2026, 11, 20, 8, 0, 1),
         "c_timestamp": datetime(2026, 11, 20, 8, 0, 0, 123456),
         "c_char": "c    ",
+    },
+    "db2": {
+        "c_decimal_31_12": Decimal("1234567890123456789.123456789012"),  # through a float, it would not be
+        "c_decimal_31_0": Decimal("1234567890123456789012345678901"),
+        "c_decfloat34": "1.234567890123456789012345678901234",
+        "c_double": 2.5,
+        "c_char": "c    ",
+        "c_vargraphic": "\u00fcn\u00ef",
+        "c_char_bit": b"\x01\x02\x03\x04",
+        "c_varchar_bit": b"\x01\x02",
+        "c_binary": b"\x01\x02\x03\x04",
+        "c_timestamp_12": datetime(2026, 11, 20, 8, 0, 0, 123456),  # picoseconds truncated to the microsecond
+        "c_xml": '\ufeff<?xml version="1.0" encoding="UTF-16" ?><a/>',  # as the driver serializes it
     },
 }
 EXACT_PYARROW = {
@@ -414,6 +439,7 @@ EXACT_PYARROW = {
         "c_bfile": "DATA_PUMP_DIR/x.txt",
         "c_boolean": True,
     },
+    "db2": {},  # pyarrow only: EXACT holds them
 }
 
 # Columns no backend lands losslessly: preflight fails them on pyarrow as well. pyodbc reads a
@@ -438,7 +464,7 @@ def seed_matrix(source) -> dict[str, tuple[str, str, bool]]:
     values = ", ".join(value for _, value, _ in matrix.values())
     source.execute(
         *SETUP.get(source.dialect, []),
-        f"CREATE TABLE type_matrix (id integer PRIMARY KEY, {columns})",
+        f"CREATE TABLE type_matrix (id integer NOT NULL PRIMARY KEY, {columns})",  # Db2: a key is NOT NULL
         f"INSERT INTO type_matrix VALUES (1, {values})",
         "INSERT INTO type_matrix (id) VALUES (2)",  # every type NULL as well
     )

@@ -61,6 +61,26 @@ SQL_SS_UDT = -151  # the ODBC type of a CLR column, which pyodbc does not read w
 DB2_DIALECT = "ibm_db_sa"  # the name ibm_db_sa's dialect reports for itself (config and URL say "db2")
 
 
+class DECFLOAT(sa.types.String):
+    """Db2 DECFLOAT, which ibm_db_sa does not know. ibm_db hands it over as text; it lands as that exact text.
+
+    No Arrow decimal holds every DECFLOAT(34) value (34 digits, any exponent, NaN, Infinity).
+    """
+
+    cache_ok = True
+
+
+class Db2Binary(sa.types.LargeBinary):
+    """Db2 BINARY and VARBINARY, which ibm_db_sa does not know: binary, whatever the values."""
+
+    cache_ok = True
+
+
+# Db2 types ibm_db_sa reflects wrongly or not at all (integration type matrix, Db2). Its DOUBLE is a
+# Numeric without precision, which would land as text; a double it is.
+DB2_TYPES = {"DECFLOAT": DECFLOAT, "BINARY": Db2Binary, "VARBINARY": Db2Binary, "DOUBLE": sa.Double}
+
+
 def register_mssql_types(dialect: sa.Dialect) -> None:
     """Let SQL Server reflection name the CLR types instead of reflecting NullType."""
     dialect.ischema_names = {**dialect.ischema_names, **MSSQL_CLR_TYPES}
@@ -82,10 +102,12 @@ def prepare_engine(engine: sa.Engine) -> sa.Engine:
     declares no native Decimal support, so SQLAlchemy passes every DECIMAL through
     a float, both ways: a bound keyset seed and every value read lose digits past
     the 15th, silently. ibm_db binds and returns Decimals exactly, so it is told so.
+    The types it does not know are named (`DB2_TYPES`).
     """
     if engine.dialect.name == DB2_DIALECT:
         engine.dialect._get_default_schema_name = _db2_current_schema
         engine.dialect.supports_native_decimal = True
+        engine.dialect.ischema_names = {**engine.dialect.ischema_names, **DB2_TYPES}
     if engine.dialect.name == "mssql":
         register_mssql_types(engine.dialect)
         if engine.dialect.driver == "pyodbc":
@@ -149,6 +171,8 @@ def _converter(col_type: sa.types.TypeEngine) -> Callable[[Any], Any] | None:
         return str  # dlt 1.32 does not take Arrow durations
     if isinstance(col_type, oracle.BFILE):
         return _bfile_text
+    if isinstance(col_type, DECFLOAT):
+        return str
     if isinstance(col_type, sa.types.NullType):
         return _untyped
     if isinstance(col_type, sa.Time) and col_type.timezone:

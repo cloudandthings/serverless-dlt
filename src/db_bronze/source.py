@@ -15,6 +15,7 @@ from sqlalchemy.dialects import oracle
 from .config import RunRequest, SourceConfig, TableConfig, to_source_time
 from .errors import BackendChanged, PreflightError
 from .extract import (
+    DB2_DIALECT,
     column_specs,
     naive_timestamp_columns,
     prepare_engine,
@@ -59,9 +60,31 @@ def reflect(engine: sa.Engine, tc: TableConfig) -> sa.FromClause:
         with engine.connect() as conn:
             columns = list(conn.execute(probe_columns(tc)).keys())
         return query_source(tc, columns)
-    return sa.Table(
+    table = sa.Table(
         tc.table, sa.MetaData(), schema=tc.schema, autoload_with=engine, listeners=[("column_reflect", _exact_numbers)]
     )
+    if engine.dialect.name == DB2_DIALECT:
+        _db2_bit_data_as_binary(engine, table)
+    return table
+
+
+def _db2_bit_data_as_binary(engine: sa.Engine, table: sa.Table) -> None:
+    """Db2 CHAR and VARCHAR FOR BIT DATA hold bytes, but reflect as text: they are binary instead.
+
+    Landed as text, the bytes would fail the run unless they happened to be
+    valid UTF-8 (integration type matrix, Db2). The reflection does not say
+    which columns they are; the catalog does (code page 0).
+    """
+    dialect = engine.dialect
+    schema = dialect.denormalize_name(table.schema) if table.schema else None
+    with engine.connect() as conn:
+        names = conn.exec_driver_sql(
+            "SELECT colname FROM SYSCAT.COLUMNS WHERE tabschema = COALESCE(?, CURRENT SCHEMA) AND tabname = ? "
+            "AND codepage = 0 AND typename IN ('CHARACTER', 'VARCHAR', 'LONG VARCHAR')",
+            (schema, dialect.denormalize_name(table.name)),
+        ).scalars()
+        for name in names:
+            table.c[dialect.normalize_name(name)].type = sa.LargeBinary()
 
 
 def _exact_numbers(inspector, table, column_info: dict) -> None:
