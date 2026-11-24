@@ -30,6 +30,23 @@ services:
       interval: 1s
       retries: 120
 
+  # x86_64 only. On an arm64 host it needs Rosetta (Docker Desktop, colima --vz-rosetta) or an
+  # x86_64 VM (colima --arch x86_64): under QEMU user-mode emulation sqlservr refuses to start
+  # ("Invalid mapping of address ... in reserved address space"). No tmpfs: SQL Server needs O_DIRECT.
+  mssql:
+    image: ${DB_BRONZE_IT_MSSQL_IMAGE:-mcr.microsoft.com/mssql/server:2022-latest}
+    platform: linux/amd64
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: Bronze-it-1  # SQL Server's password policy rejects the other engines' password
+      MSSQL_PID: Developer
+    ports: ["127.0.0.1:${DB_BRONZE_IT_MSSQL_PORT:-51433}:1433"]
+    healthcheck:
+      # 2022 ships the tools under mssql-tools18 (-C: trust the self-signed certificate); 2017/2019 under mssql-tools
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Bronze-it-1 -Q 'SELECT 1' || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P Bronze-it-1 -Q 'SELECT 1'"]
+      interval: 2s
+      retries: 300
+
   # Oracle AI Database Free (23.26, "26ai"), multi-arch: native on arm64 hosts. Reached by
   # service_name FREEPDB1; each test gets a fresh user (schema) rather than a fresh database.
   # The full image, not -lite: lite has no XDB (XMLTYPE) and no USERS tablespace. Its handler

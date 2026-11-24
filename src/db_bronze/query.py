@@ -40,6 +40,43 @@ def _timestamp_sqlite(element, compiler, **kw):
     return f"julianday({compiler.process(next(iter(element.clauses)), **kw)})"
 
 
+class _TimestampValue(FunctionElement):
+    """A timestamp value compared against the cursor column, compiled like `_Timestamp` except on SQL Server.
+
+    Inlined for SQL Server (ConnectorX, `literal_binds`), a text literal is
+    converted to the column's type, and DATETIME and SMALLDATETIME reject text
+    with more than 3 decimals (error 241): a microsecond cursor value or window
+    bound would fail the query. Cast to DATETIME2 (DATETIMEOFFSET with an
+    offset), the literal keeps its exact value and the comparison is made at
+    DATETIME2 precision, as with a bound parameter (spike S2). Bound, it is left
+    alone: pyodbc already binds a DATETIME2. Not a subclass of `_Timestamp`:
+    Python would call the subclass's reflected operator first and swap the
+    comparison's operands.
+    """
+
+    inherit_cache = True
+
+
+@compiles(_TimestampValue)
+def _timestamp_value_default(element, compiler, **kw):
+    return _timestamp_default(element, compiler, **kw)
+
+
+@compiles(_TimestampValue, "sqlite")
+def _timestamp_value_sqlite(element, compiler, **kw):
+    return _timestamp_sqlite(element, compiler, **kw)
+
+
+@compiles(_TimestampValue, "mssql")
+def _timestamp_value_mssql(element, compiler, **kw):
+    value = next(iter(element.clauses))
+    rendered = compiler.process(value, **kw)
+    if not kw.get("literal_binds"):
+        return rendered
+    aware = getattr(getattr(value, "value", None), "tzinfo", None) is not None
+    return f"CAST({rendered} AS {'DATETIMEOFFSET' if aware else 'DATETIME2'})"
+
+
 def query_source(tc: TableConfig, columns: list[str]) -> sa.Subquery:
     """A `query` table as a subquery with the given result columns.
 
@@ -110,7 +147,7 @@ def _cursor_filtered(source: sa.FromClause, tc: TableConfig, start: Any, end: An
 def _value(value: Any, column: sa.ColumnElement, tc: TableConfig) -> sa.ColumnElement:
     """A bound value compared against `column`, wrapped the same way the column is."""
     literal = _literal(value, column)
-    return _Timestamp(literal) if isinstance(_comparable(column, tc), _Timestamp) else literal
+    return _TimestampValue(literal) if isinstance(_comparable(column, tc), _Timestamp) else literal
 
 
 def cursor_select(source: sa.FromClause, tc: TableConfig, start: Any, end: Any = None) -> sa.Select:

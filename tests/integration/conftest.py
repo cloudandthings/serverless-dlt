@@ -9,6 +9,7 @@ is not available.
 Each test gets a fresh database on its engine, dropped afterwards, and runs the
 handler against it into a `file://` bucket, the same seam as the SQLite suite.
 Later engines join by adding a service to compose.yaml and an `Engine` below.
+`DB_BRONZE_IT_ENGINES` (comma-separated, e.g. `mssql`) limits the run to some engines.
 
 Image mode: with `DB_BRONZE_IT_IMAGE=<tag>` (`mise run test:integration --image`)
 the same tests invoke the handler inside that built image, through the Lambda
@@ -29,7 +30,6 @@ image, on the compose network (`DB_BRONZE_IT_NETWORK=compose`), so the handler
 and ConnectorX run in-process with Instant Client. Oracle's spike tests that call
 ConnectorX directly need it.
 
-    DB_BRONZE_IT_ENGINES   comma-separated engines to run (default: all); the others skip
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ import urllib.request
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -79,6 +79,9 @@ class Engine:
     admin_database: str
     sqlalchemy_driver: str
     container_port: int | None = None  # the port inside the compose network; None: SERVER_PORTS[dialect]
+    password: str = PASSWORD
+    driver_options: dict = field(default_factory=dict)  # the config's
+    url_query: dict = field(default_factory=dict)  # the harness's own URL only (driver_options are added)
 
     def address(self, in_network: bool = IN_NETWORK) -> tuple[str, int]:
         """(host, port) from the host, or from inside the compose network."""
@@ -93,8 +96,9 @@ class Engine:
     def url(self, database: str) -> sa.URL:
         host, port = self.address()
         return sa.URL.create(
-            self.sqlalchemy_driver, username=self.admin_user, password=PASSWORD, host=host, port=port,
+            self.sqlalchemy_driver, username=self.admin_user, password=self.password, host=host, port=port,
             database=database,
+            query=self.url_query | self.driver_options,
         )
 
     def admin(self) -> sa.Engine:
@@ -109,7 +113,8 @@ class Engine:
             "port": port,
             "database": database,
             "username": self.admin_user,
-            "password": PASSWORD,
+            "password": self.password,
+            **({"driver_options": dict(self.driver_options)} if self.driver_options else {}),
         }
 
     def create_database(self, admin: sa.Engine, database: str) -> None:
@@ -123,6 +128,8 @@ class Engine:
                     "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
                     f"WHERE datname = '{database}' AND pid <> pg_backend_pid()"
                 )
+            if self.dialect == "mssql":  # the same, for SQL Server
+                conn.exec_driver_sql(f"ALTER DATABASE {database} SET SINGLE_USER WITH ROLLBACK IMMEDIATE")
             conn.exec_driver_sql(f"DROP DATABASE {database}")
 
 
@@ -198,17 +205,23 @@ ENGINES = {
     "mysql": Engine(
         "mysql", "mysql", int(os.environ.get("DB_BRONZE_IT_MYSQL_PORT", "53306")), "root", "mysql", "mysql+pymysql",
     ),
+    "mssql": Engine(
+        "mssql", "mssql", int(os.environ.get("DB_BRONZE_IT_MSSQL_PORT", "51433")), "sa", "master", "mssql+pyodbc",
+        password="Bronze-it-1",  # SQL Server's password policy rejects the other engines' password
+        # The container's certificate is self-signed; ODBC Driver 18 encrypts by default.
+        driver_options={"TrustServerCertificate": "yes"},
+        url_query={"driver": "ODBC Driver 18 for SQL Server"},
+    ),
     "oracle": OracleEngine(
         "oracle", "oracle", int(os.environ.get("DB_BRONZE_IT_ORACLE_PORT", "51521")), "system", "", "oracle+oracledb",
     ),
 }
+if os.environ.get("DB_BRONZE_IT_ENGINES"):
+    ENGINES = {name: ENGINES[name] for name in os.environ["DB_BRONZE_IT_ENGINES"].split(",")}
 
 
 def skip_reason(name: str) -> str | None:
     """Why the engine's tests skip in this run, or None when they run."""
-    selected = os.environ.get("DB_BRONZE_IT_ENGINES")
-    if selected and name not in {s.strip() for s in selected.split(",")}:
-        return f"{name} not in DB_BRONZE_IT_ENGINES={selected}"
     return ENGINES[name].unavailable()
 
 
@@ -234,7 +247,7 @@ def compose() -> None:
         ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "--wait", *services],
         check=True,
         capture_output=True,
-        timeout=600,
+        timeout=1800,  # SQL Server under amd64 emulation starts slowly
     )
 
 

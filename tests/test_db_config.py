@@ -8,9 +8,8 @@ import pytest
 
 from db_bronze import ConfigError, SourceConfig
 
-# The section 5 example. One deviation: the example sets `isolation_level` on an mssql connection whose
-# `transactions` table resolves to connectorx, which validation rejects: spike S3 found ConnectorX can apply
-# it only on Postgres so far. Here the transactions table is pinned to pyarrow.
+# The section 5 example, as written: `isolation_level` on an mssql connection whose `transactions` table
+# resolves to connectorx, which spike S3 found ConnectorX can apply on SQL Server.
 EXAMPLE = {
     "pipeline_name": "core_banking",
     "dataset_name": "core_banking",
@@ -46,7 +45,6 @@ EXAMPLE = {
                 "include_null_cursor": False,
             },
             "chunking": {"strategy": "keyset", "order_by": ["UpdatedAt", "TransactionId"], "page_size": 200000},
-            "backend": "pyarrow",
         },
         {
             "name": "branches",
@@ -295,7 +293,7 @@ def test_duplicate_table_names_are_rejected():
     assert "duplicate table name 'transactions'" in message and "give each table its own name" in message
 
 
-@pytest.mark.parametrize("dialect", [d for d in CONNECTORX_DIALECTS if d != "postgres"])
+@pytest.mark.parametrize("dialect", [d for d in CONNECTORX_DIALECTS if d not in ("postgres", "mssql")])
 def test_isolation_level_with_connectorx_is_rejected_where_connectorx_cannot_apply_it(dialect):
     message = rejected(config(dialect, connection={"isolation_level": "READ COMMITTED"}))  # resolves to connectorx
     assert "isolation_level" in message
@@ -307,6 +305,25 @@ def test_isolation_level_with_connectorx_loads_on_postgres(level):
     # ConnectorX passes libpq `options` to the server, so the level becomes the session default (S3).
     cfg = SourceConfig.from_dict(config("postgres", connection={"isolation_level": level}))
     assert cfg.connection.isolation_level == level
+
+
+@pytest.mark.parametrize("level", ["READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SNAPSHOT", "SERIALIZABLE"])
+def test_isolation_level_with_connectorx_loads_on_mssql(level):
+    # ConnectorX runs a SET TRANSACTION ISOLATION LEVEL ahead of the query, in the same batch (S3).
+    cfg = SourceConfig.from_dict(config("mssql", connection={"isolation_level": level}))
+    assert cfg.connection.isolation_level == level
+
+
+def test_autocommit_is_not_a_level_connectorx_can_set_on_mssql():
+    message = rejected(config("mssql", connection={"isolation_level": "AUTOCOMMIT"}))
+    assert "isolation_level 'AUTOCOMMIT'" in message and 'set "backend": "pyarrow"' in message
+
+
+def test_isolation_level_with_a_partitioned_connectorx_read_is_rejected_on_mssql():
+    # ConnectorX parses a partitioned query and takes a single SELECT only, so the SET cannot go ahead of it.
+    message = rejected(config("mssql", connection={"isolation_level": "SNAPSHOT"}, partition=PARTITION))
+    assert "isolation_level" in message and "partition" in message
+    assert 'remove "partition", or set "backend": "pyarrow"' in message
 
 
 @pytest.mark.parametrize("level", ["SNAPSHOT", "AUTOCOMMIT"])

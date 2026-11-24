@@ -22,6 +22,7 @@ CURSOR = {"column": "UpdatedAt", "type": "timestamp", "initial_value": "2026-01-
 UNREADABLE = {
     "postgres": ("money", "1.50"),
     "mysql": ("geometry", "ST_GeomFromText('POINT(1 2)')"),
+    "mssql": ("xml", "'<a/>'"),
     "oracle": ("raw(16)", "hextoraw('0102')"),
 }
 

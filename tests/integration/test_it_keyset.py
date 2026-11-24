@@ -18,7 +18,7 @@ STREAM = {"strategy": "stream"}
 
 # Whether closing the traditional backend's streaming cursor early ends the query (S1, DESIGN-db.md 7.4).
 # Where it does not, a `stream` table is never split-loaded and validation rejects `max_time_s` with it.
-TRADITIONAL_STREAM_STOPS_EARLY = {"postgres": True, "mysql": False, "oracle": True}
+TRADITIONAL_STREAM_STOPS_EARLY = {"postgres": True, "mysql": False, "mssql": True, "oracle": True}
 
 
 @pytest.fixture

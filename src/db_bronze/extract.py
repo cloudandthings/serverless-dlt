@@ -24,12 +24,63 @@ from typing import Any
 import connectorx as cx
 import pyarrow as pa
 import sqlalchemy as sa
-from sqlalchemy.dialects import mysql, oracle
+from sqlalchemy.dialects import mssql, mysql, oracle
 from sqlalchemy.dialects import postgresql as pg
 
 from .errors import ConnectorXFailed
 
 EXTRACTED_AT = "_extracted_at"
+
+
+class _ClrType(sa.types.LargeBinary):
+    """A SQL Server CLR type. SQLAlchemy does not know them and would reflect NullType.
+
+    Named, the preflight can deny them on ConnectorX (DESIGN-db.md section 3.1).
+    On the pyarrow backend they land as binary: SQL Server's own serialization,
+    as `CAST(c AS varbinary(max))` gives it (pyodbc reads them through an output
+    converter, see `prepare_engine`).
+    """
+
+    cache_ok = True
+
+
+class HIERARCHYID(_ClrType):
+    pass
+
+
+class GEOGRAPHY(_ClrType):
+    pass
+
+
+class GEOMETRY(_ClrType):
+    pass
+
+
+MSSQL_CLR_TYPES = {"hierarchyid": HIERARCHYID, "geography": GEOGRAPHY, "geometry": GEOMETRY}
+SQL_SS_UDT = -151  # the ODBC type of a CLR column, which pyodbc does not read without a converter
+
+
+def register_mssql_types(dialect: sa.Dialect) -> None:
+    """Let SQL Server reflection name the CLR types instead of reflecting NullType."""
+    dialect.ischema_names = {**dialect.ischema_names, **MSSQL_CLR_TYPES}
+
+
+def prepare_engine(engine: sa.Engine) -> sa.Engine:
+    """Dialect-specific setup of the engine used for reflection and the traditional backends."""
+    if engine.dialect.name == "mssql":
+        register_mssql_types(engine.dialect)
+        if engine.dialect.driver == "pyodbc":
+
+            @sa.event.listens_for(engine, "connect")
+            def _read_clr_types_as_bytes(dbapi_connection, _record):
+                dbapi_connection.add_output_converter(SQL_SS_UDT, bytes)
+
+    return engine
+
+
+def _is_timezone_aware(col_type: sa.types.TypeEngine) -> bool:
+    # SQL Server's DATETIMEOFFSET reflects with timezone=False, but its values carry an offset
+    return bool(col_type.timezone) or isinstance(col_type, mssql.DATETIMEOFFSET)
 
 
 def _json_text(value: Any) -> str:
@@ -120,7 +171,7 @@ def arrow_type(col_type: sa.types.TypeEngine) -> pa.DataType | None:
         p, s = col_type.precision, col_type.scale
         return pa.decimal128(p, s or 0) if p <= 38 else pa.decimal256(p, s or 0)
     if isinstance(col_type, sa.DateTime):
-        return pa.timestamp("us", tz="UTC" if col_type.timezone else None)
+        return pa.timestamp("us", tz="UTC" if _is_timezone_aware(col_type) else None)
     if isinstance(col_type, sa.Date):
         return pa.date32()
     if isinstance(col_type, sa.Time):
@@ -156,7 +207,7 @@ def column_specs(table: sa.FromClause) -> dict[str, ColumnSpec]:
 
 def naive_timestamp_columns(table: sa.FromClause) -> list[str]:
     """Columns the reflection reports as timestamps without a time zone."""
-    return [c.name for c in table.columns if isinstance(c.type, sa.DateTime) and not c.type.timezone]
+    return [c.name for c in table.columns if isinstance(c.type, sa.DateTime) and not _is_timezone_aware(c.type)]
 
 
 def read_pyarrow(

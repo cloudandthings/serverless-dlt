@@ -14,7 +14,14 @@ from sqlalchemy.dialects import oracle
 
 from .config import RunRequest, SourceConfig, TableConfig, to_source_time
 from .errors import BackendChanged, PreflightError
-from .extract import column_specs, naive_timestamp_columns, read_connectorx, read_pyarrow, with_extracted_at
+from .extract import (
+    column_specs,
+    naive_timestamp_columns,
+    prepare_engine,
+    read_connectorx,
+    read_pyarrow,
+    with_extracted_at,
+)
 from .query import (
     cursor_select,
     keyset_select,
@@ -25,7 +32,7 @@ from .query import (
     query_source,
     snapshot_select,
 )
-from .urls import connectorx_url, sqlalchemy_url
+from .urls import connectorx_sql, connectorx_url, sqlalchemy_url
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +50,7 @@ class RunStats:
 def make_engine(cfg: SourceConfig) -> sa.Engine:
     """The SQLAlchemy engine: reflection, and extraction on the traditional backends."""
     options = {"isolation_level": cfg.connection.isolation_level} if cfg.connection.isolation_level else {}
-    return sa.create_engine(sqlalchemy_url(cfg.connection), **options)
+    return prepare_engine(sa.create_engine(sqlalchemy_url(cfg.connection), **options))
 
 
 def reflect(engine: sa.Engine, tc: TableConfig) -> sa.FromClause:
@@ -153,7 +160,7 @@ def make_resource(
         state["backend"] = backend
         if backend == "connectorx":
             # ConnectorX takes SQL text, so values are inlined, as dlt's own sql_table does.
-            sql = literal_sql(stmt, engine.dialect)
+            sql = connectorx_sql(cfg.connection, literal_sql(stmt, engine.dialect))
             # ConnectorX puts the column into its own SQL as given: quote it for the engine (Postgres folds case)
             quoted = engine.dialect.identifier_preparer.quote(tc.partition.column) if tc.partition else None
             partition = (quoted, tc.partition.num) if tc.partition else None
