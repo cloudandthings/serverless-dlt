@@ -292,3 +292,21 @@ def test_duplicate_table_names_are_rejected():
     cfg["tables"].append(dict(cfg["tables"][0]))
     message = rejected(cfg)
     assert "duplicate table name 'transactions'" in message and "give each table its own name" in message
+
+
+@pytest.mark.parametrize("dialect", CONNECTORX_DIALECTS)
+def test_isolation_level_with_connectorx_is_rejected_on_every_engine(dialect):
+    message = rejected(config(dialect, connection={"isolation_level": "READ COMMITTED"}))  # resolves to connectorx
+    assert "isolation_level" in message
+    assert 'set "backend": "pyarrow" on the table or in defaults, or remove "isolation_level"' in message
+
+
+@pytest.mark.parametrize("dialect", CONNECTORX_DIALECTS)
+def test_isolation_level_on_the_traditional_backend_loads(dialect):
+    cfg = SourceConfig.from_dict(config(dialect, connection={"isolation_level": "SERIALIZABLE"}, backend="pyarrow"))
+    assert cfg.connection.isolation_level == "SERIALIZABLE"
+
+
+def test_isolation_level_must_be_one_sqlalchemy_knows():
+    message = rejected(config(connection={"isolation_level": "read committed"}, backend="pyarrow"))
+    assert "isolation_level 'read committed' not in" in message

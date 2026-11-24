@@ -24,6 +24,8 @@ CONNECTORX_DIALECTS = ("mssql", "postgres", "mysql", "oracle", "sqlite")
 CURSOR_TYPES = ("timestamp", "integer")
 CHUNKING_STRATEGIES = ("stream", "keyset")
 AUTH_TYPES = ("password", "kerberos")
+# What SQLAlchemy's `isolation_level` accepts across the supported dialects (SNAPSHOT: mssql).
+ISOLATION_LEVELS = ("READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE", "SNAPSHOT", "AUTOCOMMIT")
 PARQUET_CODECS = ("zstd", "snappy", "gzip", "none")
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 
@@ -107,6 +109,8 @@ class ConnectionConfig:
     naive_timezone: str = "UTC"
 
     def __post_init__(self) -> None:
+        if self.isolation_level is not None and self.isolation_level not in ISOLATION_LEVELS:
+            raise ConfigError(f"connection.isolation_level {self.isolation_level!r} not in {ISOLATION_LEVELS}")
         if self.dialect == "sqlite" and not self.path:
             raise ConfigError("connection.path is required for sqlite")
 
@@ -293,6 +297,13 @@ class SourceConfig:
             raise ConfigError(
                 f"table {t.name}: ConnectorX does not support dialect {dialect!r} (it reads {CONNECTORX_DIALECTS}); "
                 'set "backend": "pyarrow" on the table or in defaults'
+            )
+        if self.connection.isolation_level is not None:
+            # Until spike S3 records which engines let ConnectorX apply session settings.
+            raise ConfigError(
+                f"table {t.name}: ConnectorX cannot apply connection.isolation_level "
+                f"{self.connection.isolation_level!r} (spike S3 is open for every engine); "
+                'set "backend": "pyarrow" on the table or in defaults, or remove "isolation_level"'
             )
         if self.connection.auth.type == "kerberos" and dialect != "mssql":
             raise ConfigError(
