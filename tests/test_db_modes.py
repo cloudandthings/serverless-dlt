@@ -132,3 +132,16 @@ def test_unknown_table_in_subset_fails_with_config_error(branches, bucket, invok
     with pytest.raises(ConfigError, match=r"unknown tables \['transaction'\]"):
         invoke(config_tables=[TRANSACTIONS, BRANCHES], mode="full", tables=["transaction"])
     assert files(bucket) == [] and files(bucket, "branches") == []
+
+
+def test_backfill_timestamp_window_lands_the_window_dated_by_window_start(db, bucket, invoke):
+    db.insert(
+        (1, "2026-02-28 23:59:59", "JHB", 100),
+        (2, "2026-03-01 00:00:01", "CPT", 200),
+        (3, "2026-03-31 23:59:59", "DBN", 300),
+        (4, "2026-04-01 00:00:01", "PTA", 400),
+    )
+    result = invoke(mode="backfill", window_start="2026-03-01T00:00:00Z", window_end="2026-04-01T00:00:00Z")
+    assert result["mode"] == "backfill"
+    assert ids(landed(bucket)) == [2, 3]
+    assert partitions(bucket) == {"mode=backfill/year=2026/month=03/day=01"}

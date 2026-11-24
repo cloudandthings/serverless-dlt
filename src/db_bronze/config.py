@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 from typing import Any
 
-MODES = ("incremental", "full")
+MODES = ("incremental", "full", "backfill")
 BACKENDS = ("connectorx", "pyarrow")
 # Engines ConnectorX reads (section 3.1). Every other dialect defaults to pyarrow (D3, section 5.3).
 CONNECTORX_DIALECTS = ("mssql", "postgres", "mysql", "oracle", "sqlite")
@@ -78,6 +78,29 @@ class CursorConfig:
         except ValueError as e:
             raise ConfigError(f"cursor.initial_value is not ISO-8601: {self.initial_value!r}") from e
         return dt.astimezone(UTC).replace(tzinfo=None) if dt.tzinfo else dt
+
+
+    def bound(self, value: str | int, what: str) -> datetime | int:
+        """An event window bound in source terms: an integer, or an ISO timestamp as naive UTC."""
+        if self.type == "integer":
+            if not _is_int(value):
+                raise ConfigError(f"{what} must be an integer for the integer cursor {self.column!r}: {value!r}")
+            return value
+        if not isinstance(value, str):
+            raise ConfigError(f"{what} must be an ISO-8601 timestamp for the timestamp cursor {self.column!r}: {value!r}")
+        dt = parse_iso(value, what)
+        return dt.astimezone(UTC).replace(tzinfo=None) if dt.tzinfo else dt
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def parse_iso(value: str, what: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as e:
+        raise ConfigError(f"{what} is not ISO-8601: {value!r}") from e
 
 
 @dataclass(frozen=True)
@@ -189,15 +212,47 @@ class RunRequest:
 
     mode: str = "incremental"
     tables: tuple[str, ...] | None = None  # a subset of the config's table names; None runs them all
+    window_start: str | int | None = None  # backfill only, inclusive; ISO-8601 or integer, as the cursor
+    window_end: str | int | None = None  # backfill only, exclusive
+
+    @property
+    def partition_datetime(self) -> datetime | None:
+        """The date bronze paths carry instead of the load date: a timestamp backfill's window start (UTC)."""
+        if self.mode != "backfill" or not isinstance(self.window_start, str):
+            return None
+        dt = parse_iso(self.window_start, "window_start")
+        return dt.astimezone(UTC) if dt.tzinfo else dt.replace(tzinfo=UTC)
 
     @classmethod
     def from_event(cls, event: dict) -> RunRequest:
         mode = event.get("mode", "incremental")
         if mode not in MODES:
             raise ConfigError(f"mode {mode!r} not in {MODES}")
+        start, end = event.get("window_start"), event.get("window_end")
+        if mode == "backfill":
+            _check_window(start, end)
+        elif start is not None or end is not None:
+            raise ConfigError(f"window_start/window_end are only valid with mode=backfill, not {mode}")
         tables = event.get("tables")
         if tables is not None:
             if not isinstance(tables, list) or not tables or not all(isinstance(n, str) for n in tables):
                 raise ConfigError(f"event tables: expected a non-empty list of table names, got {tables!r}")
             tables = tuple(tables)
-        return cls(mode, tables=tables)
+        return cls(mode, tables=tables, window_start=start, window_end=end)
+
+
+def _check_window(start: Any, end: Any) -> None:
+    """A backfill window: both bounds, both integers or both ISO-8601, and end after start."""
+    if start is None or end is None:
+        raise ConfigError("mode=backfill needs window_start and window_end")
+    if _is_int(start) and _is_int(end):
+        ordered = end > start
+    elif isinstance(start, str) and isinstance(end, str):
+        s, e = parse_iso(start, "window_start"), parse_iso(end, "window_end")
+        if (s.tzinfo is None) != (e.tzinfo is None):
+            raise ConfigError("window_start and window_end must both carry an offset, or neither")
+        ordered = e > s
+    else:
+        raise ConfigError(f"window_start and window_end must both be integers or both ISO-8601: {start!r}, {end!r}")
+    if not ordered:
+        raise ConfigError(f"window_end must be after window_start: [{start!r}, {end!r})")

@@ -34,6 +34,7 @@ def bronze_destination(cfg: SourceConfig, req: RunRequest):
         bucket_url=cfg.bucket_url,
         layout=LAYOUT,
         extra_placeholders={"mode": req.mode},
+        current_datetime=req.partition_datetime,  # None: the load date
         warn_unsafe_layout_separators=False,
     )
 
@@ -70,6 +71,8 @@ def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | Non
     return {
         "pipeline_name": cfg.pipeline_name,
         "mode": req.mode,
+        "window_start": req.window_start,
+        "window_end": req.window_end,
         "load_ids": list(info.loads_ids),
         "rows": rows,
         "is_empty": not any(rows.values()),

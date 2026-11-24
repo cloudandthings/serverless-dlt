@@ -38,7 +38,10 @@ def window(tc: TableConfig, req: RunRequest, run_started: datetime):
 
     incremental  state-driven; initial_value only applies to the very first run
     full         [initial_value, run start): end_value makes dlt leave the cursor state alone
+    backfill     [window_start, window_end): stateless, like full
     """
+    if req.mode == "backfill":
+        return tc.cursor.bound(req.window_start, "window_start"), tc.cursor.bound(req.window_end, "window_end")
     initial = tc.cursor.initial_value if tc.cursor.type == "integer" else tc.cursor.initial_timestamp
     if req.mode == "full":
         return initial, run_started.astimezone(UTC).replace(tzinfo=None)
