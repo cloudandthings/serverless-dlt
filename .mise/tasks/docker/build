@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+#MISE description="Build the Lambda container image"
+#MISE depends=["docker:lock"]
+#USAGE flag "-t --tag <tag>" help="Image tag" default="api-bronze:test" env="IMAGE_TAG"
+#USAGE flag "-p --platform <platform>" help="Must match the function's architecture" default="linux/arm64" {
+#USAGE   choices "linux/arm64" "linux/amd64"
+#USAGE }
+set -euo pipefail
+cd "$MISE_PROJECT_ROOT"
+
+docker build -f docker/Dockerfile --platform "${usage_platform:?}" -t "${usage_tag:?}" .

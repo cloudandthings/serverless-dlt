@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#MISE description="Export the pinned, hashed requirements the Lambda image installs"
+#MISE sources=["pyproject.toml", "uv.lock"]
+#MISE outputs=["docker/requirements.lock"]
+set -euo pipefail
+cd "$MISE_PROJECT_ROOT"
+
+uv export --no-dev --no-emit-project --extra aws --format requirements-txt -o docker/requirements.lock

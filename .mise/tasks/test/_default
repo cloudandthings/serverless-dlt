@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Run all tests (Spark tests skip unless the silver group is installed). Extra args go to pytest"
+set -euo pipefail
+cd "$MISE_PROJECT_ROOT"
+
+uv run pytest "$@"

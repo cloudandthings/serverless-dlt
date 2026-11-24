@@ -1,0 +1,11 @@
+{
+  "incremental": {"source_id": "vendor_orders"},
+  "full_reload": {"source_id": "vendor_orders", "mode": "full"},
+  "snapshot": {"source_id": "vendor_countries", "mode": "full"},
+  "backfill_window": {
+    "source_id": "vendor_orders",
+    "mode": "backfill",
+    "window_start": "2025-03-01T00:00:00Z",
+    "window_end": "2025-04-01T00:00:00Z"
+  }
+}

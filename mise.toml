@@ -1,0 +1,15 @@
+# Tooling and tasks for api-bronze. Tasks are bash scripts under .mise/tasks/
+# (path = task name, e.g. .mise/tasks/docker/build -> `mise run docker:build`).
+#
+#   mise install          install the tools below
+#   mise run setup        create .venv and install deps
+#   mise tasks            list tasks
+
+[tools]
+python = "3.12"        # pyproject: requires-python >=3.12,<3.13; Lambda image is python:3.12
+uv = "0.13"
+java = "temurin-21"    # only for the Spark (silver) tests: pyspark 4.1 needs Java 17+
+
+[env]
+# Make uv use mise's interpreter instead of one it downloads itself
+UV_PYTHON = { value = "{{ tools.python.path }}", tools = true }

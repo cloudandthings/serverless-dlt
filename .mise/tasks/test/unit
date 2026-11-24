@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Run the tests that need no Spark/Java. Extra args go to pytest"
+set -euo pipefail
+cd "$MISE_PROJECT_ROOT"
+
+uv run pytest -m "not spark" "$@"

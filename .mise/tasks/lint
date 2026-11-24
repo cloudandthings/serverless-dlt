@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+#MISE description="Lint with ruff (the code base is not ruff-formatted; don't run ruff format)"
+#USAGE flag "--fix" help="Apply safe autofixes"
+set -euo pipefail
+cd "$MISE_PROJECT_ROOT"
+
+args=()
+if [[ "${usage_fix:-false}" == "true" ]]; then
+  args+=(--fix)
+fi
+uv run ruff check ${args[@]+"${args[@]}"} .

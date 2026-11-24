@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Benchmark the verbatim record splitter against a plain JSON parse"
+set -euo pipefail
+cd "$MISE_PROJECT_ROOT"
+
+uv run python scripts/bench_split.py

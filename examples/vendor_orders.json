@@ -1,0 +1,29 @@
+{
+  "pipeline_name": "vendor_orders",
+  "dataset_name": "vendor",
+  "bucket_url": "s3://example-bronze-bucket/bronze",
+  "parquet_compression": "zstd",
+  "client": {
+    "base_url": "https://api.vendor.example/v2/",
+    "paginator": {"type": "json_link", "next_url_path": "pagination.next"},
+    "auth": {"type": "bearer", "token": {"secret_id": "ingest/vendor", "key": "api_token"}},
+    "headers": {"Accept": "application/json"}
+  },
+  "resources": [
+    {
+      "name": "orders_raw",
+      "path": "orders",
+      "params": {"limit": 500},
+      "records_path": "data",
+      "id_path": "orderId",
+      "incremental": {
+        "cursor_path": "updatedAt",
+        "initial_value": "2020-01-01T00:00:00Z",
+        "start_param": "updated_since",
+        "end_param": "updated_before",
+        "param_format": "iso8601_z",
+        "sorted_ascending": true
+      }
+    }
+  ]
+}

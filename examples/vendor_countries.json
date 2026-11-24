@@ -1,0 +1,14 @@
+{
+  "pipeline_name": "vendor_countries",
+  "dataset_name": "vendor",
+  "bucket_url": "s3://example-bronze-bucket/bronze",
+  "client": {
+    "base_url": "https://api.vendor.example/v2/",
+    "paginator": {"type": "single_page"},
+    "auth": {"type": "api_key", "name": "X-API-Key", "location": "header",
+             "api_key": {"secret_id": "ingest/vendor", "key": "api_key"}}
+  },
+  "resources": [
+    {"name": "countries_raw", "path": "reference/countries", "records_path": "$", "id_path": "code"}
+  ]
+}
