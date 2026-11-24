@@ -122,7 +122,10 @@ def rejected(cfg: dict) -> str:
 @pytest.mark.parametrize("dialect", ["db2", "snowflake"])
 @pytest.mark.parametrize("where", ["table", "defaults"])
 def test_connectorx_on_an_engine_it_does_not_support_is_rejected(dialect, where):
-    cfg = config(dialect, backend="connectorx") if where == "table" else config(dialect, defaults={"backend": "connectorx"})
+    if where == "table":
+        cfg = config(dialect, backend="connectorx")
+    else:
+        cfg = config(dialect, defaults={"backend": "connectorx"})
     message = rejected(cfg)
     assert "ConnectorX does not support" in message
     assert 'set "backend": "pyarrow"' in message
