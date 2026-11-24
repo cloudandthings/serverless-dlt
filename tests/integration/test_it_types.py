@@ -18,6 +18,8 @@ import connectorx as cx
 import pyarrow.parquet as pq
 import pytest
 
+from .conftest import connectorx_in_process
+
 pytestmark = pytest.mark.integration
 
 MATRIX = {
@@ -115,6 +117,39 @@ MATRIX = {
         "c_multilinestring": ("multilinestring", "ST_GeomFromText('MULTILINESTRING((1 2, 3 4))')", False),
         "c_multipolygon": ("multipolygon", "ST_GeomFromText('MULTIPOLYGON(((0 0, 1 0, 1 1, 0 0)))')", False),
         "c_geometrycollection": ("geometrycollection", "ST_GeomFromText('GEOMETRYCOLLECTION(POINT(1 2))')", False),
+    },
+    "oracle": {
+        "c_number_10": ("number(10)", "1234567890", True),
+        "c_number_18": ("number(18)", "123456789012345678", True),
+        "c_number_38": ("number(38)", "12345678901234567890123456789012345678", False),  # see FAILS_LOUDLY
+        "c_integer": ("integer", "42", True),
+        "c_number_18_4": ("number(18,4)", "12345678901234.5678", True),
+        "c_number_28_10": ("number(28,10)", "123456789012345678.0123456789", True),
+        "c_number_38_12": ("number(38,12)", "12345678901234567890123456.123456789012", False),
+        "c_number": ("number", "1.123456789012345678", False),
+        "c_float": ("float", "1.5", True),
+        "c_binary_float": ("binary_float", "1.5", True),
+        "c_binary_double": ("binary_double", "2.5", True),
+        "c_varchar2": ("varchar2(20)", "'v'", True),
+        "c_nvarchar2": ("nvarchar2(20)", "'nv'", True),
+        "c_char": ("char(5)", "'c'", True),
+        "c_nchar": ("nchar(5)", "'nc'", True),
+        "c_clob": ("clob", "'cl'", True),
+        "c_blob": ("blob", "hextoraw('0102')", True),
+        "c_date": ("date", "timestamp '2026-11-20 08:00:01'", True),
+        "c_timestamp": ("timestamp", "timestamp '2026-11-20 08:00:00.123456'", True),
+        "c_timestamp_3": ("timestamp(3)", "timestamp '2026-11-20 08:00:00.123'", True),
+        "c_timestamptz": ("timestamp with time zone", "timestamp '2026-11-20 08:00:00 +02:00'", False),
+        "c_boolean": ("boolean", "true", False),  # 23ai
+        "c_json": ("json", """'{"a": 1}'""", False),  # 23ai
+        "c_raw": ("raw(16)", "hextoraw('0102')", False),
+        "c_rowid": ("rowid", "chartorowid('AAAAAAAAAAAAAAAAAA')", False),
+        "c_interval_ds": ("interval day to second", "interval '1 02:00:00' day to second", False),
+        "c_interval_ym": ("interval year to month", "interval '1-2' year to month", False),
+        "c_tsltz": ("timestamp with local time zone", "timestamp '2026-11-20 08:00:00 +02:00'", False),
+        "c_nclob": ("nclob", "'ncl'", False),
+        "c_bfile": ("bfile", "bfilename('DATA_PUMP_DIR', 'x.txt')", False),
+        "c_xmltype": ("xmltype", "xmltype('<a/>')", False),
     },
     "mssql": {
         "c_tinyint": ("tinyint", "1", True),
@@ -246,6 +281,26 @@ LANDED = {
         "c_binary": "large_binary", "c_varbinary": "large_binary", "c_varbinary_max": "large_binary",
         "c_image": "large_binary", "c_uniqueidentifier": "string",
     },
+    ("oracle", "pyarrow"): {
+        "c_number_10": "int64", "c_number_18": "int64", "c_number_38": "decimal128(38, 0)", "c_integer": "int64",
+        "c_number_18_4": "decimal128(18, 4)", "c_number_28_10": "decimal128(28, 10)",
+        "c_number_38_12": "decimal128(38, 12)", "c_number": "string",
+        "c_float": "double", "c_binary_float": "double", "c_binary_double": "double",
+        "c_varchar2": "string", "c_nvarchar2": "string", "c_char": "string", "c_nchar": "string",
+        "c_clob": "string", "c_blob": "binary",
+        "c_date": "timestamp[us]", "c_timestamp": "timestamp[us]", "c_timestamp_3": "timestamp[us]",
+        "c_timestamptz": "timestamp[us, tz=UTC]", "c_boolean": "bool", "c_json": "string",
+        "c_raw": "binary", "c_rowid": "string", "c_interval_ds": "string", "c_interval_ym": "string",
+        "c_tsltz": "timestamp[us]", "c_nclob": "string", "c_bfile": "string", "c_xmltype": "string",
+    },
+    ("oracle", "connectorx"): {
+        "c_number_10": "int64", "c_number_18": "int64", "c_integer": "int64",
+        "c_number_18_4": "decimal128(38, 10)", "c_number_28_10": "decimal128(38, 10)",
+        "c_float": "double", "c_binary_float": "double", "c_binary_double": "double",
+        "c_varchar2": "string", "c_nvarchar2": "string", "c_char": "string", "c_nchar": "string",
+        "c_clob": "string", "c_blob": "large_binary",
+        "c_date": "timestamp[us]", "c_timestamp": "timestamp[us]", "c_timestamp_3": "timestamp[us]",
+    },
 }
 
 # Values that must survive exactly: the wide decimals, and what the pyarrow backend turns into text.
@@ -275,6 +330,13 @@ EXACT = {
         "c_time": time(8, 0, 0, 123456),
         "c_nvarchar": "\u00fcn\u00ef",
         "c_uniqueidentifier": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+    },
+    "oracle": {
+        "c_number_18": 123456789012345678,
+        "c_number_28_10": Decimal("123456789012345678.0123456789"),
+        "c_date": datetime(2026, 11, 20, 8, 0, 1),
+        "c_timestamp": datetime(2026, 11, 20, 8, 0, 0, 123456),
+        "c_char": "c    ",
     },
 }
 EXACT_PYARROW = {
@@ -308,6 +370,19 @@ EXACT_PYARROW = {
         "c_xml": "<a/>",
         "c_hierarchyid": b"X",  # SQL Server's serialization of /1/, as CAST(... AS varbinary) gives it
     },
+    "oracle": {
+        "c_number_38": Decimal("12345678901234567890123456789012345678"),
+        "c_number_38_12": Decimal("12345678901234567890123456.123456789012"),
+        "c_number": "1.123456789012345678",
+        "c_timestamptz": datetime(2026, 11, 20, 6, 0, tzinfo=UTC),  # the instant, not the wall time
+        "c_tsltz": datetime(2026, 11, 20, 6, 0),  # in the session time zone: UTC, as on Lambda
+        "c_json": '{"a":1}',
+        "c_raw": b"\x01\x02",
+        "c_interval_ds": "1 day, 2:00:00",
+        "c_interval_ym": "1-2",
+        "c_bfile": "DATA_PUMP_DIR/x.txt",
+        "c_boolean": True,
+    },
 }
 
 # Columns no backend lands losslessly: preflight fails them on pyarrow as well. pyodbc reads a
@@ -315,8 +390,19 @@ EXACT_PYARROW = {
 UNREADABLE = {"mssql": {"c_sql_variant"}}
 
 
+# Types newer than the oldest server a matrix runs on, by the server version that has them.
+SINCE = {"oracle": {"c_boolean": (23,), "c_json": (23,)}}
+
+
+def server_version(source) -> tuple[int, ...]:
+    with source.sa.connect():
+        return source.sa.dialect.server_version_info
+
+
 def seed_matrix(source) -> dict[str, tuple[str, str, bool]]:
-    matrix = MATRIX[source.dialect]
+    version = server_version(source)
+    since = SINCE.get(source.dialect, {})
+    matrix = {name: column for name, column in MATRIX[source.dialect].items() if version >= since.get(name, ())}
     columns = ", ".join(f"{name} {ddl}" for name, (ddl, _, _) in matrix.items())
     values = ", ".join(value for _, value, _ in matrix.values())
     source.execute(
@@ -340,11 +426,21 @@ def test_landed_types_per_engine_and_backend(source, run, backend):
     assert result["rows"] == {"type_matrix": 2}
     schema = pq.read_schema(source.files("type_matrix")[0])
     landed = {f.name: str(f.type) for f in schema if f.name not in ("id", "_extracted_at")}
-    assert landed == LANDED[(source.dialect, backend)]
+    assert landed == {name: t for name, t in LANDED[(source.dialect, backend)].items() if name in matrix}
     [row, empty] = sorted(source.landed("type_matrix"), key=lambda r: r["id"])
     exact = EXACT[source.dialect] | (EXACT_PYARROW[source.dialect] if backend == "pyarrow" else {})
+    exact = {name: value for name, value in exact.items() if name in matrix}
     assert {name: row[name] for name in exact} == exact
     assert {name for name, value in empty.items() if value is not None} == {"id", "_extracted_at"}
+
+
+# Columns ConnectorX reads until a value does not fit: the read then fails loudly, so preflight lets them through.
+FAILS_LOUDLY = {"oracle": {"c_number_38": "PosOverflow"}}  # NUMBER(p, 0) is read as int64
+
+
+def connectorx_here(source) -> None:
+    if not connectorx_in_process(source.dialect):
+        pytest.skip(f"{source.dialect}: ConnectorX needs Instant Client in this process; run with --inside")
 
 
 def test_the_preflight_fails_exactly_the_columns_a_backend_cannot_land(source, run, backend):
@@ -355,7 +451,7 @@ def test_the_preflight_fails_exactly_the_columns_a_backend_cannot_land(source, r
     [checked] = report["tables"]
     failed = {finding.split(":")[0].removeprefix("column ") for finding in checked["findings"]}
     unreadable = UNREADABLE.get(source.dialect, set())
-    cannot = {name for name, (_, _, cx_reads) in matrix.items() if not cx_reads} if backend == "connectorx" else set()
+    cannot = denied(matrix) - set(FAILS_LOUDLY.get(source.dialect, {})) if backend == "connectorx" else set()
     assert failed == cannot | unreadable
     assert source.files("type_matrix") == []
 
@@ -370,12 +466,14 @@ def test_every_column_connectorx_cannot_read_fails_the_preflight_naming_each_one
     with pytest.raises(Exception) as failure:
         run({"source_id": "types", "mode": "full"}, table)
     assert type(failure.value).__name__ == "PreflightError"
-    assert set(re.findall(r"column (\w+):", str(failure.value))) == denied(matrix)
+    flagged = set(re.findall(r"column (\w+):", str(failure.value)))
+    assert flagged == denied(matrix) - set(FAILS_LOUDLY.get(source.dialect, {}))
     assert source.files("type_matrix") == []
 
 
 def test_every_denied_column_really_fails_or_loses_data_on_connectorx(source):
     """The deny list is not broader than it needs to be: ConnectorX raises on each column, or reads it wrong."""
+    connectorx_here(source)
     matrix = seed_matrix(source)
     url = source.connectorx_url()
     wrong = {}
@@ -392,3 +490,16 @@ def test_every_denied_column_really_fails_or_loses_data_on_connectorx(source):
         if read == exact:
             wrong[name] = read
     assert wrong == {}, "ConnectorX reads these exactly, so the preflight should not deny them"
+
+
+def test_a_value_connectorx_cannot_hold_fails_the_run_loudly(source, run):
+    loud = FAILS_LOUDLY.get(source.dialect)
+    if not loud:
+        pytest.skip(f"no such column type on {source.dialect}")
+    seed_matrix(source)
+    for column, reason in loud.items():
+        table = {"name": "loud", "table": "type_matrix", "columns": ["id", column], "backend": "connectorx"}
+        with pytest.raises(Exception) as failure:
+            run({"source_id": "types", "mode": "full"}, table)
+        assert type(failure.value).__name__ == "ConnectorXFailed" and reason in str(failure.value)
+        assert source.files("loud") == []

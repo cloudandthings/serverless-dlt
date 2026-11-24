@@ -10,6 +10,7 @@ from datetime import datetime
 
 import dlt
 import sqlalchemy as sa
+from sqlalchemy.dialects import oracle
 
 from .config import RunRequest, SourceConfig, TableConfig, to_source_time
 from .errors import BackendChanged, PreflightError
@@ -58,10 +59,23 @@ def reflect(engine: sa.Engine, tc: TableConfig) -> sa.FromClause:
         with engine.connect() as conn:
             columns = list(conn.execute(probe_columns(tc)).keys())
         return query_source(tc, columns)
-    return sa.Table(tc.table, sa.MetaData(), schema=tc.schema, autoload_with=engine)
+    return sa.Table(
+        tc.table, sa.MetaData(), schema=tc.schema, autoload_with=engine, listeners=[("column_reflect", _exact_numbers)]
+    )
 
 
-def _check_partition_column(tc: TableConfig, table: sa.FromClause) -> None:
+def _exact_numbers(inspector, table, column_info: dict) -> None:
+    """Oracle NUMBER without precision reflects as `asdecimal=False`, so its values would arrive as floats.
+
+    As Decimals instead, the pyarrow backend lands their exact text, like
+    Postgres NUMERIC without precision (integration type matrix, Oracle).
+    """
+    col_type = column_info["type"]
+    if isinstance(col_type, oracle.NUMBER) and col_type.precision is None and not col_type.asdecimal:
+        column_info["type"] = oracle.NUMBER(asdecimal=True)
+
+
+def _check_partition_column(tc: TableConfig, table: sa.FromClause, dialect: sa.Dialect) -> None:
     """ConnectorX `partition_on` needs an integer column; fail before anything is extracted."""
     column = tc.partition.column
     if column not in table.c:
@@ -70,6 +84,12 @@ def _check_partition_column(tc: TableConfig, table: sa.FromClause) -> None:
         raise PreflightError(
             f"table {tc.name}: partition column {column!r} is not an integer ({table.c[column].type}). "
             'Fix: partition on an integer column, or remove "partition"'
+        )
+    if dialect.name == "oracle" and dialect.identifier_preparer.quote(column) != column:
+        # ConnectorX upper-cases the column in its range query, quotes or not (integration, Oracle)
+        raise PreflightError(
+            f"table {tc.name}: ConnectorX cannot partition on Oracle by the case-sensitive column {column!r}. "
+            'Fix: partition on a column with a case-insensitive name, or remove "partition"'
         )
 
 
@@ -117,7 +137,7 @@ def make_resource(
     table = table if table is not None else reflect(engine, tc)
     specs = column_specs(table)
     if tc.partition:
-        _check_partition_column(tc, table)
+        _check_partition_column(tc, table, engine.dialect)
     log.info("table %s", json.dumps({"table": tc.name, "backend": backend}))
     batch_size = cfg.batch_size(tc)
     # Without this hint dlt labels naive timestamps UTC without shifting them (prototype S5).
@@ -144,7 +164,8 @@ def make_resource(
             # ConnectorX puts the column into its own SQL as given: quote it for the engine (Postgres folds case)
             quoted = engine.dialect.identifier_preparer.quote(tc.partition.column) if tc.partition else None
             partition = (quoted, tc.partition.num) if tc.partition else None
-            batches = read_connectorx(connectorx_url(cfg.connection), sql, specs, batch_size, tc.name, partition)
+            names = list(stmt.selected_columns.keys())
+            batches = read_connectorx(connectorx_url(cfg.connection), sql, specs, batch_size, tc.name, partition, names)
         else:
             batches = read_pyarrow(engine, stmt, specs, batch_size)
         for batch in batches:

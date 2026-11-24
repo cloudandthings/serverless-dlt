@@ -37,6 +37,18 @@ def test_unconstrained_postgres_numeric_is_a_finding():
     assert "Any" in finding and "NUMERIC without precision" in finding
 
 
+def test_oracle_number_without_precision_is_a_finding_on_connectorx():
+    """Integration: ConnectorX reads it as decimal128(38, 10) and drops digits past the 10th place silently."""
+    [finding] = column_findings("oracle", "connectorx", [("Any", oracle.NUMBER())])
+    assert "Any" in finding and "NUMERIC without precision" in finding
+
+
+def test_oracle_integers_pass_whatever_their_precision():
+    """ConnectorX reads NUMBER(p, 0) as int64; a wider value fails the read loudly (ConnectorXFailed)."""
+    columns = [("A", oracle.NUMBER(19, 0)), ("B", oracle.NUMBER(38, 0)), ("C", sa.INTEGER())]
+    assert column_findings("oracle", "connectorx", columns) == []
+
+
 @pytest.mark.parametrize("dialect", ["sqlite", "mysql"])
 def test_decimal_with_no_declared_precision_passes_elsewhere(dialect):
     assert column_findings(dialect, "connectorx", [("Ok", sa.Numeric())]) == []
@@ -75,6 +87,9 @@ DENIED = {
         oracle.TIMESTAMP(local_timezone=True),
         oracle.NCLOB(),
         oracle.BFILE(),
+        oracle.TIMESTAMP(timezone=True),  # integration: ConnectorX 0.4.6 fails on it
+        sa.Boolean(),  # 23ai BOOLEAN
+        oracle.JSON(),  # 23ai JSON
     ],
 }
 

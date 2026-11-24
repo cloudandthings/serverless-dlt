@@ -26,11 +26,13 @@ log = logging.getLogger(__name__)
 # backend is never switched silently. Postgres 11, MySQL 8.0 and SQL Server 2017 (14) are
 # the oldest series the whole integration suite has passed on (11.16, 8.0.46, 14.0.3570;
 # DESIGN-db.md section 11). SQL Server on Linux starts at 2017, so nothing older was run.
+# Oracle 23 (Free 23.26) is the only series it could run on so far: older servers are
+# x86_64 only and do not start under emulation on an arm64 host (S9 stays open below 23).
 MIN_SERVER_VERSION: dict[str, tuple[int, ...] | None] = {
     "mssql": (14,),
     "postgres": (11,),
     "mysql": (8, 0),
-    "oracle": None,
+    "oracle": (23,),
     "sqlite": None,
     "db2": None,
 }
@@ -40,7 +42,7 @@ MAX_DECIMAL_SCALE = 10
 MAX_DECIMAL_PRECISION = 28
 # Where a NUMERIC with no declared precision holds any scale, and ConnectorX silently
 # drops digits past the 10th decimal place (integration type matrix, section 10.1).
-UNCONSTRAINED_NUMERIC_DIALECTS = ("postgres",)
+UNCONSTRAINED_NUMERIC_DIALECTS = ("postgres", "oracle")
 
 
 def _named(*names: str) -> Callable[[sa.types.TypeEngine], bool]:
@@ -53,6 +55,10 @@ def _is_timetz(t: sa.types.TypeEngine) -> bool:
 
 def _is_oracle_local_tz(t: sa.types.TypeEngine) -> bool:
     return isinstance(t, oracle.TIMESTAMP) and bool(t.local_timezone)
+
+
+def _is_oracle_tz(t: sa.types.TypeEngine) -> bool:
+    return isinstance(t, oracle.TIMESTAMP) and bool(t.timezone)
 
 
 def _is_postgres_varbit(t: sa.types.TypeEngine) -> bool:
@@ -112,6 +118,10 @@ DENY_LIST: dict[str, list[tuple[str, Callable[[sa.types.TypeEngine], bool]]]] = 
         ("nclob", lambda t: isinstance(t, oracle.NCLOB)),
         ("bfile", lambda t: isinstance(t, oracle.BFILE)),
         ("xmltype", _named("XMLTYPE")),
+        # integration (Oracle Free 23.26, ConnectorX 0.4.6): also not readable
+        ("timestamp with time zone", _is_oracle_tz),
+        ("boolean", lambda t: isinstance(t, sa.Boolean)),
+        ("json", lambda t: isinstance(t, sa.JSON)),
     ],
 }
 # SQLite reflects a column declared without a type as NullType, and ConnectorX reads it from its values.
@@ -157,6 +167,10 @@ def server_version_finding(
 
 def _decimal_finding(dialect: str, col_type: sa.types.TypeEngine) -> str | None:
     if not isinstance(col_type, sa.Numeric) or isinstance(col_type, sa.Float):
+        return None
+    if isinstance(col_type, oracle.NUMBER) and col_type.scale == 0:
+        # ConnectorX reads Oracle NUMBER(p, 0) as int64, whatever p: no decimal, so no silent loss. A
+        # value wider than int64 fails the read loudly (integration type matrix, Oracle).
         return None
     p, s = col_type.precision, col_type.scale
     if p is None and dialect in UNCONSTRAINED_NUMERIC_DIALECTS:

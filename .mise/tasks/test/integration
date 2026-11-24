@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 #MISE description="Bring up the source engines (docker-compose) and run the db_bronze integration suite"
 #USAGE arg "[pytest_args]..." help="Passed to pytest, e.g. -- -k mysql"
-#USAGE flag "--keep" help="Leave the engines running afterwards (faster re-runs); stop them with: docker compose -f tests/integration/compose.yaml down"
+#USAGE flag "--keep" help="Leave the engines running afterwards (faster re-runs); stop them with: docker compose -f tests/integration/compose.yaml --profile oracle down"
 #USAGE flag "--image" help="Build the db_bronze image and run the same suite inside it, through the Lambda Runtime Interface Emulator"
-#USAGE flag "-t --tag <tag>" help="Image tag for --image (default db-bronze:test)" env="IMAGE_TAG"
-#USAGE flag "--no-build" help="With --image: use the image already tagged, without rebuilding it"
+#USAGE flag "--inside" help="Build the db_bronze image and run pytest itself inside it, on the compose network (in-process handler and ConnectorX with Instant Client: Oracle's direct ConnectorX spike tests need it)"
+#USAGE flag "-t --tag <tag>" help="Image tag for --image/--inside (default db-bronze:test)" env="IMAGE_TAG"
+#USAGE flag "--no-build" help="With --image/--inside: use the image already tagged, without rebuilding it"
+#USAGE flag "--engines <engines>" help="Comma-separated engines to run (DB_BRONZE_IT_ENGINES), e.g. oracle"
 set -euo pipefail
 cd "$MISE_PROJECT_ROOT"
 
@@ -13,17 +15,50 @@ eval "pytest_args=(${usage_pytest_args:-})"
 
 # COMPOSE_PROJECT_NAME and the DB_BRONZE_IT_*_PORT variables give a second stack of its own (compose.yaml)
 compose=(docker compose -f tests/integration/compose.yaml)
-# DB_BRONZE_IT_ENGINES (e.g. "mssql") limits the run, and the services brought up, to some engines
-IFS=, read -r -a services <<< "${DB_BRONZE_IT_ENGINES:-}"
 if [[ "${usage_keep:-false}" != "true" ]]; then
-  trap '"${compose[@]}" down --volumes --remove-orphans' EXIT
+  trap '"${compose[@]}" --profile oracle down --volumes --remove-orphans' EXIT
 fi
-if [[ "${usage_image:-false}" == "true" ]]; then
-  tag="${usage_tag:-db-bronze:test}"
-  if [[ "${usage_no_build:-false}" != "true" ]]; then
-    mise run docker:build --db --tag "$tag"
-  fi
-  export DB_BRONZE_IT_IMAGE="$tag"
+image="${usage_image:-false}"
+inside="${usage_inside:-false}"
+if [[ -n "${usage_engines:-}" ]]; then
+  export DB_BRONZE_IT_ENGINES="$usage_engines"
+fi
+tag="${usage_tag:-db-bronze:test}"
+if [[ ("$image" == "true" || "$inside" == "true") && "${usage_no_build:-false}" != "true" ]]; then
+  mise run docker:build --db --tag "$tag"
+fi
+
+# Oracle runs its handler only with Instant Client, so it starts only for the image runs (or when named).
+services=()
+if [[ -n "${DB_BRONZE_IT_ENGINES:-}" ]]; then
+  IFS=, read -ra services <<<"$DB_BRONZE_IT_ENGINES"
+elif [[ "$image" == "true" || "$inside" == "true" ]]; then
+  export COMPOSE_PROFILES=oracle
 fi
 "${compose[@]}" up -d --wait ${services[@]+"${services[@]}"}
-uv run pytest -m integration ${pytest_args[@]+"${pytest_args[@]}"}
+
+if [[ "$inside" != "true" ]]; then
+  if [[ "$image" == "true" ]]; then
+    export DB_BRONZE_IT_IMAGE="$tag"
+  fi
+  uv run pytest -m integration ${pytest_args[@]+"${pytest_args[@]}"}
+  exit
+fi
+
+# pytest is not part of the Lambda image: a throwaway layer on top adds it, at the versions uv.lock pins.
+pins=$(uv export --frozen --no-hashes --only-group dev --no-emit-project \
+  | grep -E '^(pytest|pluggy|iniconfig|packaging|pygments)==' | tr '\n' ' ')
+printf 'FROM %s\nRUN pip install --no-cache-dir --target /opt/it %s\n' "$tag" "$pins" \
+  | docker build --platform linux/amd64 -t "$tag-pytest" -
+network="$("${compose[@]}" config --format json | uv run python -c 'import json, sys; print(json.load(sys.stdin)["name"])')_default"
+
+# The handler imports from the image's task root, as on Lambda (Instant Client, thick mode, ODBC);
+# only the tests are mounted. Engines are reached by service name on the compose network, and
+# the DB_BRONZE_IT_* settings (e.g. DB_BRONZE_IT_ORACLE_SERVICE) pass through.
+it_env=()
+while IFS= read -r name; do it_env+=(-e "$name"); done < <(compgen -e | grep '^DB_BRONZE_IT_' || true)
+docker run --rm --platform linux/amd64 --network "$network" \
+  -v "$MISE_PROJECT_ROOT/tests:/it/tests:ro" -v "$MISE_PROJECT_ROOT/pyproject.toml:/it/pyproject.toml:ro" -w /it \
+  ${it_env[@]+"${it_env[@]}"} -e PYTHONPATH=/var/task:/opt/it -e DB_BRONZE_IT_NETWORK=compose \
+  --entrypoint python3 "$tag-pytest" \
+  -m pytest -p no:cacheprovider -m integration tests/integration ${pytest_args[@]+"${pytest_args[@]}"}

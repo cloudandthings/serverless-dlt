@@ -227,3 +227,15 @@ def test_mssql_keyset_seed_is_inlined_as_datetime2_too():
     sql = " ".join(literal_sql(keyset_select(transactions(), keyset_config(), START, END, AFTER),
                                DIALECTS["mssql"]).split())
     assert "[UpdatedAt] > CAST('2026-11-20 09:30:00' AS DATETIME2) OR" in sql
+
+
+def test_oracle_timestamp_with_time_zone_is_selected_as_its_utc_instant():
+    """The driver drops the offset of a TIMESTAMP WITH TIME ZONE; SYS_EXTRACT_UTC keeps the instant (integration)."""
+    table = sa.Table(
+        "events", sa.MetaData(),
+        sa.Column("id", sa.Integer), sa.Column("at", oracle.TIMESTAMP(timezone=True)), sa.Column("local", oracle.DATE),
+    )
+    tc = table_config(table="events", cursor={"column": "id", "type": "integer", "initial_value": 0})
+    sql = literal_sql(cursor_select(table, tc, 5), oracle.dialect())
+    assert "sys_extract_utc(events.at) AS at" in sql
+    assert "events.at >=" not in sql and "events.local" in sql and "WHERE events.id >= 5" in sql

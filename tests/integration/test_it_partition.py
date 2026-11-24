@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
+import sqlalchemy as sa
 
 from .conftest import fails
 
@@ -38,6 +41,10 @@ def landed_then_cleared(source) -> list[int]:
 @pytest.mark.parametrize(("event", "expected"), [({"mode": "full"}, range(1, 21)), (BACKFILL, range(5, 15))],
                          ids=["full", "backfill"])
 def test_a_partitioned_read_lands_the_same_rows_as_an_unpartitioned_one(source, run, event, expected):
+    if source.dialect == "oracle":  # ConnectorX upper-cases the column in its range query, quoted or not
+        with fails("PreflightError", r"case-sensitive column 'TransactionId'.*case-insensitive name"):
+            run({"source_id": "core", **event}, PARTITIONED)
+        return
     run({"source_id": "core", **event}, TRANSACTIONS)
     assert landed_then_cleared(source) == list(expected)
     assert run({"source_id": "core", **event}, PARTITIONED)["rows"] == {"transactions": len(expected)}
@@ -54,3 +61,19 @@ def test_a_non_integer_partition_column_fails_the_preflight(source, run):
     with fails("PreflightError", r"partition column 'Branch Code' is not an integer"):
         run({"source_id": "core", "mode": "full"}, TRANSACTIONS | {"partition": {"column": "Branch Code", "num": 2}})
     assert source.nothing_landed()
+
+
+def test_a_partitioned_read_by_a_case_insensitive_column(source, run):
+    """Lower-case names, which Oracle stores upper case: ConnectorX partitions by them on every engine."""
+    table = source.create(lambda metadata: sa.Table(
+        "ledger", metadata,
+        sa.Column("id", sa.Integer, primary_key=True, autoincrement=False),
+        sa.Column("updated_at", sa.DateTime, nullable=False),
+    ))
+    source.insert(table, [{"id": i, "updated_at": datetime(2026, 3, i, 12)} for i in range(1, 21)])
+    cursor = {"column": "updated_at", "type": "timestamp", "initial_value": "2026-01-01T00:00:00Z"}
+    plain = {"name": "ledger", "table": "ledger", "primary_key": ["id"], "cursor": cursor, "backend": "connectorx"}
+    run({"source_id": "core", **BACKFILL}, plain)
+    partitioned = plain | {"name": "partitioned", "partition": {"column": "id", "num": 3}}
+    assert run({"source_id": "core", **BACKFILL}, partitioned)["rows"] == {"partitioned": 10}
+    assert source.landed_ids("partitioned", "id") == source.landed_ids("ledger", "id") == list(range(5, 15))

@@ -18,6 +18,18 @@ compose network and reaches each engine by its service name; the buckets live
 in a folder mounted at the same path inside the container. A failed invocation
 raises an exception named after the Lambda `errorType`, so `fails()` checks
 both modes alike. The session reports the peak memory of the run (spike S7).
+
+Oracle (ticket 16) is reached by service name FREEPDB1, and a test's "database" is
+a fresh user, i.e. a schema. The handler must run where oracledb can enter thick
+mode and ConnectorX can load Instant Client (D10): in image mode, or in a process
+with ORACLE_CLIENT_LIB_DIR set. Seeding from the host works in thin mode. The
+Oracle service is in the compose profile `oracle`, so it starts only when used.
+
+Inside mode: `mise run test:integration --inside` runs pytest itself inside the
+image, on the compose network (`DB_BRONZE_IT_NETWORK=compose`), so the handler
+and ConnectorX run in-process with Instant Client. Oracle's spike tests that call
+ConnectorX directly need it.
+
 """
 
 from __future__ import annotations
@@ -43,10 +55,15 @@ import pyarrow.parquet as pq
 import pytest
 import sqlalchemy as sa
 
+# Before any Oracle connection: with ORACLE_CLIENT_LIB_DIR set (inside the image), the handler
+# module puts oracledb into thick mode, process-wide, as a Lambda cold start does (D10).
+import db_bronze.handler  # noqa: F401
+
 COMPOSE_FILE = Path(__file__).with_name("compose.yaml")
 PASSWORD = "bronze-it"
 ENGINES_STARTED = False  # an integration test ran: report peak memory at the end
 IMAGE = os.environ.get("DB_BRONZE_IT_IMAGE")  # image mode when set: run the handler inside this image
+IN_NETWORK = os.environ.get("DB_BRONZE_IT_NETWORK") == "compose"  # inside mode: pytest runs on the compose network
 # Each engine's port inside the compose network, where Engine.container_port is not set.
 SERVER_PORTS = {"postgres": 5432, "mysql": 3306, "mssql": 1433, "oracle": 1521, "db2": 50000}
 
@@ -66,28 +83,118 @@ class Engine:
     driver_options: dict = field(default_factory=dict)  # the config's
     url_query: dict = field(default_factory=dict)  # the harness's own URL only (driver_options are added)
 
+    def address(self, in_network: bool = IN_NETWORK) -> tuple[str, int]:
+        """(host, port) from the host, or from inside the compose network."""
+        if in_network:
+            return self.service, self.container_port or SERVER_PORTS[self.dialect]
+        return "127.0.0.1", self.port
+
+    def unavailable(self) -> str | None:
+        """Why this run cannot drive the engine, or None."""
+        return None
+
     def url(self, database: str) -> sa.URL:
+        host, port = self.address()
         return sa.URL.create(
-            self.sqlalchemy_driver,
-            username=self.admin_user,
-            password=self.password,
-            host="127.0.0.1",
-            port=self.port,
+            self.sqlalchemy_driver, username=self.admin_user, password=self.password, host=host, port=port,
             database=database,
             query=self.url_query | self.driver_options,
         )
 
-    def connection(self, database: str, *, in_network: bool = False) -> dict:
+    def admin(self) -> sa.Engine:
+        return sa.create_engine(self.url(self.admin_database), isolation_level="AUTOCOMMIT")
+
+    def connection(self, database: str, *, in_network: bool = IN_NETWORK) -> dict:
         """The config's `connection` block for `database`, from the host or from inside the compose network."""
+        host, port = self.address(in_network)
         return {
             "dialect": self.dialect,
-            "host": self.service if in_network else "127.0.0.1",
-            "port": (self.container_port or SERVER_PORTS[self.dialect]) if in_network else self.port,
+            "host": host,
+            "port": port,
             "database": database,
             "username": self.admin_user,
             "password": self.password,
             **({"driver_options": dict(self.driver_options)} if self.driver_options else {}),
         }
+
+    def create_database(self, admin: sa.Engine, database: str) -> None:
+        with admin.connect() as conn:
+            conn.exec_driver_sql(f"CREATE DATABASE {database}")
+
+    def drop_database(self, admin: sa.Engine, database: str) -> None:
+        with admin.connect() as conn:
+            if self.dialect == "postgres":  # a dropped ConnectorX stream may still hold a session
+                conn.exec_driver_sql(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    f"WHERE datname = '{database}' AND pid <> pg_backend_pid()"
+                )
+            if self.dialect == "mssql":  # the same, for SQL Server
+                conn.exec_driver_sql(f"ALTER DATABASE {database} SET SINGLE_USER WITH ROLLBACK IMMEDIATE")
+            conn.exec_driver_sql(f"DROP DATABASE {database}")
+
+
+def connectorx_in_process(dialect: str) -> bool:
+    """Whether this process can call ConnectorX on `dialect` directly (Oracle: only with Instant Client)."""
+    return dialect != "oracle" or bool(os.environ.get("ORACLE_CLIENT_LIB_DIR"))
+
+
+@dataclass(frozen=True)
+class OracleEngine(Engine):
+    """Oracle Free, reached by service name. A test's "database" is a fresh user, which is its own schema.
+
+    The user may read the dictionary views and cancel SQL, so the spike tests can watch
+    and stop their own queries (v$session, ALTER SYSTEM CANCEL SQL).
+    """
+
+    service_name: str = os.environ.get("DB_BRONZE_IT_ORACLE_SERVICE", "FREEPDB1")
+
+    def unavailable(self) -> str | None:
+        if IMAGE or connectorx_in_process("oracle"):
+            return None
+        return (
+            "Oracle runs the handler only with thick-mode oracledb and Instant Client (D10): "
+            "run `mise run test:integration --image` or `--inside`"
+        )
+
+    def url(self, database: str) -> sa.URL:
+        host, port = self.address()
+        return sa.URL.create(
+            self.sqlalchemy_driver, username=database, password=PASSWORD, host=host, port=port,
+            query={"service_name": self.service_name},
+        )
+
+    def admin(self) -> sa.Engine:
+        return sa.create_engine(self.url(self.admin_user), isolation_level="AUTOCOMMIT")
+
+    def connection(self, database: str, *, in_network: bool = IN_NETWORK) -> dict:
+        host, port = self.address(in_network)
+        return {
+            "dialect": "oracle",
+            "host": host,
+            "port": port,
+            "service_name": self.service_name,
+            "username": database,
+            "password": PASSWORD,
+        }
+
+    def create_database(self, admin: sa.Engine, database: str) -> None:
+        with admin.connect() as conn:
+            conn.exec_driver_sql(
+                f'CREATE USER {database} IDENTIFIED BY "{PASSWORD}" DEFAULT TABLESPACE users QUOTA UNLIMITED ON users'
+            )
+            conn.exec_driver_sql(
+                "GRANT CREATE SESSION, CREATE TABLE, CREATE VIEW, CREATE PROCEDURE, "
+                f"SELECT ANY DICTIONARY, ALTER SYSTEM TO {database}"
+            )
+
+    def drop_database(self, admin: sa.Engine, database: str) -> None:
+        with admin.connect() as conn:  # a ConnectorX read may still hold a session
+            sessions = conn.exec_driver_sql(
+                f"SELECT sid, serial# FROM v$session WHERE username = '{database.upper()}'"
+            ).all()
+            for sid, serial in sessions:
+                conn.exec_driver_sql(f"ALTER SYSTEM KILL SESSION '{sid},{serial}' IMMEDIATE")
+            conn.exec_driver_sql(f"DROP USER {database} CASCADE")
 
 
 ENGINES = {
@@ -105,9 +212,17 @@ ENGINES = {
         driver_options={"TrustServerCertificate": "yes"},
         url_query={"driver": "ODBC Driver 18 for SQL Server"},
     ),
+    "oracle": OracleEngine(
+        "oracle", "oracle", int(os.environ.get("DB_BRONZE_IT_ORACLE_PORT", "51521")), "system", "", "oracle+oracledb",
+    ),
 }
 if os.environ.get("DB_BRONZE_IT_ENGINES"):
     ENGINES = {name: ENGINES[name] for name in os.environ["DB_BRONZE_IT_ENGINES"].split(",")}
+
+
+def skip_reason(name: str) -> str | None:
+    """Why the engine's tests skip in this run, or None when they run."""
+    return ENGINES[name].unavailable()
 
 
 def _docker_available() -> bool:
@@ -121,11 +236,15 @@ def _docker_available() -> bool:
 def compose() -> None:
     """The engines, up and healthy. Skips the integration suite when Docker is not available."""
     global ENGINES_STARTED
+    if IN_NETWORK:  # brought up by whoever started this container
+        ENGINES_STARTED = True
+        return
     if not _docker_available():
         pytest.skip("integration tests need Docker")
     ENGINES_STARTED = True
+    services = [e.service for name, e in ENGINES.items() if skip_reason(name) is None]
     subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "--wait", *(e.service for e in ENGINES.values())],
+        ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "--wait", *services],
         check=True,
         capture_output=True,
         timeout=1800,  # SQL Server under amd64 emulation starts slowly
@@ -244,27 +363,21 @@ def fails(error_type: str, match: str | None = None) -> Iterator[pytest.Exceptio
 
 
 @pytest.fixture(params=list(ENGINES))
-def source(request, compose, bucket: Path):
+def source(request, bucket: Path):
     """A fresh, empty database on each engine in turn; dropped when the test ends."""
+    if reason := skip_reason(request.param):
+        pytest.skip(reason)
+    request.getfixturevalue("compose")
     engine = ENGINES[request.param]
     database = f"it_{uuid.uuid4().hex[:12]}"
-    admin = sa.create_engine(engine.url(engine.admin_database), isolation_level="AUTOCOMMIT")
-    with admin.connect() as conn:
-        conn.exec_driver_sql(f"CREATE DATABASE {database}")
+    admin = engine.admin()
+    engine.create_database(admin, database)
     db = SourceDB(engine, database, bucket)
     try:
         yield db
     finally:
         db.sa.dispose()
-        with admin.connect() as conn:
-            if engine.dialect == "postgres":  # a dropped ConnectorX stream may still hold a session
-                conn.exec_driver_sql(
-                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                    f"WHERE datname = '{database}' AND pid <> pg_backend_pid()"
-                )
-            if engine.dialect == "mssql":  # the same, for SQL Server
-                conn.exec_driver_sql(f"ALTER DATABASE {database} SET SINGLE_USER WITH ROLLBACK IMMEDIATE")
-            conn.exec_driver_sql(f"DROP DATABASE {database}")
+        engine.drop_database(admin, database)
         admin.dispose()
 
 
@@ -285,7 +398,7 @@ class LambdaImage:
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             self.port = s.getsockname()[1]
-        service = next(iter(ENGINES.values())).service
+        service = next(e.service for name, e in ENGINES.items() if skip_reason(name) is None)
         [container] = _compose("ps", "-q", service).split()
         network = subprocess.run(
             ["docker", "inspect", "-f", "{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}", container],
