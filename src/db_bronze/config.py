@@ -88,6 +88,7 @@ class TableConfig:
     cursor: CursorConfig | None = None
     backend: str | None = None  # overrides defaults.backend
     batch_size: int | None = None  # rows per Arrow batch; overrides defaults.batch_size
+    where: str | None = None  # static predicate, ANDed with the cursor filter
 
     def __post_init__(self) -> None:
         if not _NAME.match(self.name):

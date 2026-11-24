@@ -239,3 +239,13 @@ def test_without_lag_a_new_row_tying_the_boundary_lands_and_a_landed_one_does_no
     r2 = invoke()
     assert r2["rows"] == {"transactions": 1}
     assert ids(landed(bucket)) == [1, 2, 3]
+
+
+def test_where_is_anded_with_the_cursor_filter(db, bucket, invoke):
+    db.insert(
+        (1, "2025-12-31 23:00:00", "JHB", 100),  # before initial_value
+        (2, "2026-11-20 08:00:00", "TEST", 200),
+        (3, "2026-11-20 09:00:00", "CPT", 300),
+    )
+    invoke(where="\"Branch Code\" <> 'TEST'")
+    assert ids(landed(bucket)) == [3]
