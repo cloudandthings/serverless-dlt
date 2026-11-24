@@ -46,7 +46,24 @@ def test_decimal_rule_does_not_apply_to_pyarrow():
 
 
 DENIED = {
-    "postgres": [pg.INTERVAL(), pg.MONEY(), sa.Time(timezone=True), pg.MACADDR(), sa.ARRAY(sa.Integer())],
+    "postgres": [
+        pg.INTERVAL(),
+        pg.MONEY(),
+        sa.Time(timezone=True),
+        pg.MACADDR(),
+        pg.MACADDR8(),
+        pg.CIDR(),
+        pg.BIT(varying=True),
+        pg.TSVECTOR(),
+        pg.TSQUERY(),
+        sa.String(),  # how SQLAlchemy reflects "char" (and name)
+        sa.ARRAY(sa.Uuid()),
+        sa.ARRAY(sa.DateTime()),
+        sa.ARRAY(sa.CHAR(2)),
+        sa.ARRAY(pg.JSONB()),
+        sa.ARRAY(sa.Numeric()),  # each element would lose digits, as for a NUMERIC column
+        sa.ARRAY(sa.Numeric(38, 12)),
+    ],
     "mssql": [mssql.SQL_VARIANT(), mssql.XML()],
     "oracle": [
         oracle.RAW(16),
@@ -65,6 +82,24 @@ DENIED = {
 def test_denied_types_are_findings_on_connectorx_only(dialect, col_type):
     assert len(column_findings(dialect, "connectorx", [("C", col_type)])) == 1
     assert column_findings(dialect, "pyarrow", [("C", col_type)]) == []
+
+
+@pytest.mark.parametrize(
+    "item",
+    [sa.SmallInteger(), sa.Integer(), sa.BigInteger(), sa.Boolean(), pg.REAL(), pg.DOUBLE_PRECISION(),
+     sa.Numeric(10, 2), sa.VARCHAR(5), sa.TEXT()],
+    ids=lambda v: type(v).__name__,
+)
+def test_postgres_arrays_of_elements_connectorx_reads_pass(item):
+    assert column_findings("postgres", "connectorx", [("C", sa.ARRAY(item))]) == []
+
+
+@pytest.mark.parametrize("dialect", ["postgres", "mysql", "mssql", "oracle"])
+def test_a_type_sqlalchemy_does_not_recognise_is_a_finding_on_connectorx_only(dialect):
+    # Postgres xml, geometric types, pg_lsn and composite types; MySQL geometry types (integration type matrix)
+    [finding] = column_findings(dialect, "connectorx", [("C", sa.types.NullType())])
+    assert "C" in finding and "not recognised" in finding
+    assert column_findings(dialect, "pyarrow", [("C", sa.types.NullType())]) == []
 
 
 def test_a_type_denied_on_one_dialect_is_fine_on_another():

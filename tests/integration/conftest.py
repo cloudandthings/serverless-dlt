@@ -107,6 +107,13 @@ class SourceDB:
     def connection(self, **overrides) -> dict:
         return self.engine.connection(self.database) | overrides
 
+    def connectorx_url(self, **overrides) -> str:
+        """The ConnectorX URL db_bronze builds for this database."""
+        from db_bronze.config import ConnectionConfig
+        from db_bronze.urls import connectorx_url
+
+        return connectorx_url(ConnectionConfig(**self.connection(**overrides)))
+
     def create(self, define: Callable[[sa.MetaData], sa.Table]) -> sa.Table:
         table = define(self.metadata)
         table.create(self.sa)
