@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 import pytest
-from test_db_incremental import SourceDB, files, ids, landed
+from test_db_incremental import DDL, SourceDB, files, ids, landed
 
 from db_bronze import ConfigError
 from db_bronze.handler import handler
@@ -202,3 +202,45 @@ def test_full_on_an_integer_cursor_lands_from_initial_value_and_leaves_the_curso
     db.insert((5, "2026-11-20 08:00:00", "JHB", 5))
     invoke(config_tables=[cursor_table])
     assert landed_ids(bucket, "incremental") == [2, 3, 4, 5]
+
+
+def manifests(bucket: Path) -> dict[str, dict]:
+    root = bucket / "core_banking" / "_manifests"
+    return {f.relative_to(root).as_posix(): json.loads(f.read_text()) for f in sorted(root.rglob("*.json"))}
+
+
+def file_load_ids(bucket: Path, table: str, mode: str) -> set[str]:
+    """Load ids from data file names (`<load_id>.<file_id>.parquet`)."""
+    return {f.name.rsplit(".", 2)[0] for f in files(bucket, table) if f"/mode={mode}/" in f.as_posix()}
+
+
+def test_full_run_writes_one_manifest_per_table_listing_exactly_its_load_ids(branches, bucket, invoke):
+    db = branches
+    db.insert((1, "2026-11-20 08:00:00", "JHB", 100))
+    invoke(config_tables=[TRANSACTIONS, BRANCHES], tables=["transactions"])  # incremental: no manifest
+    assert manifests(bucket) == {}
+    first = invoke(config_tables=[TRANSACTIONS, BRANCHES], mode="full")
+    second = invoke(config_tables=[TRANSACTIONS, BRANCHES], mode="full")
+    assert first["snapshot_id"] != second["snapshot_id"]
+    found = manifests(bucket)
+    assert len(found) == 4
+    for result in (first, second):
+        for table in ("transactions", "branches"):
+            manifest = found[f"{table}/{result['snapshot_id']}.json"]
+            assert manifest["table"] == table and manifest["snapshot_id"] == result["snapshot_id"]
+            assert manifest["load_ids"] == result["load_ids"]
+    landed_full = file_load_ids(bucket, "transactions", "full")
+    assert landed_full == set(first["load_ids"]) | set(second["load_ids"])
+    assert set(first["load_ids"]).isdisjoint(second["load_ids"])
+
+
+def test_failed_full_run_writes_no_manifest(db, bucket, invoke):
+    db.insert((1, "2026-11-20 08:00:00", "JHB", 100))
+    invoke()
+    db.execute('ALTER TABLE "Transactions" RENAME TO "Old"')  # a type change fails the run (schema freeze)
+    db.execute(DDL.replace('"amountCents" INTEGER', '"amountCents" TEXT'))
+    db.execute('INSERT INTO "Transactions" VALUES (2, \'2026-11-21 08:00:00\', \'CPT\', \'two hundred\')')
+    with pytest.raises(Exception, match="amountCents"):
+        invoke(mode="full")
+    assert manifests(bucket) == {}
+    assert file_load_ids(bucket, "transactions", "full") == set()

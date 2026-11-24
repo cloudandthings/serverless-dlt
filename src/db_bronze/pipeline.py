@@ -16,6 +16,7 @@ from dlt.common.schema import Schema
 from dlt.destinations import filesystem
 
 from .config import RunRequest, SourceConfig
+from .manifest import new_snapshot_id, write_manifest
 from .source import make_engine, make_resource
 
 log = logging.getLogger(__name__)
@@ -26,6 +27,8 @@ LAYOUT = "{table_name}/mode={mode}/year={YYYY}/month={MM}/day={DD}/{load_id}.{fi
 def bronze_destination(cfg: SourceConfig, req: RunRequest):
     """Filesystem destination with the bronze layout.
 
+    The date in the path is the load date, except for timestamp backfills, where
+    it is the window start, so a backfill window is self-describing.
     `direct` naming lets `/` appear in table names, which dlt warns makes the
     layout ambiguous. Bronze table names are validated lowercase identifiers,
     so the warning is turned off.
@@ -66,6 +69,13 @@ def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | Non
         info = pipe.run(resources, loader_file_format="parquet", schema=bronze_schema(cfg))
     finally:
         engine.dispose()
+    load_ids = list(info.loads_ids)
+    snapshot_id = None
+    if req.mode == "full":
+        # Only now, after every load succeeded: a full load without a manifest is ignored by silver (section 12).
+        snapshot_id = new_snapshot_id(run_started)
+        for tc in tables:
+            write_manifest(cfg.bucket_url, cfg.dataset_name, tc.name, snapshot_id, load_ids)
     norm = pipe.last_trace.last_normalize_info
     rows = {t: n for t, n in (norm.row_counts if norm else {}).items() if not t.startswith("_dlt")}
     return {
@@ -73,7 +83,8 @@ def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | Non
         "mode": req.mode,
         "window_start": req.window_start,
         "window_end": req.window_end,
-        "load_ids": list(info.loads_ids),
+        "snapshot_id": snapshot_id,
+        "load_ids": load_ids,
         "rows": rows,
         "is_empty": not any(rows.values()),
         "started_at": run_started.isoformat(),
