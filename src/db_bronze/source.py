@@ -11,7 +11,7 @@ import dlt
 import sqlalchemy as sa
 
 from .config import ConnectionConfig, SourceConfig, TableConfig
-from .extract import column_specs, naive_timestamp_columns, read_pyarrow, with_extracted_at
+from .extract import column_specs, naive_timestamp_columns, read_connectorx, read_pyarrow, with_extracted_at
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +35,7 @@ def reflect(engine: sa.Engine, tc: TableConfig) -> sa.Table:
 def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_started: datetime):
     table = reflect(engine, tc)
     specs = column_specs(table)
+    backend = cfg.backend(tc)
     batch_size = cfg.batch_size(tc)
     # Without this hint dlt labels naive timestamps UTC without shifting them (prototype S5).
     hints = {name: {"timezone": False} for name in naive_timestamp_columns(table)}
@@ -59,7 +60,13 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_sta
         ),
     ):
         stmt = sa.select(table).where(cursor_col >= cursor.start_value).order_by(cursor_col)
-        for batch in read_pyarrow(engine, stmt, specs, batch_size):
+        if backend == "connectorx":
+            # ConnectorX takes SQL text, so values are inlined, as dlt's own sql_table does.
+            sql = str(stmt.compile(engine, compile_kwargs={"literal_binds": True}))
+            batches = read_connectorx(connectorx_url(cfg.connection), sql, specs, batch_size)
+        else:
+            batches = read_pyarrow(engine, stmt, specs, batch_size)
+        for batch in batches:
             yield with_extracted_at(batch, run_started)
 
     return rows

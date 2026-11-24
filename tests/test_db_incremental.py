@@ -6,6 +6,7 @@ import json
 import logging
 import sqlite3
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pyarrow as pa
@@ -58,8 +59,14 @@ def config_dir(tmp_path: Path, monkeypatch) -> Path:
     return path
 
 
+@pytest.fixture(params=["pyarrow", "connectorx"])
+def backend(request) -> str:
+    """Every handler-level scenario runs on every implemented backend."""
+    return request.param
+
+
 @pytest.fixture
-def invoke(db: SourceDB, bucket: Path, config_dir: Path, pipelines_dir: str, monkeypatch):
+def invoke(db: SourceDB, bucket: Path, config_dir: Path, pipelines_dir: str, backend: str, monkeypatch):
     """Write the config for `source_id` "core" and return a function that invokes the handler."""
     monkeypatch.setenv("DLT_DATA_DIR", pipelines_dir)
     table = {
@@ -67,7 +74,7 @@ def invoke(db: SourceDB, bucket: Path, config_dir: Path, pipelines_dir: str, mon
         "table": "Transactions",
         "primary_key": ["TransactionId"],
         "cursor": {"column": "UpdatedAt", "type": "timestamp", "initial_value": "2026-01-01T00:00:00Z"},
-        "backend": "pyarrow",
+        "backend": backend,
     }
 
     def write_config(**table_overrides) -> None:
@@ -222,3 +229,38 @@ def test_nullability_comes_from_reflection(db, bucket, invoke):
     schema = pq.read_schema(f)
     assert not schema.field("TransactionId").nullable and not schema.field("UpdatedAt").nullable
     assert schema.field("Branch Code").nullable and schema.field("amountCents").nullable
+
+
+@pytest.mark.parametrize("backend", ["connectorx"])
+def test_connectorx_decimal_38_10_and_naive_timestamp_land_unchanged(db, bucket, invoke, monkeypatch):
+    # ConnectorX on SQLite infers types from the stored values and has no decimal, so the stream is
+    # what ConnectorX returns for a decimal(38,10) column on a server engine (section 3.1).
+    import connectorx
+
+    db.execute('ALTER TABLE "Transactions" ADD COLUMN "Balance" DECIMAL(38,10)')
+    balance = Decimal("123456789012345678.0123456789")
+    batch = pa.RecordBatch.from_pydict(
+        {
+            "TransactionId": pa.array([1], pa.int64()),
+            "UpdatedAt": pa.array([datetime(2026, 11, 20, 8, 0)], pa.timestamp("us")),
+            "Branch Code": pa.array(["JHB"], pa.string()),
+            "amountCents": pa.array([100], pa.int64()),
+            "Balance": pa.array([balance], pa.decimal128(38, 10)),
+        }
+    )
+    calls = []
+
+    def read_sql(conn, query, *, return_type, batch_size):
+        calls.append((conn, return_type, batch_size))
+        return pa.RecordBatchReader.from_batches(batch.schema, [batch])
+
+    monkeypatch.setattr(connectorx, "read_sql", read_sql)
+    invoke(batch_size=7)
+    assert calls == [(f"sqlite://{db.path}", "arrow_stream", 7)]
+    [f] = files(bucket)
+    schema = pq.read_schema(f)
+    assert schema.field("Balance").type == pa.decimal128(38, 10)
+    assert schema.field("UpdatedAt").type == pa.timestamp("us")
+    [row] = landed(bucket)
+    assert row["Balance"] == balance
+    assert row["UpdatedAt"] == datetime(2026, 11, 20, 8, 0)
