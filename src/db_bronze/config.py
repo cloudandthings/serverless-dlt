@@ -130,6 +130,12 @@ class ChunkingConfig:
     order_by: tuple[str, ...] = ()
     page_size: int | None = None
 
+    def __post_init__(self) -> None:
+        if self.strategy not in CHUNKING_STRATEGIES:
+            raise ConfigError(f"chunking.strategy {self.strategy!r} not in {CHUNKING_STRATEGIES}")
+        if self.strategy == "stream" and (self.order_by or self.page_size is not None):
+            raise ConfigError("chunking: order_by and page_size apply only to keyset; remove them or use keyset")
+
 
 @dataclass(frozen=True)
 class PartitionConfig:
@@ -163,6 +169,23 @@ class TableConfig:
             raise ConfigError(f"table name {self.name!r} must match {_NAME.pattern}")
         if self.batch_size is not None and not _positive_int(self.batch_size):
             raise ConfigError(f"table {self.name}: batch_size must be a positive integer")
+        if self.chunking.strategy == "keyset":
+            self._check_keyset()
+
+    def _check_keyset(self) -> None:
+        where = f"table {self.name}: keyset chunking"
+        cursor = self.cursor.column if self.cursor else "<cursor column>"
+        if not self.chunking.order_by:
+            raise ConfigError(f'{where} needs an order; set "order_by": ["{cursor}", <primary key columns>]')
+        if self.cursor and self.chunking.order_by[0] != self.cursor.column:
+            raise ConfigError(
+                f'{where}: "order_by" {list(self.chunking.order_by)} does not start with the cursor; '
+                f'start "order_by" with the cursor column "{cursor}", then the primary key columns'
+            )
+        if not self.primary_key:
+            raise ConfigError(f'{where} breaks ties by the primary key; set "primary_key"')
+        if not _positive_int(self.chunking.page_size):
+            raise ConfigError(f'{where}: set "page_size" to a positive number of rows per page')
 
 
 @dataclass(frozen=True)

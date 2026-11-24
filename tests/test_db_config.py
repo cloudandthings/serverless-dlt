@@ -158,3 +158,28 @@ def test_kerberos_parses_on_mssql_connectorx_and_on_pyarrow():
 )
 def test_auth_is_tagged_by_type(auth, match):
     assert match in rejected(config("mssql", connection={"auth": auth}))
+
+
+def keyset(**chunking) -> dict:
+    return {"strategy": "keyset", "order_by": ["UpdatedAt", "TransactionId"], "page_size": 1000} | chunking
+
+
+@pytest.mark.parametrize(
+    "table,fix",
+    [
+        ({"chunking": keyset(order_by=None)}, 'set "order_by": ["UpdatedAt", <primary key columns>]'),
+        ({"chunking": keyset(order_by=["TransactionId", "UpdatedAt"])}, 'start "order_by" with the cursor column'),
+        ({"chunking": keyset(), "primary_key": []}, 'set "primary_key"'),
+        ({"chunking": keyset(page_size=None)}, 'set "page_size"'),
+        ({"chunking": keyset(page_size=0)}, 'set "page_size"'),
+        ({"chunking": {"strategy": "pages"}}, "chunking.strategy 'pages' not in"),
+        ({"chunking": {"strategy": "stream", "page_size": 10}}, "remove them or use keyset"),
+    ],
+)
+def test_keyset_chunking_rules(table, fix):
+    assert fix in rejected(config(backend="pyarrow", **table))
+
+
+def test_keyset_led_by_the_cursor_with_a_primary_key_loads():
+    cfg = SourceConfig.from_dict(config(chunking=keyset()))
+    assert cfg.tables[0].chunking.order_by == ("UpdatedAt", "TransactionId")
