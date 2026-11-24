@@ -14,7 +14,10 @@ dependencies = [
 # Secrets Manager refs (secrets.py). The Lambda base image ships boto3, but pin it.
 aws = ["boto3>=1.40"]
 # db_bronze (DESIGN-db.md). Drivers and ConnectorX are added as their backends land.
-db = ["sqlalchemy>=2"]
+db = [
+    "connectorx>=0.4.6",
+    "sqlalchemy>=2",
+]
 
 [dependency-groups]
 # The tests cover both packages, so dev pulls in the db extra.
