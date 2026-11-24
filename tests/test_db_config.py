@@ -172,6 +172,7 @@ def keyset(**chunking) -> dict:
         ({"chunking": keyset(), "primary_key": []}, 'set "primary_key"'),
         ({"chunking": keyset(page_size=None)}, 'set "page_size"'),
         ({"chunking": keyset(page_size=0)}, 'set "page_size"'),
+        ({"chunking": keyset(), "columns": ["UpdatedAt", "Amount"]}, 'add ["TransactionId"] to "columns"'),
         ({"chunking": {"strategy": "pages"}}, "chunking.strategy 'pages' not in"),
         ({"chunking": {"strategy": "stream", "page_size": 10}}, "remove them or use keyset"),
     ],

@@ -344,6 +344,12 @@ class TableConfig:
             )
         if not self.primary_key:
             raise ConfigError(f'{where} breaks ties by the primary key; set "primary_key"')
+        missing = [c for c in self.chunking.order_by if self.columns and c not in self.columns]
+        if missing:
+            raise ConfigError(
+                f'{where} seeds each page from the last row\'s "order_by" values; '
+                f'add {json.dumps(missing)} to "columns"'
+            )
         if not _positive_int(self.chunking.page_size):
             raise ConfigError(f'{where}: set "page_size" to a positive number of rows per page')
 
