@@ -55,6 +55,7 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_sta
             initial_value=initial,
             lag=tc.cursor.lag,  # dlt steps cursor.start_value back by this
             row_order="asc",
+            on_cursor_value_missing="include" if tc.cursor.include_null_cursor else "raise",
         ),
     ):
         stmt = cursor_select(table, tc, cursor.start_value)

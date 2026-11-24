@@ -300,3 +300,34 @@ def test_lag_lands_a_late_commit_and_re_lands_the_lag_window_on_every_run(db, bu
     assert ids(load(bucket, r2)) == [4, 5, 6, 7, 8]  # window [08:00:40, ...)
     r3 = invoke(cursor=cursor)  # no source changes
     assert ids(load(bucket, r3)) == [5, 6, 8]  # window [08:00:50, ...) lands again
+
+
+@pytest.fixture
+def nullable_cursor(db):
+    """`Transactions` again, but with a nullable cursor column."""
+    db.execute('DROP TABLE "Transactions"')
+    db.execute(DDL.replace('"UpdatedAt" DATETIME NOT NULL', '"UpdatedAt" DATETIME'))
+    db.insert((1, "2026-11-20 08:00:00", "JHB", 100), (2, None, "CPT", 200))
+
+
+@pytest.mark.usefixtures("nullable_cursor")
+def test_include_null_cursor_lands_null_cursor_rows_on_every_run(db, bucket, invoke):
+    cursor = {
+        "column": "UpdatedAt", "type": "timestamp", "initial_value": "2026-01-01T00:00:00Z",
+        "include_null_cursor": True,
+    }
+    r1 = invoke(cursor=cursor)
+    assert ids(load(bucket, r1)) == [1, 2]
+    db.insert((3, "2026-11-21 08:00:00", "DBN", 300))
+    r2 = invoke(cursor=cursor)
+    assert ids(load(bucket, r2)) == [2, 3]
+    r3 = invoke(cursor=cursor)
+    assert ids(load(bucket, r3)) == [2]
+
+
+@pytest.mark.usefixtures("nullable_cursor")
+def test_null_cursor_rows_are_excluded_by_default(db, bucket, invoke):
+    invoke()
+    invoke(cursor={"column": "UpdatedAt", "type": "timestamp", "initial_value": "2026-01-01T00:00:00Z",
+                   "include_null_cursor": False})
+    assert ids(landed(bucket)) == [1]
