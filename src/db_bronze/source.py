@@ -53,16 +53,36 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, req: RunRequest, engine: s
     batch_size = cfg.batch_size(tc)
     # Without this hint dlt labels naive timestamps UTC without shifting them (prototype S5).
     hints = {name: {"timezone": False} for name in naive_timestamp_columns(table)}
-    cursor_col = table.c[tc.cursor.column]
-    initial, end = window(tc, req, run_started)
-
-    @dlt.resource(
+    resource = dlt.resource(
         name=tc.name,
         write_disposition="append",  # never "replace": it deletes sibling mode= partitions
         primary_key=list(tc.primary_key) or None,
         columns=hints,
         schema_contract=SCHEMA_CONTRACT,
     )
+
+    def extract(stmt: sa.Select):
+        if backend == "connectorx":
+            # ConnectorX takes SQL text, so values are inlined, as dlt's own sql_table does.
+            sql = str(stmt.compile(engine, compile_kwargs={"literal_binds": True}))
+            batches = read_connectorx(connectorx_url(cfg.connection), sql, specs, batch_size)
+        else:
+            batches = read_pyarrow(engine, stmt, specs, batch_size)
+        for batch in batches:
+            yield with_extracted_at(batch, run_started)
+
+    if tc.cursor is None:  # a snapshot table: everything, every time (mode=full only)
+
+        @resource
+        def snapshot():
+            yield from extract(sa.select(table))
+
+        return snapshot
+
+    cursor_col = table.c[tc.cursor.column]
+    initial, end = window(tc, req, run_started)
+
+    @resource
     def rows(
         # The incremental MUST be the argument's default value: dlt binds state and
         # filtering only to an incremental found in the signature. Building it in
@@ -77,14 +97,6 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, req: RunRequest, engine: s
         stmt = sa.select(table).where(cursor_col >= cursor.start_value)
         if cursor.end_value is not None:
             stmt = stmt.where(cursor_col < cursor.end_value)
-        stmt = stmt.order_by(cursor_col)
-        if backend == "connectorx":
-            # ConnectorX takes SQL text, so values are inlined, as dlt's own sql_table does.
-            sql = str(stmt.compile(engine, compile_kwargs={"literal_binds": True}))
-            batches = read_connectorx(connectorx_url(cfg.connection), sql, specs, batch_size)
-        else:
-            batches = read_pyarrow(engine, stmt, specs, batch_size)
-        for batch in batches:
-            yield with_extracted_at(batch, run_started)
+        yield from extract(stmt.order_by(cursor_col))
 
     return rows

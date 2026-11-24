@@ -91,3 +91,20 @@ def test_incremental_after_full_continues_from_the_previous_incremental_cursor(d
     assert result["rows"] == {"transactions": 2}
     assert landed_ids(bucket, "incremental") == [1, 2, 3, 4]
     assert landed_ids(bucket, "full") == [1, 2, 3]
+
+
+BRANCHES = {"name": "branches", "table": "Branches", "primary_key": ["BranchCode"]}  # no cursor: a snapshot table
+
+
+@pytest.fixture
+def branches(db: SourceDB) -> SourceDB:
+    db.execute('CREATE TABLE "Branches" ("BranchCode" TEXT PRIMARY KEY, "OpenedAt" DATETIME)')
+    db.execute("INSERT INTO \"Branches\" VALUES ('JHB', '1990-01-01 00:00:00'), ('CPT', '2999-01-01 00:00:00')")
+    return db
+
+
+def test_full_lands_everything_for_a_snapshot_table(branches, bucket, invoke):
+    result = invoke(tables=[TRANSACTIONS, BRANCHES], mode="full")
+    assert result["rows"]["branches"] == 2
+    assert sorted(r["BranchCode"] for r in landed(bucket, "branches")) == ["CPT", "JHB"]
+    assert partitions(bucket, "branches") == {today_partition("full")}
