@@ -51,6 +51,10 @@ def _names(value: Any, where: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _number(value: Any) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
 def _positive_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
@@ -113,6 +117,12 @@ class CursorConfig:
             raise ConfigError(f"cursor.initial_value must be an integer for an integer cursor: {self.initial_value!r}")
         if self.type == "timestamp":
             self.initial_timestamp  # noqa: B018 (validates)
+        if self.lag is not None and (not _number(self.lag) or self.lag < 0):
+            raise ConfigError(f"cursor.lag must be a number >= 0 (seconds, or an integer delta): {self.lag!r}")
+        if self.type == "integer" and self.lag is not None and not isinstance(self.lag, int):
+            raise ConfigError(f"cursor.lag {self.lag!r}: an integer cursor needs an integer lag")
+        if not isinstance(self.include_null_cursor, bool):
+            raise ConfigError(f"cursor.include_null_cursor must be true or false: {self.include_null_cursor!r}")
 
     @property
     def initial_timestamp(self) -> datetime:
@@ -169,6 +179,11 @@ class TableConfig:
             raise ConfigError(f"table name {self.name!r} must match {_NAME.pattern}")
         if self.batch_size is not None and not _positive_int(self.batch_size):
             raise ConfigError(f"table {self.name}: batch_size must be a positive integer")
+        if self.cursor and self.cursor.lag and not self.primary_key:
+            raise ConfigError(
+                f"table {self.name}: cursor.lag re-reads a window, and dlt needs the primary key for it; "
+                'set "primary_key", or remove "lag"'
+            )
         if self.chunking.strategy == "keyset":
             self._check_keyset()
 

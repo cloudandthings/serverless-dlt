@@ -183,3 +183,29 @@ def test_keyset_chunking_rules(table, fix):
 def test_keyset_led_by_the_cursor_with_a_primary_key_loads():
     cfg = SourceConfig.from_dict(config(chunking=keyset()))
     assert cfg.tables[0].chunking.order_by == ("UpdatedAt", "TransactionId")
+
+
+def cursor(**changes) -> dict:
+    return {"column": "UpdatedAt", "type": "timestamp", "initial_value": "2026-01-01T00:00:00Z"} | changes
+
+
+def test_lag_without_a_primary_key_is_rejected():
+    message = rejected(config(cursor=cursor(lag=300), primary_key=[]))
+    assert "lag" in message and 'set "primary_key"' in message
+
+
+def test_zero_lag_needs_no_primary_key():
+    SourceConfig.from_dict(config(cursor=cursor(lag=0), primary_key=[], backend="pyarrow"))
+
+
+@pytest.mark.parametrize(
+    "changes,match",
+    [
+        ({"lag": -1}, "cursor.lag must be a number >= 0"),
+        ({"lag": "5m"}, "cursor.lag must be a number >= 0"),
+        ({"type": "integer", "initial_value": 0, "lag": 1.5}, "an integer cursor needs an integer lag"),
+        ({"include_null_cursor": "yes"}, "include_null_cursor must be true or false"),
+    ],
+)
+def test_cursor_value_rules(changes, match):
+    assert match in rejected(config(cursor=cursor(**changes)))
