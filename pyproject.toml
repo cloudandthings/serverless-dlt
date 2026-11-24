@@ -45,6 +45,7 @@ testpaths = ["tests"]
 markers = [
     "spark: needs pyspark 4.1 and Java (uv sync --group silver)",
     "integration: needs Docker; real source engines from tests/integration/compose.yaml (mise run test:integration)",
+    "connectorx: drives ConnectorX itself; skipped on engines ConnectorX does not read (Db2)",
 ]
 # The integration suite is opt-in, so a plain run never needs Docker. A later -m on the
 # command line replaces this one (pytest -m integration).

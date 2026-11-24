@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #MISE description="Bring up the source engines (docker-compose) and run the db_bronze integration suite"
 #USAGE arg "[pytest_args]..." help="Passed to pytest, e.g. -- -k mysql"
-#USAGE flag "--keep" help="Leave the engines running afterwards (faster re-runs); stop them with: docker compose -f tests/integration/compose.yaml --profile oracle down"
+#USAGE flag "--keep" help="Leave the engines running afterwards (faster re-runs); stop them with: docker compose -f tests/integration/compose.yaml --profile oracle --profile db2 down"
 #USAGE flag "--image" help="Build the db_bronze image and run the same suite inside it, through the Lambda Runtime Interface Emulator"
-#USAGE flag "--inside" help="Build the db_bronze image and run pytest itself inside it, on the compose network (in-process handler and ConnectorX with Instant Client: Oracle's direct ConnectorX spike tests need it)"
+#USAGE flag "--inside" help="Build the db_bronze image and run pytest itself inside it, on the compose network (in-process handler and ConnectorX with Instant Client: Oracle's direct ConnectorX spike tests need it; Db2 runs only this way on a host without ibm_db)"
 #USAGE flag "-t --tag <tag>" help="Image tag for --image/--inside (default db-bronze:test)" env="IMAGE_TAG"
 #USAGE flag "--no-build" help="With --image/--inside: use the image already tagged, without rebuilding it"
-#USAGE flag "--engines <engines>" help="Comma-separated engines to run (DB_BRONZE_IT_ENGINES), e.g. oracle"
+#USAGE flag "--engines <engines>" help="Comma-separated engines to run (DB_BRONZE_IT_ENGINES), e.g. oracle or db2"
 set -euo pipefail
 cd "$MISE_PROJECT_ROOT"
 
@@ -16,7 +16,7 @@ eval "pytest_args=(${usage_pytest_args:-})"
 # COMPOSE_PROJECT_NAME and the DB_BRONZE_IT_*_PORT variables give a second stack of its own (compose.yaml)
 compose=(docker compose -f tests/integration/compose.yaml)
 if [[ "${usage_keep:-false}" != "true" ]]; then
-  trap '"${compose[@]}" --profile oracle down --volumes --remove-orphans' EXIT
+  trap '"${compose[@]}" --profile oracle --profile db2 down --volumes --remove-orphans' EXIT
 fi
 image="${usage_image:-false}"
 inside="${usage_inside:-false}"
@@ -29,11 +29,19 @@ if [[ ("$image" == "true" || "$inside" == "true") && "${usage_no_build:-false}" 
 fi
 
 # Oracle runs its handler only with Instant Client, so it starts only for the image runs (or when named).
+# Db2 needs ibm_db, in the image only on a host that is not x86_64 Linux, so it starts only for --inside
+# runs there (or when named); on an x86_64 Linux host it starts with every run.
 services=()
 if [[ -n "${DB_BRONZE_IT_ENGINES:-}" ]]; then
   IFS=, read -ra services <<<"$DB_BRONZE_IT_ENGINES"
-elif [[ "$image" == "true" || "$inside" == "true" ]]; then
-  export COMPOSE_PROFILES=oracle
+else
+  profiles=()
+  [[ "$image" == "true" || "$inside" == "true" ]] && profiles+=(oracle)
+  [[ "$inside" == "true" || "$(uname -sm)" == "Linux x86_64" ]] && profiles+=(db2)
+  if (( ${#profiles[@]} )); then
+    COMPOSE_PROFILES="$(IFS=,; echo "${profiles[*]}")"
+    export COMPOSE_PROFILES
+  fi
 fi
 "${compose[@]}" up -d --wait ${services[@]+"${services[@]}"}
 

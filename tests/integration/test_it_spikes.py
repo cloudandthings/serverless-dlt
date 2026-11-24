@@ -16,19 +16,19 @@ import connectorx as cx
 import pytest
 import sqlalchemy as sa
 
-from db_bronze.config import CursorConfig, SourceConfig, TableConfig
+from db_bronze.config import ChunkingConfig, CursorConfig, SourceConfig, TableConfig
 from db_bronze.extract import ColumnSpec, read_pyarrow
 from db_bronze.preflight import MIN_SERVER_VERSION
-from db_bronze.query import cursor_select, literal_sql
+from db_bronze.query import cursor_select, keyset_select, literal_sql
 from db_bronze.urls import connectorx_url
 
-from .conftest import connectorx_in_process, fails
+from .conftest import NO_CONNECTORX, connectorx_skip_reason, fails
 
 pytestmark = pytest.mark.integration
 
 ROWS = 2500  # at 2 ms a row, a slow query runs about 5 s
 # ConnectorX hands over its first SQL Server batch only after seconds, so the query must run on well past that
-ROWS_FOR = {"mssql": 10000, "oracle": 500}
+ROWS_FOR = {"mssql": 10000, "oracle": 500, "db2": 2500}
 SLOW = {
     "postgres": "SELECT g AS id, (pg_sleep(0.002) IS NULL)::int AS {marker} FROM generate_series(1, {rows}) g",
     "mysql": "SELECT /*+ SET_VAR(cte_max_recursion_depth=100000) */ seq AS id, SLEEP(0.002) AS {marker} "
@@ -38,6 +38,9 @@ SLOW = {
     "FROM sys.all_objects a CROSS JOIN sys.all_objects b",
     # DBMS_SESSION.SLEEP barely sleeps below 10 ms, so Oracle sleeps 10 ms a row, over fewer rows (ROWS_FOR)
     "oracle": "SELECT level AS id, it_sleep(level) AS {marker} FROM dual CONNECT BY level <= {rows}",
+    # Db2 allows WITH only at the top, and resolves an unqualified function by CURRENT PATH, not the schema
+    "db2": "SELECT ROW_NUMBER() OVER () AS id, {schema}.it_burn(BURN) AS {marker} "
+    "FROM SYSCAT.COLUMNS a, SYSCAT.COLUMNS b FETCH FIRST {rows} ROWS ONLY",
 }
 SLOW_SETUP = {
     "mssql": "CREATE FUNCTION dbo.burn(@n int) RETURNS int AS BEGIN "
@@ -45,6 +48,8 @@ SLOW_SETUP = {
     # Oracle has no sleep usable in a query; a function of the test's own schema wraps one.
     "oracle": "CREATE OR REPLACE FUNCTION it_sleep(n NUMBER) RETURN NUMBER IS "
     "BEGIN DBMS_SESSION.SLEEP(0.01); RETURN 0; END;",
+    "db2": "CREATE FUNCTION it_burn(n INTEGER) RETURNS INTEGER LANGUAGE SQL NOT DETERMINISTIC NO EXTERNAL ACTION "
+    "BEGIN DECLARE i INTEGER DEFAULT 0; WHILE i < n DO SET i = i + 1; END WHILE; RETURN i; END",
 }
 RUNNING = {
     "postgres": "SELECT pid FROM pg_stat_activity WHERE state = 'active' AND query LIKE :q AND pid <> pg_backend_pid()",
@@ -54,12 +59,16 @@ RUNNING = {
     "CROSS APPLY sys.dm_exec_input_buffer(r.session_id, NULL) b WHERE b.event_info LIKE :q AND r.session_id <> @@SPID",
     "oracle": "SELECT DISTINCT s.sid || ',' || s.serial# FROM v$session s JOIN v$sql q ON q.sql_id = s.sql_id "
     "WHERE s.status = 'ACTIVE' AND q.sql_text LIKE :q AND s.sid <> SYS_CONTEXT('USERENV', 'SID')",
+    "db2": "SELECT VARCHAR(a.application_handle) || ',' || VARCHAR(a.uow_id) || ',' || VARCHAR(a.activity_id) "
+    "FROM TABLE(MON_GET_ACTIVITY(NULL, -2)) a "
+    "WHERE a.stmt_text LIKE :q AND a.application_handle <> MON_GET_APPLICATION_HANDLE()",
 }
 CANCEL = {
     "postgres": "SELECT pg_cancel_backend({id})",
     "mysql": "KILL QUERY {id}",
     "mssql": "KILL {id}",
     "oracle": "ALTER SYSTEM CANCEL SQL '{id}'",
+    "db2": "CALL SYSPROC.WLM_CANCEL_ACTIVITY({id})",
 }
 
 
@@ -69,7 +78,8 @@ class SlowQuery:
     def __init__(self, source) -> None:
         self.source = source
         self.marker = f"slow_{uuid.uuid4().hex[:10]}"
-        self.sql = SLOW[source.dialect].format(marker=self.marker, rows=ROWS_FOR.get(source.dialect, ROWS))
+        rows = ROWS_FOR.get(source.dialect, ROWS)
+        self.sql = SLOW[source.dialect].format(marker=self.marker, rows=rows, schema=source.database)
         if source.dialect in SLOW_SETUP:
             source.execute(SLOW_SETUP[source.dialect])
 
@@ -85,8 +95,8 @@ class SlowQuery:
 
 def connectorx_here(source) -> None:
     """Skip unless this process can call ConnectorX on the engine directly (Oracle: Instant Client, `--inside`)."""
-    if not connectorx_in_process(source.dialect):
-        pytest.skip(f"{source.dialect}: ConnectorX needs Instant Client in this process; run with --inside")
+    if reason := connectorx_skip_reason(source.dialect):
+        pytest.skip(reason)
 
 
 def cx_url(source, **connection) -> str:
@@ -214,6 +224,43 @@ def test_datetime_and_decimal_literals_round_trip_through_connectorx(source):
     assert inlined == bound
 
 
+def test_inlined_cursor_and_keyset_literals_select_what_the_bound_queries_do_on_db2(source):
+    """S2 on Db2. ConnectorX does not read Db2, so no Db2 query is inlined today; this pins that it could be.
+
+    The cursor window and the keyset seed, inlined (microsecond timestamps, a
+    28-digit decimal), run through ibm_db and select exactly what the bound
+    statements do.
+    """
+    if source.dialect != "db2":
+        pytest.skip("Db2 only: the other engines run S2 through ConnectorX")
+    table = source.create(literals)
+    one_us = timedelta(microseconds=1)
+    tiny = Decimal("0.0000000001")
+    source.insert(table, [
+        {"id": 1, "at": BOUNDARY - one_us, "amount": AMOUNT, "day": date(2026, 11, 20)},
+        {"id": 2, "at": BOUNDARY, "amount": AMOUNT - tiny, "day": date(2026, 11, 20)},
+        {"id": 3, "at": BOUNDARY, "amount": AMOUNT, "day": date(2026, 11, 20)},
+        {"id": 4, "at": BOUNDARY, "amount": AMOUNT + tiny, "day": date(2026, 11, 20)},
+        {"id": 5, "at": BOUNDARY + one_us, "amount": AMOUNT, "day": date(2026, 11, 20)},
+        {"id": 6, "at": BOUNDARY + 2 * one_us, "amount": AMOUNT, "day": date(2026, 11, 20)},
+    ])
+    cursor = CursorConfig(column="at", type="timestamp", initial_value="2026-01-01")
+    keyset = ChunkingConfig(strategy="keyset", order_by=("at", "amount", "id"), page_size=10)
+    tc = TableConfig(name="lit", table="literals", primary_key=("id",), cursor=cursor, chunking=keyset)
+    end = BOUNDARY + 2 * one_us
+    statements = {
+        "cursor": cursor_select(table, tc, BOUNDARY, end),
+        "keyset": keyset_select(table, tc, BOUNDARY, end, after=(BOUNDARY, AMOUNT - tiny, 2)),
+    }
+    dialect = source.sa.dialect
+    with source.sa.connect() as conn:
+        selected = {
+            name: (list(conn.execute(stmt).scalars()), [r[0] for r in conn.exec_driver_sql(literal_sql(stmt, dialect))])
+            for name, stmt in statements.items()
+        }
+    assert selected == {"cursor": ([2, 3, 4, 5], [2, 3, 4, 5]), "keyset": ([3, 4, 5], [3, 4, 5])}
+
+
 def test_a_time_zone_aware_literal_round_trips_on_postgres(source):
     if source.dialect != "postgres":
         pytest.skip("only Postgres has a time-zone-aware timestamp the cursor can be")
@@ -291,7 +338,7 @@ def test_a_microsecond_backfill_window_selects_the_same_rows_on_both_backends(so
     ])
     window = {"window_start": "2026-11-20T08:00:00.123456Z", "window_end": "2026-11-20T08:00:00.123458Z"}
     cursor = {"column": "at", "type": "timestamp", "initial_value": "2026-01-01T00:00:00Z"}
-    for backend in ("pyarrow", "connectorx"):
+    for backend in ("pyarrow",) if source.dialect in NO_CONNECTORX else ("pyarrow", "connectorx"):
         config = {"name": f"lit_{backend}", "table": "literals", "cursor": cursor, "backend": backend}
         run({"source_id": "lit", "mode": "backfill"} | window, config)
         assert sorted(r["id"] for r in source.landed(f"lit_{backend}")) == [2, 3], backend
@@ -319,6 +366,7 @@ def test_a_time_zone_aware_cursor_on_oracle_selects_by_instant(source, run):
 # S6: thick-mode oracledb and ConnectorX in one process -------------------------------------------------------
 
 
+@pytest.mark.connectorx
 def test_both_backends_run_in_one_invocation(source, run):
     """S6 (Oracle): both load libclntsh in one process, one table each, in the same invocation."""
     source.transactions((1, "2026-11-20 08:00:00", "JHB", 100), (2, "2026-11-20 09:00:00", "CPT", 200))
@@ -339,6 +387,9 @@ ISOLATION_QUERY = {
     "WHEN 2 THEN 'READ COMMITTED' WHEN 3 THEN 'REPEATABLE READ' WHEN 4 THEN 'SERIALIZABLE' WHEN 5 THEN 'SNAPSHOT' "
     "END AS iso FROM sys.dm_exec_sessions WHERE session_id = @@SPID",
     "oracle": "SELECT 1 AS id, it_isolation() AS iso FROM dual",
+    # the level this very statement runs at (Db2 names: UR, CS, RS, RR)
+    "db2": "SELECT 1 AS id, a.effective_isolation AS iso "
+    "FROM TABLE(MON_GET_ACTIVITY(MON_GET_APPLICATION_HANDLE(), -1)) a FETCH FIRST 1 ROW ONLY",
 }
 # Oracle shows a session's isolation only on its open transaction (v$transaction), so a function of
 # the test's schema opens one and reads it back, as SQLAlchemy's own get_isolation_level does.
@@ -350,10 +401,12 @@ ISOLATION_SETUP = {
     "RETURN lvl; END;",
 }
 APPLIED = {
-    "postgres": "repeatable read", "mysql": "READ-COMMITTED", "mssql": "REPEATABLE READ", "oracle": "SERIALIZABLE"
+    "postgres": "repeatable read", "mysql": "READ-COMMITTED", "mssql": "REPEATABLE READ", "oracle": "SERIALIZABLE",
+    "db2": "RR",  # Db2's Repeatable Read is the standard's SERIALIZABLE
 }
 LEVEL = {  # never the engine's default
-    "postgres": "REPEATABLE READ", "mysql": "READ COMMITTED", "mssql": "REPEATABLE READ", "oracle": "SERIALIZABLE"
+    "postgres": "REPEATABLE READ", "mysql": "READ COMMITTED", "mssql": "REPEATABLE READ", "oracle": "SERIALIZABLE",
+    "db2": "SERIALIZABLE",
 }
 
 
@@ -371,6 +424,7 @@ def test_isolation_level_applies_on_the_traditional_backend(source, run):
     assert [r["iso"] for r in source.landed("iso")] == [APPLIED[source.dialect]]
 
 
+@pytest.mark.connectorx
 def test_isolation_level_with_connectorx(source, run):
     """Postgres: ConnectorX honours libpq `options`. SQL Server: a SET statement ahead of the query, in the same batch.
 

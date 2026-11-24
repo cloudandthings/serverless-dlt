@@ -18,7 +18,7 @@ import connectorx as cx
 import pyarrow.parquet as pq
 import pytest
 
-from .conftest import connectorx_in_process
+from .conftest import connectorx_skip_reason
 
 pytestmark = pytest.mark.integration
 
@@ -191,6 +191,37 @@ MATRIX = {
         "c_hierarchyid": ("hierarchyid", "'/1/'", False),
         "c_geography": ("geography", "geography::Point(1, 2, 4326)", False),
         "c_geometry": ("geometry", "geometry::Point(1, 2, 0)", False),
+    },
+    # ConnectorX does not read Db2 at all (the third field is False throughout): pyarrow only.
+    "db2": {
+        "c_smallint": ("smallint", "1", False),
+        "c_integer": ("integer", "2", False),
+        "c_bigint": ("bigint", "3", False),
+        "c_decimal_18_4": ("decimal(18,4)", "12345678901234.5678", False),
+        "c_decimal_31_12": ("decimal(31,12)", "1234567890123456789.123456789012", False),
+        "c_decimal_31_0": ("decimal(31,0)", "1234567890123456789012345678901", False),
+        "c_decfloat16": ("decfloat(16)", "1.234567890123456", False),
+        "c_decfloat34": ("decfloat(34)", "1.234567890123456789012345678901234", False),
+        "c_real": ("real", "1.5", False),
+        "c_double": ("double", "2.5", False),
+        "c_boolean": ("boolean", "true", False),
+        "c_char": ("char(5)", "'c'", False),
+        "c_varchar": ("varchar(20)", "'v'", False),
+        "c_clob": ("clob", "'cl'", False),
+        "c_graphic": ("graphic(5)", "'g'", False),
+        "c_vargraphic": ("vargraphic(20)", "'\u00fcn\u00ef'", False),
+        "c_dbclob": ("dbclob", "'db'", False),
+        "c_char_bit": ("char(4) for bit data", "x'01020304'", False),
+        "c_varchar_bit": ("varchar(8) for bit data", "x'0102'", False),
+        "c_binary": ("binary(4)", "bx'01020304'", False),
+        "c_varbinary": ("varbinary(8)", "bx'0102'", False),
+        "c_blob": ("blob", "blob(x'0102')", False),
+        "c_date": ("date", "'2026-11-20'", False),
+        "c_time": ("time", "'08:00:01'", False),
+        "c_timestamp": ("timestamp", "'2026-11-20 08:00:00.123456'", False),
+        "c_timestamp_0": ("timestamp(0)", "'2026-11-20 08:00:01'", False),
+        "c_timestamp_12": ("timestamp(12)", "'2026-11-20 08:00:00.123456789012'", False),
+        "c_xml": ("xml", "xmlparse(document '<a/>')", False),
     },
 }
 
@@ -439,8 +470,8 @@ FAILS_LOUDLY = {"oracle": {"c_number_38": "PosOverflow"}}  # NUMBER(p, 0) is rea
 
 
 def connectorx_here(source) -> None:
-    if not connectorx_in_process(source.dialect):
-        pytest.skip(f"{source.dialect}: ConnectorX needs Instant Client in this process; run with --inside")
+    if reason := connectorx_skip_reason(source.dialect):
+        pytest.skip(reason)
 
 
 def test_the_preflight_fails_exactly_the_columns_a_backend_cannot_land(source, run, backend):
@@ -460,6 +491,7 @@ def denied(matrix: dict[str, tuple[str, str, bool]]) -> set[str]:
     return {name for name, (_, _, cx_reads) in matrix.items() if not cx_reads}
 
 
+@pytest.mark.connectorx
 def test_every_column_connectorx_cannot_read_fails_the_preflight_naming_each_one(source, run):
     matrix = seed_matrix(source)
     table = {"name": "type_matrix", "table": "type_matrix", "backend": "connectorx"}

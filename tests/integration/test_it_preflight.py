@@ -60,6 +60,7 @@ def tx(backend: str, **overrides) -> dict:
     } | overrides
 
 
+@pytest.mark.connectorx
 def test_a_wide_decimal_on_connectorx_fails_the_preflight_and_lands_on_pyarrow(source, run, wide):
     with fails("PreflightError", r'(?s)column Amount: .*column Fee: .*"backend": "pyarrow"'):
         run({"source_id": "core"}, tx("connectorx"))
@@ -70,6 +71,7 @@ def test_a_wide_decimal_on_connectorx_fails_the_preflight_and_lands_on_pyarrow(s
     assert run({"source_id": "core"}, tx("pyarrow", name="transactions_pa"))["rows"] == {"transactions_pa": 1}
 
 
+@pytest.mark.connectorx
 def test_validate_reports_per_table_and_writes_nothing(source, run, wide):
     report = run({"source_id": "core", "mode": "validate"}, tx("connectorx"))
     [table] = report["tables"]
@@ -96,6 +98,7 @@ def test_kerberos_fails_at_run_start_with_not_implemented_and_nothing_lands(sour
     assert source.nothing_landed()
 
 
+@pytest.mark.connectorx
 def test_a_backend_change_fails_before_extraction_and_a_new_name_passes(source, run):
     source.transactions((1, "2026-11-20 08:00:00", "JHB", 100))
     run({"source_id": "core"}, tx("pyarrow"))
@@ -106,6 +109,7 @@ def test_a_backend_change_fails_before_extraction_and_a_new_name_passes(source, 
     assert run({"source_id": "core"}, tx("connectorx", name="transactions_v2"))["rows"] == {"transactions_v2": 2}
 
 
+@pytest.mark.connectorx
 def test_a_column_connectorx_cannot_read_in_a_query_fails_with_connectorx_failed_and_the_cursor_holds(source, run):
     """A `query` table's column types are not reflected, so the preflight cannot see them: ConnectorX fails."""
     q = source.quote
