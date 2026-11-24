@@ -2,39 +2,28 @@
 #MISE description="Bring up the source engines (docker-compose) and run the db_bronze integration suite"
 #USAGE arg "[pytest_args]..." help="Passed to pytest, e.g. -- -k mysql"
 #USAGE flag "--keep" help="Leave the engines running afterwards (faster re-runs); stop them with: docker compose -f tests/integration/compose.yaml down"
-#USAGE flag "--image <tag>" help="Run the suite inside this built image (mise run docker:build --db), every handler run going through the Lambda Runtime Interface Emulator"
+#USAGE flag "--image" help="Build the db_bronze image and run the same suite inside it, through the Lambda Runtime Interface Emulator"
+#USAGE flag "-t --tag <tag>" help="Image tag for --image (default db-bronze:test)" env="IMAGE_TAG"
+#USAGE flag "--no-build" help="With --image: use the image already tagged, without rebuilding it"
 set -euo pipefail
 cd "$MISE_PROJECT_ROOT"
 
 # usage hands the variadic args over as one shell-quoted string
 eval "pytest_args=(${usage_pytest_args:-})"
 
+# COMPOSE_PROJECT_NAME and the DB_BRONZE_IT_*_PORT variables give a second stack of its own (compose.yaml)
 compose=(docker compose -f tests/integration/compose.yaml)
 # DB_BRONZE_IT_ENGINES (e.g. "mssql") limits the run, and the services brought up, to some engines
 IFS=, read -r -a services <<< "${DB_BRONZE_IT_ENGINES:-}"
 if [[ "${usage_keep:-false}" != "true" ]]; then
   trap '"${compose[@]}" down --volumes --remove-orphans' EXIT
 fi
-"${compose[@]}" up -d --wait ${services[@]+"${services[@]}"}
-
-if [[ -z "${usage_image:-}" ]]; then
-  uv run pytest -m integration ${pytest_args[@]+"${pytest_args[@]}"}
-  exit
+if [[ "${usage_image:-false}" == "true" ]]; then
+  tag="${usage_tag:-db-bronze:test}"
+  if [[ "${usage_no_build:-false}" != "true" ]]; then
+    mise run docker:build --db --tag "$tag"
+  fi
+  export DB_BRONZE_IT_IMAGE="$tag"
 fi
-
-# Inside the image, on the compose network: pytest goes into /tmp (the image has none), the
-# emulator runs the handler in the background, and the tests invoke it over HTTP.
-# GODEBUG: the emulator is a Go binary; under QEMU user-mode emulation (amd64 on an arm64 host)
-# Go's async preemption signals intermittently crash it.
-project="$("${compose[@]}" config --format json | uv run python -c 'import json, sys; print(json.load(sys.stdin)["name"])')"
-docker run --rm --platform linux/amd64 --network "${project}_default" \
-  -v "$MISE_PROJECT_ROOT/tests:/it/tests:ro" -v "$MISE_PROJECT_ROOT/pyproject.toml:/it/pyproject.toml:ro" \
-  -e DB_BRONZE_IT_IN_NETWORK=1 -e DB_BRONZE_IT_RIE=http://127.0.0.1:8080 -e DB_BRONZE_IT_ENGINES \
-  -e AWS_LAMBDA_FUNCTION_TIMEOUT=900 -e GODEBUG=asyncpreemptoff=1 \
-  -w /it --entrypoint bash "$usage_image" -c '
-    set -euo pipefail
-    pip install --quiet --disable-pip-version-check --target /tmp/pytest pytest
-    /lambda-entrypoint.sh db_bronze.handler.handler > /tmp/rie.log 2>&1 &
-    PYTHONPATH=/tmp/pytest:/var/task python3 -m pytest -m integration -p no:cacheprovider "$@" \
-      || { status=$?; tail -n 200 /tmp/rie.log; exit $status; }
-  ' pytest ${pytest_args[@]+"${pytest_args[@]}"}
+"${compose[@]}" up -d --wait ${services[@]+"${services[@]}"}
+uv run pytest -m integration ${pytest_args[@]+"${pytest_args[@]}"}

@@ -5,6 +5,8 @@ and S5 answered by prototype on 24 November 2026 (branch
 `prototype/db-bronze-spikes`, `src/db_bronze/PROTOTYPE_spikes/FINDINGS.md`) and
 folded in below. S1 (server side), S2, S3 and S9 answered for Postgres and MySQL
 by the integration suite (`tests/integration/`, ticket 13) on 24 November 2026.
+Ticket 14 ran the full scenario suite on Postgres and MySQL, on the host and in the
+image, settled their deny lists and took a first peak-memory reading (S7).
 
 This is the database counterpart of `api_bronze` (see `DESIGN-api.md`). It records
 the requirement, the facts that constrain the design, every decision taken and
@@ -81,11 +83,11 @@ are upgraded as tests land.
 | Oracle | Compiled into the wheel, but it loads `libclntsh.so` at runtime, so it **needs Oracle Instant Client**. |
 | Kerberos | **MSSQL only.** The Linux wheel bundles MIT krb5 and supports `trusted_connection=true`. Postgres (tokio-postgres) and MySQL (mysql crate) have no GSSAPI. Oracle external auth through OCI is plausible but untested. |
 | Unmapped types | Raise `pyo3_runtime.PanicException`. It derives from **`BaseException`**, so `except Exception` does not catch it. Other errors raise `RuntimeError`. *Integration:* a server error in the middle of an `arrow_stream` also surfaces as `PanicException` ("cx writer failed"), on the batch read. |
-| Type gaps | **MSSQL:** sql_variant, xml, UDTs (hierarchyid, geography). **Oracle:** RAW, ROWID, INTERVAL, TIMESTAMP WITH LOCAL TIME ZONE, NCLOB, BFILE, XMLTYPE. **Postgres:** interval, money, timetz, macaddr, xml, composite types, and most array types. *Integration:* Postgres also cidr, varbit, point (and the other geometric types), tsvector and `"char"`; MySQL geometry types. But Postgres `integer[]` and `text[]` **are** read (as `large_list`), so the array entry of the deny list is broader than it needs to be. Ticket 14 settles the deny lists. |
+| Type gaps | **MSSQL:** sql_variant, xml, UDTs (hierarchyid, geography). **Oracle:** RAW, ROWID, INTERVAL, TIMESTAMP WITH LOCAL TIME ZONE, NCLOB, BFILE, XMLTYPE. *Integration (settled by ticket 14):* **Postgres:** interval, money, timetz, macaddr, macaddr8, xml, cidr, varbit, the geometric types (point, line, lseg, box, path, polygon, circle), tsvector, tsquery, `"char"`, pg_lsn, composite types, and arrays of any element type except smallint, integer, bigint, boolean, real, double precision, numeric, varchar and text (those arrays are read as `large_list`; a numeric element is `decimal128(38,10)`, so the decimal rule applies to it; a value with more dimensions than one fails the read). Postgres inet, `bit(n)`, ranges, enums, `name` and `oid` are read. **MySQL:** the geometry types (geometry, point, linestring, polygon and their multi- and collection forms); every other MySQL type is read. The preflight deny list matches these (section 6.2). |
 | **Decimals** | Always produced as `Decimal128(38,10)` and limited to about 28 significant digits. **A column with scale above 10 loses digits silently, without raising an error.** *Integration:* MySQL `decimal(65,30)` loses them silently; Postgres `numeric(38,12)` fails with `RuntimeError`; and a Postgres **`numeric` without precision** loses every digit past the 10th decimal place silently (`1.123456789012345678` lands as `1.1234567890`). |
 | Integer widths | *Integration:* on Postgres, `arrow_stream` widens `smallint` and `integer` to int64 and `real` to double (the plain `arrow` return type does not). On MySQL the source widths stay (int8, int16, int32, float). |
 | Session settings | *Integration (S3):* the Postgres URL takes libpq's `options`, so `-c default_transaction_isolation=...` (and any other `-c` setting) becomes the session default, on every connection including `partition_on` ones. The MySQL URL rejects unknown parameters (no `init` command), and `transaction_isolation` cannot be set with a `SET_VAR` hint. Multi-statement SQL is rejected on both. Spaces in URL parameters must be `%20`: ConnectorX reads `+` literally. |
-| `partition_on` | Integer column, N parallel connections. Works with `arrow_stream`, but batches from different partitions interleave, so **rows do not arrive in cursor order**. |
+| `partition_on` | Integer column, N parallel connections. Works with `arrow_stream`, but batches from different partitions interleave, so **rows do not arrive in cursor order**. *Integration:* ConnectorX puts the column name into its own range and partition SQL as given, so on Postgres an unquoted mixed-case name is folded to lower case and fails; the name is passed quoted for the engine. |
 
 ### 3.2 dlt 1.32.0
 
@@ -254,7 +256,12 @@ Checks:
 - **Server version** is at or above a minimum per dialect. The minimums are set from what the integration tests prove, not guessed. A server below the minimum fails; the backend is never switched silently. Proven so far (S9): **Postgres 11**, **MySQL 8.0**.
 - For tables on ConnectorX:
   - **DECIMAL/NUMERIC with scale > 10 or precision > 28**, and on Postgres a **NUMERIC without precision**. This check is mandatory: it is the only thing standing between a table and silent precision loss (section 3.1).
-  - Column types on the per-dialect deny list from section 3.1.
+  - Column types on the per-dialect deny list from section 3.1. A type SQLAlchemy does not recognise
+    (it reflects as `NullType`) is a finding on every server dialect: on Postgres and MySQL these are
+    exactly the xml, geometric, pg_lsn, composite and geometry types, none of which ConnectorX reads.
+    SQLAlchemy reflects Postgres `"char"` and `name` alike (a plain `String`), so both are findings,
+    although ConnectorX reads `name`. A `query` table's column types are not reflected, so a type
+    ConnectorX cannot read there fails the run with `ConnectorXFailed` instead.
 - Rows with a NULL cursor are **counted and logged** when `include_null_cursor` is false, so the gap is visible.
 
 The same checks run, without extracting, as `{"mode": "validate"}`. Use that when onboarding a new source.
@@ -306,7 +313,10 @@ loss: UUIDs, Postgres `inet`/`cidr`/`bit`, `interval` (dlt 1.32 does not take
 Arrow durations), `timetz` (as ISO text, keeping the offset), parsed JSON
 (re-serialised compactly, as ConnectorX lands it), MySQL `SET` (members in
 definition order), and Postgres **`numeric` without precision** (no decimal type
-holds every value). MySQL `BIGINT UNSIGNED` lands as uint64 and MySQL `DOUBLE`
+holds every value). Postgres arrays land as lists typed by their element, with
+the same conversions applied to each element, so the type never depends on the
+values. Types SQLAlchemy does not recognise land as the driver hands them over:
+text on Postgres, binary (WKB) for MySQL geometry. MySQL `BIGINT UNSIGNED` lands as uint64 and MySQL `DOUBLE`
 (which SQLAlchemy reflects as Decimal) as double. Section 10.1 lists every type.
 
 Naive source timestamps stay naive in bronze (D2): every timestamp column the
@@ -470,14 +480,33 @@ handler into a `file://` bucket. The tests carry the `integration` marker, which
 the default pytest run deselects, so `mise run test` never needs Docker.
 `mise run test:integration` brings the engines up, runs the suite and takes them
 down (`--keep` leaves them running). Later engines join by adding a service and
-an `Engine` entry.
+an `Engine` entry, plus their entry in the per-engine tables of the scenario
+modules (the type matrix, `UNREADABLE`, `TRADITIONAL_STREAM_STOPS_EARLY`).
+`COMPOSE_PROJECT_NAME` and the port variables run a second stack beside the first.
+
+The handler-level scenarios of the SQLite suite run against every engine on both
+backends (`test_it_modes.py`, `test_it_keyset.py`, `test_it_paged.py`,
+`test_it_preflight.py`, `test_it_partition.py`): modes, `lag`, keyset and the
+time budget, preflight and `validate`, the error types, paged snapshots and
+partitioned reads. `mise run test:integration --image` builds the image and runs
+the same suite inside it: the `run` fixture then invokes the handler through the
+Runtime Interface Emulator on the compose network, with the buckets in a folder
+mounted at the same path, and a failed invocation raises an exception named after
+the Lambda `errorType`. Tests that only exercise the host (the spikes, the
+ConnectorX ground truth of the type matrix) run unchanged. The session prints the
+peak memory of the run. On an arm64 host the amd64 image runs under QEMU, where the
+emulator (a Go binary) crashes every 20 to 30 invocations; the harness mounts the
+arm64 emulator from the arm64 variant of the same AWS base image instead, which
+runs natively, so only the handler itself is emulated.
 
 ### 10.1 Landed types (*integration*, 24 Nov 2026)
 
 The Parquet type each source type lands as, per backend (Postgres 17.12, MySQL
 8.4.13; ConnectorX 0.4.6, dlt 1.32.0). `tests/integration/test_it_types.py` pins
 these tables. "preflight" means the column fails the preflight on ConnectorX
-(deny list or decimal rule); "fails" means ConnectorX itself cannot read it.
+(deny list or decimal rule). The same file proves both directions for every
+column: each one the preflight denies really fails or loses data on ConnectorX,
+and each one it allows lands on ConnectorX.
 
 **Postgres**
 
@@ -496,8 +525,12 @@ these tables. "preflight" means the column fails the preflight on ConnectorX
 | time | time64[us] | time64[us] |
 | bytea | binary | large_binary |
 | uuid, json, jsonb, inet | string | string |
-| integer[] | list&lt;int64&gt; | preflight (ConnectorX reads it as large_list) |
-| interval, money, timetz, macaddr, xml | string | preflight |
+| bit(n) | string | large_binary |
+| integer[], text[], numeric(10,2)[] | list&lt;int64&gt;, list&lt;string&gt;, list&lt;decimal128(10, 2)&gt; | large_list&lt;int32&gt;, large_list&lt;string&gt;, large_list&lt;decimal128(38, 10)&gt; |
+| numeric[] (no precision) | list&lt;string&gt; | preflight (silent loss) |
+| uuid[], char(n)[], jsonb[] | list&lt;string&gt; | preflight |
+| timestamp[] | list&lt;timestamp[us]&gt; | preflight |
+| interval, money, timetz, macaddr, macaddr8, xml, cidr, varbit, point, line, lseg, box, path, polygon, circle, tsvector, tsquery, `"char"`, pg_lsn, composite | string | preflight |
 
 **MySQL**
 
@@ -508,9 +541,11 @@ these tables. "preflight" means the column fails the preflight on ConnectorX
 | mediumint, int | int64 | int32 |
 | bigint | int64 | int64 |
 | bigint unsigned | uint64 | uint64 |
+| tinyint unsigned, int unsigned | int64 | uint8, uint32 |
 | decimal(18,4), decimal(28,10) | decimal128(p, s) | decimal128(38, 10) |
 | decimal(38,12) | decimal128(38, 12) | preflight (RuntimeError) |
 | decimal(65,30) | decimal256(65, 30) | preflight (silent loss) |
+| decimal(65,0) | decimal256(65, 0) | preflight (fails or loses digits) |
 | float | double | float |
 | double | double | double |
 | bit(n) | int64 | large_binary |
@@ -519,7 +554,7 @@ these tables. "preflight" means the column fails the preflight on ConnectorX
 | datetime, datetime(6), timestamp | timestamp[us] | timestamp[us] |
 | time | time64[us] | time64[us] |
 | binary, varbinary, blob | binary | large_binary |
-| geometry | binary | fails (PanicException) |
+| geometry, point, linestring, polygon, multipoint, multilinestring, multipolygon, geometrycollection | binary | preflight |
 
 The two backends differ on most integer widths, on binary vs large_binary, and
 on every decimal, which is why a backend change fails with `BackendChanged`
@@ -537,7 +572,7 @@ on every decimal, which is why a backend change fails with `BackendChanged`
 | S4 | Do dlt incremental `lag` and boundary deduplication by `primary_key` work with Arrow items from a custom resource? | **Answered (prototype):** deduplication works without `lag`. With `lag`, dlt deduplicates nothing, so the lag window is re-landed on every run. Decision: bronze accepts it and silver removes the duplicates (sections 7.3, 12). |
 | S5 | Do `direct` naming and `data_type: freeze` apply to Arrow items as expected? | **Answered (prototype):** yes, and freeze also catches decimal precision changes, which led to revising D6. Naive timestamps need `timezone: false` hints (section 7.2). |
 | S6 | Do Instant Client (Basic) and `libaio` work on AL2023? Can thick-mode oracledb and ConnectorX share `libclntsh` in one process? | Pin an Instant Client version known to work; isolate Oracle in its own image. **First part answered (image smoke test, 24 Nov 2026, linux/amd64 under emulation):** Instant Client Basic 23.26.4.0.0 with `libaio-0.3.111` (AL2023 package) loads. In one process, oracledb 26.1.0 enters thick mode (client 23.26.4) and ConnectorX 0.4.6 then loads `libclntsh` too: an Oracle connection to a closed port fails with `ORA-12541` from OCI, not `DPI-1047`. Same image: unixODBC 2.3.9 (AL2023) with msodbcsql18 18.7.1.1 from the RHEL 9 repo, listed by `pyodbc.drivers()`; ibm_db 3.3.0 imports once `pam` is installed. Still open: both libraries against a real Oracle server in the same process (ticket 16). |
-| S7 | What is peak memory for the largest real table under ConnectorX streaming? | Smaller `batch_size`, keyset chunking, or more Lambda memory. |
+| S7 | What is peak memory for the largest real table under ConnectorX streaming? | Smaller `batch_size`, keyset chunking, or more Lambda memory. **First input (integration, 24 Nov 2026):** the whole Postgres and MySQL scenario suite (tables of tens of rows, so this is the fixed cost of a run, not the data) peaks at **588 MiB** for the image container across the session (cgroup `memory.peak`: emulator plus the warm Python runtime, amd64 under QEMU, where jemalloc cannot return memory, so an overestimate) and **254 MiB** RSS for the host pytest process running the handler in-process. A 1 GB function has room for the fixed cost; the per-table figure still needs a run on the largest real table. |
 | S8 | Is egress to packages.microsoft.com and the Oracle download host allowed from the build pipeline? | Internal mirrors through the build arguments. |
 | S9 | What are the per-dialect minimum server versions? | **Answered for Postgres and MySQL (integration):** the whole integration suite passes on Postgres 11.16, 12.22 and 17.12, and on MySQL 8.0.46 and 8.4.13. Preflight minimums: Postgres 11, MySQL 8.0. Older series were not run (Postgres 10 and MySQL 5.7 are long out of vendor support). |
 
