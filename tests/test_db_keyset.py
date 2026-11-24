@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -106,3 +107,49 @@ def test_a_table_many_pages_long_with_many_ties_lands_completely_once(db, bucket
     more = insert_with_ties(db, 54, 20, day=21)
     assert invoke()["rows"] == {"transactions": 20}
     assert ids(landed(bucket)) == expected + more
+
+
+def cursor_state(bucket: Path, pipelines_dir: str):
+    """The `transactions` cursor as the next cold-started run restores it from bronze."""
+    import dlt
+    from dlt.destinations import filesystem
+
+    pipe = dlt.pipeline(
+        pipeline_name="core_banking",
+        dataset_name="core_banking",
+        pipelines_dir=str(Path(pipelines_dir) / "inspect"),
+        destination=filesystem(bucket_url=bucket.as_uri()),
+    )
+    pipe.sync_destination()
+    return pipe.state["sources"]["core_banking"]["resources"]["transactions"]["incremental"]["UpdatedAt"]["last_value"]
+
+
+def test_a_tiny_budget_stops_between_pages_and_looping_until_empty_lands_every_row_once(
+    db, bucket, invoke, pages, pipelines_dir
+):
+    expected = insert_with_ties(db, 1, 53)
+    first = invoke(max_time_s=1e-6)
+    assert first["time_limited"]
+    assert first["rows"] == {"transactions": 7} and len(pages) == 1  # one whole page, then the deadline
+    assert ids(landed(bucket)) == [1, 2, 3, 4, 5, 6, 7]  # all at 08:00
+    assert cursor_state(bucket, pipelines_dir) == datetime(2026, 11, 20, 8, 0)
+
+    runs = [first]
+    while not runs[-1]["is_empty"]:
+        runs.append(invoke(max_time_s=1e-6))
+        assert len(runs) < 30
+    assert len(runs) > 5  # really was cut short, run after run
+    assert ids(landed(bucket)) == expected  # every row, none twice
+    assert cursor_state(bucket, pipelines_dir) == datetime(2026, 11, 20, 13, 0)
+
+
+@pytest.mark.parametrize("backend", ["pyarrow"])
+def test_a_traditional_stream_table_is_split_loaded_by_dlts_time_limit(db, bucket, invoke):
+    expected = insert_with_ties(db, 1, 53)
+    stream = {"chunking": {"strategy": "stream"}, "batch_size": 12}
+    runs = [invoke(max_time_s=1e-6, **stream)]
+    while not runs[-1]["is_empty"]:
+        runs.append(invoke(max_time_s=1e-6, **stream))
+        assert len(runs) < 30
+    assert runs[0]["time_limited"] and runs[0]["rows"] == {"transactions": 12}  # one batch, then the limit
+    assert ids(landed(bucket)) == expected

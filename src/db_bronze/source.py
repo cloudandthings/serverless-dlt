@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime
 
 import dlt
@@ -55,7 +56,20 @@ def window(cfg: SourceConfig, tc: TableConfig, req: RunRequest, run_started: dat
     return initial, max(initial, top + 1) if top is not None else initial
 
 
-def make_resource(cfg: SourceConfig, tc: TableConfig, req: RunRequest, engine: sa.Engine, run_started: datetime):
+def make_resource(
+    cfg: SourceConfig,
+    tc: TableConfig,
+    req: RunRequest,
+    engine: sa.Engine,
+    run_started: datetime,
+    max_time_s: float | None = None,
+):
+    """The table's dlt resource. `max_time_s` bounds extraction (split loading, section 7.4).
+
+    A keyset table checks the deadline itself, between pages; a stream table is
+    cut by dlt's `add_limit(max_time=...)`. The caller never passes a budget for
+    a ConnectorX stream table: cutting that stream short leaves its query running.
+    """
     backend = cfg.backend(tc)
     if backend == "sqlalchemy":  # stopgap until the sqlalchemy backend lands
         raise NotImplementedError(
@@ -114,12 +128,19 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, req: RunRequest, engine: s
         ),
     ):
         if tc.chunking.strategy == "keyset":
-            yield from keyset_pages(cursor.start_value, cursor.end_value)
+            yield from keyset_pages(cursor.start_value, cursor.end_value, cursor.last_value)
         else:
             yield from extract(cursor_select(table, tc, cursor.start_value, cursor.end_value))
 
-    def keyset_pages(start, end):
-        """Page after page, each seeded by the last row of the one before; a short page is the last (7.4)."""
+    def keyset_pages(start, end, landed_up_to):
+        """Page after page, each seeded by the last row of the one before; a short page is the last (7.4).
+
+        The deadline is checked between pages only, so no query is ever left
+        running. A page whose last cursor value is not past `landed_up_to` (the
+        cursor in state) may hold only rows dlt drops as already landed, so the
+        read never stops there: every run that stops early has landed new rows.
+        """
+        deadline = time.monotonic() + max_time_s if max_time_s is not None else None
         after = None
         while True:
             count, last = 0, None
@@ -130,5 +151,11 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, req: RunRequest, engine: s
             if count < tc.chunking.page_size:
                 return
             after = tuple(last.column(name)[last.num_rows - 1].as_py() for name in tc.chunking.order_by)
+            past_landed = landed_up_to is None or after[0] > landed_up_to
+            if deadline is not None and past_landed and time.monotonic() >= deadline:
+                log.info("time budget %s", json.dumps({"table": tc.name, "stopped": "between keyset pages"}))
+                return
 
+    if max_time_s is not None and tc.chunking.strategy == "stream":
+        return rows.add_limit(max_time=max_time_s)
     return rows

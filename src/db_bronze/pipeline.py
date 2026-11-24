@@ -6,6 +6,7 @@ dropped and state is restored from bronze, as in `api_bronze`.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import UTC, datetime
@@ -65,8 +66,43 @@ def check_run_start(cfg: SourceConfig, req: RunRequest, tables: tuple[TableConfi
             )
 
 
-def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | None = None) -> dict[str, Any]:
-    """Run one invocation. Raises on any failure (cursor state then stays where it was)."""
+def time_budget(cfg: SourceConfig, req: RunRequest, tc: TableConfig, max_time_s: float | None) -> float | None:
+    """The seconds `tc` may spend extracting this run, or None for no limit (section 7.4).
+
+    Incremental only. The smaller of the caller's budget and `cfg.max_time_s`
+    wins. A ConnectorX stream table is never split-loaded: dropping its stream
+    leaves the query running with the connection open (prototype S1). Validation
+    keeps `max_time_s` away from such tables, so only the caller's budget is
+    skipped here, and that is logged.
+    """
+    limits = [x for x in (max_time_s, cfg.max_time_s) if x is not None]
+    if not limits or req.mode != "incremental":
+        return None
+    if cfg.backend(tc) == "connectorx" and tc.chunking.strategy == "stream":
+        log.warning(
+            "time budget skipped %s",
+            json.dumps(
+                {
+                    "table": tc.name,
+                    "reason": "a ConnectorX stream cannot be stopped early without leaving its query running; "
+                    'use "chunking": {"strategy": "keyset", ...} to split-load this table',
+                }
+            ),
+        )
+        return None
+    return min(limits)
+
+
+def run_pipeline(
+    cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | None = None, max_time_s: float | None = None
+) -> dict[str, Any]:
+    """Run one invocation. Raises on any failure (cursor state then stays where it was).
+
+    `max_time_s` is the caller's time budget (the handler derives it from
+    Lambda's remaining time); see `time_budget`. `time_limited` in the result
+    says a budget applied to at least one table: callers loop while `is_empty`
+    is false.
+    """
     tables = cfg.tables_for(req)
     check_run_start(cfg, req, tables)
     os.environ["DATA_WRITER__COMPRESSION"] = cfg.parquet_compression
@@ -81,7 +117,8 @@ def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | Non
     pipe = pipe.drop()  # every invocation is a cold start: state comes from bronze
     engine = make_engine(cfg)
     try:
-        resources = [make_resource(cfg, tc, req, engine, run_started) for tc in tables]
+        budgets = {tc.name: time_budget(cfg, req, tc, max_time_s) for tc in tables}
+        resources = [make_resource(cfg, tc, req, engine, run_started, budgets[tc.name]) for tc in tables]
         info = pipe.run(resources, loader_file_format="parquet", schema=bronze_schema(cfg))
     finally:
         engine.dispose()
@@ -103,5 +140,6 @@ def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | Non
         "load_ids": load_ids,
         "rows": rows,
         "is_empty": not any(rows.values()),
+        "time_limited": any(b is not None for b in budgets.values()),
         "started_at": run_started.isoformat(),
     }
