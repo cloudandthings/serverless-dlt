@@ -145,3 +145,48 @@ def test_backfill_timestamp_window_lands_the_window_dated_by_window_start(db, bu
     assert result["mode"] == "backfill"
     assert ids(landed(bucket)) == [2, 3]
     assert partitions(bucket) == {"mode=backfill/year=2026/month=03/day=01"}
+
+
+INTEGER_CURSOR = TRANSACTIONS | {"cursor": {"column": "TransactionId", "type": "integer", "initial_value": 0}}
+
+
+def test_backfill_integer_window_lands_the_window(db, bucket, invoke):
+    db.insert(*[(i, "2026-11-20 08:00:00", "JHB", i) for i in range(1, 7)])
+    result = invoke(config_tables=[INTEGER_CURSOR], mode="backfill", window_start=2, window_end=5)
+    assert result["rows"] == {"transactions": 3}
+    assert ids(landed(bucket)) == [2, 3, 4]
+    assert partitions(bucket) == {today_partition("backfill")}  # no date in an integer window: the load date
+
+
+def test_incremental_after_backfill_continues_from_the_previous_incremental_cursor(db, bucket, invoke):
+    db.insert((1, "2026-03-10 08:00:00", "JHB", 100), (2, "2026-11-20 09:00:00", "CPT", 200))
+    invoke()
+    db.insert((3, "2026-11-20 10:00:00", "DBN", 300))
+    invoke(mode="backfill", window_start="2026-03-01T00:00:00Z", window_end="2026-04-01T00:00:00Z")
+    db.insert((4, "2026-11-20 11:00:00", "PTA", 400))
+    result = invoke()
+    assert result["rows"] == {"transactions": 2}
+    assert landed_ids(bucket, "incremental") == [1, 2, 3, 4]
+    assert landed_ids(bucket, "backfill") == [1]
+
+
+@pytest.mark.parametrize(
+    ("window", "message"),
+    [
+        ({}, "needs window_start and window_end"),
+        ({"window_start": 1, "window_end": "2026-01-01T00:00:00Z"}, "both be integers or both ISO-8601"),
+        ({"window_start": "2026-02-01T00:00:00Z", "window_end": "2026-01-01T00:00:00Z"}, "must be after"),
+        ({"window_start": 2, "window_end": 5}, "must be an ISO-8601 timestamp for the timestamp cursor"),
+    ],
+)
+def test_bad_backfill_window_fails_with_config_error(db, bucket, invoke, window, message):
+    with pytest.raises(ConfigError, match=message):
+        invoke(mode="backfill", **window)
+    assert files(bucket) == []
+
+
+def test_snapshot_table_in_backfill_fails_with_config_error(branches, bucket, invoke):
+    window = {"window_start": "2026-03-01T00:00:00Z", "window_end": "2026-04-01T00:00:00Z"}
+    with pytest.raises(ConfigError, match=r"mode=backfill.*\['branches'\].*mode=full"):
+        invoke(config_tables=[TRANSACTIONS, BRANCHES], mode="backfill", **window)
+    assert files(bucket) == [] and files(bucket, "branches") == []
