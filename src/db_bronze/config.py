@@ -14,7 +14,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 MODES = ("incremental",)
-BACKENDS = ("pyarrow",)
+BACKENDS = ("connectorx", "pyarrow")
+# Engines ConnectorX reads (section 3.1). Every other dialect defaults to pyarrow (D3, section 5.3).
+CONNECTORX_DIALECTS = ("mssql", "postgres", "mysql", "oracle", "sqlite")
 CURSOR_TYPES = ("timestamp", "integer")
 PARQUET_CODECS = ("zstd", "snappy", "gzip", "none")
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -22,6 +24,11 @@ _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 
 class ConfigError(ValueError):
     pass
+
+
+def default_backend(dialect: str) -> str:
+    """The backend a table gets when neither it nor `defaults` names one: from the dialect alone (D3)."""
+    return "connectorx" if dialect in CONNECTORX_DIALECTS else "pyarrow"
 
 
 def _build(cls, data: Any, where: str, **overrides):
@@ -124,8 +131,9 @@ class SourceConfig:
             if backend not in BACKENDS:
                 raise ConfigError(f"table {t.name}: backend {backend!r} not in {BACKENDS}")
 
-    def backend(self, table: TableConfig) -> str | None:
-        return table.backend or self.defaults.backend
+    def backend(self, table: TableConfig) -> str:
+        """The table's backend, resolved from the config alone (D3): table, then defaults, then the dialect."""
+        return table.backend or self.defaults.backend or default_backend(self.connection.dialect)
 
     def batch_size(self, table: TableConfig) -> int:
         return table.batch_size or self.defaults.batch_size
