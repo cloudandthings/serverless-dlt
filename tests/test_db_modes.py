@@ -40,12 +40,12 @@ def invoke(db: SourceDB, bucket: Path, tmp_path: Path, pipelines_dir: str, backe
     config_dir.mkdir()
     monkeypatch.setenv("CONFIG_URI", config_dir.as_uri())
 
-    def run(config_tables: list[dict] | None = None, **event) -> dict:
+    def run(config_tables: list[dict] | None = None, connection: dict | None = None, **event) -> dict:
         cfg = {
             "pipeline_name": "core_banking",
             "dataset_name": "core_banking",
             "bucket_url": bucket.as_uri(),
-            "connection": {"dialect": "sqlite", "path": str(db.path)},
+            "connection": {"dialect": "sqlite", "path": str(db.path)} | (connection or {}),
             "defaults": {"backend": backend},
             "tables": config_tables or [TRANSACTIONS],
         }
@@ -112,7 +112,7 @@ def test_full_lands_everything_for_a_snapshot_table(branches, bucket, invoke):
 
 
 def test_snapshot_table_in_incremental_fails_with_config_error_and_nothing_lands(branches, bucket, invoke):
-    with pytest.raises(ConfigError, match=r"mode=incremental.*\['branches'\].*mode=full"):
+    with pytest.raises(ConfigError, match=r"table branches has no cursor.*'incremental'"):
         invoke(config_tables=[TRANSACTIONS, BRANCHES])
     assert files(bucket) == [] and files(bucket, "branches") == []
 
@@ -187,7 +187,7 @@ def test_bad_backfill_window_fails_with_config_error(db, bucket, invoke, window,
 
 def test_snapshot_table_in_backfill_fails_with_config_error(branches, bucket, invoke):
     window = {"window_start": "2026-03-01T00:00:00Z", "window_end": "2026-04-01T00:00:00Z"}
-    with pytest.raises(ConfigError, match=r"mode=backfill.*\['branches'\].*mode=full"):
+    with pytest.raises(ConfigError, match=r"table branches has no cursor.*'backfill'"):
         invoke(config_tables=[TRANSACTIONS, BRANCHES], mode="backfill", **window)
     assert files(bucket) == [] and files(bucket, "branches") == []
 
@@ -244,3 +244,32 @@ def test_failed_full_run_writes_no_manifest(db, bucket, invoke):
         invoke(mode="full")
     assert manifests(bucket) == {}
     assert file_load_ids(bucket, "transactions", "full") == set()
+
+
+def test_backfill_window_bounds_are_converted_through_naive_timezone(db, bucket, invoke):
+    db.insert(
+        (1, "2026-02-28 23:30:00", "JHB", 100),  # inside the window if the bounds were read as UTC
+        (2, "2026-03-01 00:30:00", "CPT", 200),
+        (3, "2026-03-02 00:30:00", "DBN", 300),
+    )
+    invoke(
+        connection={"naive_timezone": "Africa/Johannesburg"},
+        mode="backfill",
+        window_start="2026-02-28T22:00:00Z",  # 2026-03-01 00:00 in Johannesburg
+        window_end="2026-03-02T00:00:00+02:00",
+    )
+    assert ids(landed(bucket)) == [2]
+
+
+def test_snapshot_table_honours_columns_and_where(branches, bucket, invoke):
+    snapshot = BRANCHES | {"columns": ["BranchCode"], "where": "\"OpenedAt\" < '2000-01-01'"}
+    invoke(config_tables=[snapshot], mode="full")
+    assert [{k: v for k, v in r.items() if k != "_extracted_at"} for r in landed(bucket, "branches")] == [
+        {"BranchCode": "JHB"}
+    ]
+
+
+def test_snapshot_query_table(branches, bucket, invoke):
+    snapshot = {"name": "branches", "query": 'SELECT "BranchCode" AS code FROM "Branches"'}
+    invoke(config_tables=[snapshot], mode="full")
+    assert sorted(r["code"] for r in landed(bucket, "branches")) == ["CPT", "JHB"]

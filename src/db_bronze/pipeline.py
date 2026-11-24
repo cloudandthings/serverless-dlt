@@ -15,7 +15,7 @@ import dlt
 from dlt.common.schema import Schema
 from dlt.destinations import filesystem
 
-from .config import RunRequest, SourceConfig
+from .config import ConfigError, RunRequest, SourceConfig, TableConfig
 from .manifest import new_snapshot_id, write_manifest
 from .source import make_engine, make_resource
 
@@ -50,9 +50,25 @@ def bronze_schema(cfg: SourceConfig) -> Schema:
     return Schema(cfg.pipeline_name, normalizers={"names": "direct"})
 
 
+def check_run_start(cfg: SourceConfig, req: RunRequest, tables: tuple[TableConfig, ...]) -> None:
+    """Fail before anything is touched when the run cannot be done (DESIGN-db.md section 7.6)."""
+    if cfg.connection.auth.type == "kerberos":
+        raise NotImplementedError(
+            'connection.auth.type "kerberos" is reserved but not implemented yet; see docs/KERBEROS.md '
+            'for what adding it involves, or use {"type": "password"}'
+        )
+    for tc in tables:
+        if tc.cursor is None and req.mode != "full":
+            raise ConfigError(
+                f'table {tc.name} has no cursor, so it is a snapshot table; run it with "mode": "full", '
+                f'give it a cursor to run in {req.mode!r} mode, or leave it out with "tables": [...]'
+            )
+
+
 def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | None = None) -> dict[str, Any]:
     """Run one invocation. Raises on any failure (cursor state then stays where it was)."""
     tables = cfg.tables_for(req)
+    check_run_start(cfg, req, tables)
     os.environ["DATA_WRITER__COMPRESSION"] = cfg.parquet_compression
 
     run_started = datetime.now(UTC)
