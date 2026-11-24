@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 from typing import Any
 
-MODES = ("incremental",)
+MODES = ("incremental", "full")
 BACKENDS = ("connectorx", "pyarrow")
 # Engines ConnectorX reads (section 3.1). Every other dialect defaults to pyarrow (D3, section 5.3).
 CONNECTORX_DIALECTS = ("mssql", "postgres", "mysql", "oracle", "sqlite")

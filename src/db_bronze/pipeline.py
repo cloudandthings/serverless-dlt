@@ -60,7 +60,7 @@ def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | Non
     pipe = pipe.drop()  # every invocation is a cold start: state comes from bronze
     engine = make_engine(cfg)
     try:
-        resources = [make_resource(cfg, tc, engine, run_started) for tc in cfg.tables]
+        resources = [make_resource(cfg, tc, req, engine, run_started) for tc in cfg.tables]
         info = pipe.run(resources, loader_file_format="parquet", schema=bronze_schema(cfg))
     finally:
         engine.dispose()

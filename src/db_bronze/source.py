@@ -5,13 +5,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 from urllib.parse import quote
 
 import dlt
 import sqlalchemy as sa
 
-from .config import ConnectionConfig, SourceConfig, TableConfig
+from .config import ConnectionConfig, RunRequest, SourceConfig, TableConfig
 from .extract import column_specs, naive_timestamp_columns, read_connectorx, read_pyarrow, with_extracted_at
 
 log = logging.getLogger(__name__)
@@ -33,7 +33,19 @@ def reflect(engine: sa.Engine, tc: TableConfig) -> sa.Table:
     return sa.Table(tc.table, sa.MetaData(), schema=tc.schema, autoload_with=engine)
 
 
-def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_started: datetime):
+def window(tc: TableConfig, req: RunRequest, run_started: datetime):
+    """(initial_value, end_value) for dlt's incremental, in source terms.
+
+    incremental  state-driven; initial_value only applies to the very first run
+    full         [initial_value, run start): end_value makes dlt leave the cursor state alone
+    """
+    initial = tc.cursor.initial_value if tc.cursor.type == "integer" else tc.cursor.initial_timestamp
+    if req.mode == "full":
+        return initial, run_started.astimezone(UTC).replace(tzinfo=None)
+    return initial, None
+
+
+def make_resource(cfg: SourceConfig, tc: TableConfig, req: RunRequest, engine: sa.Engine, run_started: datetime):
     table = reflect(engine, tc)
     specs = column_specs(table)
     backend = cfg.backend(tc)
@@ -42,7 +54,7 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_sta
     # Without this hint dlt labels naive timestamps UTC without shifting them (prototype S5).
     hints = {name: {"timezone": False} for name in naive_timestamp_columns(table)}
     cursor_col = table.c[tc.cursor.column]
-    initial = tc.cursor.initial_value if tc.cursor.type == "integer" else tc.cursor.initial_timestamp
+    initial, end = window(tc, req, run_started)
 
     @dlt.resource(
         name=tc.name,
@@ -58,10 +70,14 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_sta
         cursor=dlt.sources.incremental(  # noqa: B008
             tc.cursor.column,
             initial_value=initial,
+            end_value=end,
             row_order="asc",
         ),
     ):
-        stmt = sa.select(table).where(cursor_col >= cursor.start_value).order_by(cursor_col)
+        stmt = sa.select(table).where(cursor_col >= cursor.start_value)
+        if cursor.end_value is not None:
+            stmt = stmt.where(cursor_col < cursor.end_value)
+        stmt = stmt.order_by(cursor_col)
         if backend == "connectorx":
             # ConnectorX takes SQL text, so values are inlined, as dlt's own sql_table does.
             sql = str(stmt.compile(engine, compile_kwargs={"literal_binds": True}))
