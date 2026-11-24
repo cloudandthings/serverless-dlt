@@ -58,7 +58,7 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_sta
             on_cursor_value_missing="include" if tc.cursor.include_null_cursor else "raise",
         ),
     ):
-        stmt = cursor_select(table, tc, cursor.start_value)
+        stmt = cursor_select(table, tc, cursor.start_value, cursor.end_value)
         for batch in read_pyarrow(engine, stmt, specs, batch_size):
             yield with_extracted_at(batch, run_started)
 

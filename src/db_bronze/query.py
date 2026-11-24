@@ -56,8 +56,11 @@ def probe_columns(tc: TableConfig) -> sa.Select:
     return sa.select(sa.literal_column("*")).select_from(sa.text(tc.query).columns().subquery("q")).where(sa.false())
 
 
-def cursor_select(source: sa.FromClause, tc: TableConfig, start: Any) -> sa.Select:
-    """`SELECT <columns> FROM source WHERE (cursor >= start [OR cursor IS NULL]) AND <where> ORDER BY cursor`."""
+def cursor_select(source: sa.FromClause, tc: TableConfig, start: Any, end: Any = None) -> sa.Select:
+    """`SELECT <columns> FROM source WHERE (<cursor in [start, end)> [OR cursor IS NULL]) AND <where> ORDER BY cursor`.
+
+    The window is half-open; `end` None leaves it open-ended (incremental mode).
+    """
     cursor_col = source.c[tc.cursor.column]
     columns = [source.c[c] for c in tc.columns] if tc.columns else list(source.c)
 
@@ -65,6 +68,8 @@ def cursor_select(source: sa.FromClause, tc: TableConfig, start: Any) -> sa.Sele
         return _Timestamp(v) if tc.cursor.type == "timestamp" else v
 
     bound = value(cursor_col) >= value(sa.literal(start, cursor_col.type))
+    if end is not None:
+        bound = sa.and_(bound, value(cursor_col) < value(sa.literal(end, cursor_col.type)))
     if tc.cursor.include_null_cursor:
         bound = sa.or_(bound, cursor_col.is_(None))
     stmt = sa.select(*columns).select_from(source).where(bound)
