@@ -1,0 +1,489 @@
+# Design: relational database bronze with dlt on Lambda (`db_bronze`)
+
+**Status:** agreed design, not yet implemented (24 November 2026). Spikes S1, S4
+and S5 answered by prototype on 24 November 2026 (branch
+`prototype/db-bronze-spikes`, `src/db_bronze/PROTOTYPE_spikes/FINDINGS.md`) and
+folded in below.
+
+This is the database counterpart of `api_bronze` (see `DESIGN-api.md`). It records
+the requirement, the facts that constrain the design, every decision taken and
+why, and the items that still need a spike before implementation can be called
+done.
+
+Evidence labels:
+
+- *researched*: read from library source or vendor documentation at the
+  versions named, not yet executed in this repo.
+- *prototyped*: executed in a throwaway prototype on SQLite (dlt 1.32.0,
+  connectorx 0.4.6), not yet covered by this repo's tests.
+- *to verify*: an assumption the implementation must prove with a test or a
+  spike (collected in section 11).
+
+Nothing in this document is *verified* in the `DESIGN-api.md` sense yet. Labels
+are upgraded as tests land.
+
+---
+
+## 1. Requirement
+
+- Ingest tables from relational databases on **AWS Lambda** (container image)
+  using **dlt 1.32.0**, into the same S3 **bronze** layer and path convention
+  as `api_bronze`.
+- Engines that must be covered: **Microsoft SQL Server, MySQL, Db2, Oracle,
+  PostgreSQL**. SQLite is supported for tests. Other SQLAlchemy dialects
+  work through the traditional backend without special handling.
+- Use **ConnectorX** (Arrow streaming) where the engine supports it, and the
+  traditional SQLAlchemy path where it does not.
+- Production will need **Kerberos**. v1 only reserves a place for it and
+  documents how to add it (section 8).
+
+## 2. Scope
+
+**In v1**
+
+- Package `src/db_bronze/`, image `docker/Dockerfile.db`, lock
+  `docker/requirements-db.lock`.
+- Modes `incremental`, `full`, `backfill`, plus the orchestration events
+  `plan`, `finalize` and `validate`.
+- Config validation and a reflection-based preflight.
+- Keyset chunking, offset paging for large snapshots, opt-in ConnectorX
+  partitioned reads.
+- Unit tests on SQLite, docker-compose integration tests for the five engines,
+  and the same tests run inside the built image.
+- An example Step Function definition (ASL) under `examples/`.
+
+**Out of v1**
+
+- Implementing Kerberos: placeholder and documentation only.
+- MSSQL `rowversion` cursors.
+- Db2 for z/OS and IBM i: these need a Db2 Connect licence file. Only Db2 for
+  LUW is targeted.
+- A database silver transform. Only the bronze contract is documented.
+- Terraform.
+
+---
+
+## 3. Facts that shape the design (*researched*, 24 Nov 2026)
+
+### 3.1 ConnectorX 0.4.6
+
+| Topic | Finding |
+|---|---|
+| Version | 0.4.6 (2026-09-17). Wheels for cp310–cp314, `manylinux_2_28` x86_64 and aarch64. The wheel is about **200 MB** unpacked. |
+| Streaming | `cx.read_sql(conn, query, return_type="arrow_stream", batch_size=N)` returns a `pyarrow.RecordBatchReader`. Introduced in 0.4.4. |
+| **Pin ≥ 0.4.6** | In 0.4.5 a producer error ended the stream silently, so a failed read looked like a short, successful one. 0.4.6 joins the producer thread and raises. |
+| Memory | The producer pushes into an **unbounded** channel. If Parquet writing is slower than the database read, batches accumulate in memory. *Prototyped:* holding a reader 2 s without consuming buffered a whole 3M-row result (+250 MiB). |
+| **Dropping a stream** | *Prototyped (S1):* `close()`/`del` on the reader returns at once, but the producer thread **detaches and reads the query to the end**, holding the connection open (33 s query: idle at +34 s). On Lambda the frozen container keeps the DB session, snapshot and locks open until the next thaw. |
+| Engines | postgres, redshift, mysql, mssql, oracle, sqlite, bigquery, clickhouse, duckdb, trino. Trino cannot stream. **Db2 is not supported.** |
+| Oracle | Compiled into the wheel, but it loads `libclntsh.so` at runtime, so it **needs Oracle Instant Client**. |
+| Kerberos | **MSSQL only.** The Linux wheel bundles MIT krb5 and supports `trusted_connection=true`. Postgres (tokio-postgres) and MySQL (mysql crate) have no GSSAPI. Oracle external auth through OCI is plausible but untested. |
+| Unmapped types | Raise `pyo3_runtime.PanicException`. It derives from **`BaseException`**, so `except Exception` does not catch it. Other errors raise `RuntimeError`. |
+| Type gaps | **MSSQL:** sql_variant, xml, UDTs (hierarchyid, geography). **Oracle:** RAW, ROWID, INTERVAL, TIMESTAMP WITH LOCAL TIME ZONE, NCLOB, BFILE, XMLTYPE. **Postgres:** interval, money, timetz, macaddr, xml, composite types, and most array types. |
+| **Decimals** | Always produced as `Decimal128(38,10)` and limited to about 28 significant digits. **A column with scale above 10 loses digits silently, without raising an error.** |
+| `partition_on` | Integer column, N parallel connections. Works with `arrow_stream`, but batches from different partitions interleave, so **rows do not arrive in cursor order**. |
+
+### 3.2 dlt 1.32.0
+
+- The `sql_table` ConnectorX backend can stream: `backend_kwargs={"return_type": "arrow_stream"}`. Its docstring saying it ignores `chunk_size` is out of date. It still reflects the table through the SQLAlchemy engine, and it compiles queries with `literal_binds`.
+- A resource that yields `pa.Table` or `pa.RecordBatch` is fully supported by `dlt.sources.incremental` through `ArrowIncremental`, which handles filtering and state.
+- On Arrow items dlt still applies its **naming convention**, snake_casing column names, unless the convention is changed.
+- *Prototyped (S5):* `direct` naming keeps source names exactly (spaces, dashes, case). A `data_type: freeze` contract fails the run with `DataValidationError` on any type change of an existing column, **including a decimal precision/scale change** (`decimal(38,10)` → `decimal(18,4)`) and int64 → int32. Naive → tz-aware on a timestamp is not caught.
+- *Prototyped (S5):* naive Arrow timestamps land as `timestamp[us, tz=UTC]`, labelled but **not shifted**, unless the column carries the hint `timezone: False`.
+- *Prototyped (S4):* without `lag`, boundary deduplication by `primary_key` works on Arrow items. **With `lag`, dlt disables deduplication entirely** (`compute_deduplication_disabled`: "destination must deduplicate ranges"), so every run re-lands every row in `[last_value − lag, …)`. `cursor.start_value` is already lag-adjusted. Naive cursors stay naive in state.
+
+### 3.3 Traditional drivers
+
+| Engine | Driver | Kerberos (for section 8) |
+|---|---|---|
+| MSSQL | `pyodbc` + msodbcsql18 + unixODBC (OS packages, from Microsoft's RHEL 9 repo) | `Trusted_Connection=yes`. SPN `MSSQLSvc/<fqdn>:<port>`. The driver does not renew tickets. `ActiveDirectoryIntegrated` is Entra ID, not on-premises AD. |
+| Postgres | `psycopg[binary]` 3.3.x | The bundled libpq is built `--with-gssapi`. `krbsrvname` defaults to `postgres`. |
+| MySQL | `PyMySQL` | None. Kerberos needs MySQL Enterprise on the server plus mysql-connector-python with its `gssapi` extra. |
+| Oracle | `oracledb` in **thick** mode + Instant Client | Thin mode has no Kerberos. Thick mode uses `sqlnet.ora` with `SQLNET.AUTHENTICATION_SERVICES=(KERBEROS5)`. |
+| Db2 | `ibm_db` + `ibm_db_sa` | The bundled clidriver ships the IBMkrb5 plugin. **Wheels exist for x86_64 only**, with no aarch64. |
+
+---
+
+## 4. Decisions
+
+| # | Decision | Rejected alternative and why |
+|---|---|---|
+| D1 | Sibling package `src/db_bronze/` in this repo. Conventions are copied from `api_bronze`; no shared module yet. | A shared `bronze_common` now would tie both packages to the same dlt internals before it is clear what they really share. |
+| D2 | Bronze is **typed Arrow**: the types the backend returns, the source column names, dlt's normaliser bypassed. | Letting dlt normalise renames columns and re-coerces types. Casting everything to string pushes all typing into silver. |
+| D3 | The backend is a **config parameter**. The default comes from the config alone: ConnectorX where the engine supports it, pyarrow otherwise. Opting out is a config change. | Automatic runtime fallback would land the same table with different types from one run to the next. A canonical cast layer would duplicate type logic. |
+| D4 | **No runtime fallback.** A ConnectorX failure fails the run with instructions for switching backend. | Falling back silently changes types (D3). |
+| D5 | ConnectorX compatibility rules are **validation**: static checks when the config loads, column-level checks in a preflight at the start of every run. | Checking only at runtime cannot catch silent decimal truncation. |
+| D6 | The backend each table resolves to is stored in state. A change since the last successful run **fails before extraction** with `BackendChanged`, explaining that bronze types would change and that the fix is to land under a new table `name` (a new bronze prefix; silver unions old and new). Revised 24 Nov 2026 after S5. | WARN and proceed (the original D6): the freeze contract fails the run anyway, because the backends produce different decimal types, and the operator gets a confusing `DataValidationError`. Evolving types for one run: one bronze folder would hold mixed Parquet types that Spark schema merge cannot reconcile. |
+| D7 | Opt-in **keyset chunking** over indexed columns for large tables. | A single long query holds locks or snapshots for its whole duration (ORA-01555, MSSQL blocking). |
+| D8 | Large snapshot tables are paged with **ORDER BY + OFFSET by a Step Function**, using `plan` and `finalize` events. | Limiting v1 to tables that fit in one invocation. |
+| D9 | One **x86_64** image with every driver, about 1.2–1.5 GB. | Splitting by architecture: Db2 has no aarch64 wheel. Splitting by engine: least privilege is enforced per function through IAM, not by the image. |
+| D10 | Oracle always runs in **thick** mode. | Mixing thin and thick: thick mode is process-wide once enabled, and Instant Client is in the image anyway for ConnectorX. |
+| D11 | Kerberos: placeholder slot plus `docs/KERBEROS.md` only. | Building it now, before any project needs it. |
+| D12 | `_extracted_at` is the only added column. The backend used appears in logs and metrics only. | A `_backend` column. Source db and schema columns, which are constant per config. |
+
+---
+
+## 5. Configuration
+
+The same style as `api_bronze`: frozen dataclasses, unknown keys rejected,
+names matching `^[a-z][a-z0-9_]*$`. **One config document = one database
+connection = one pipeline = one Lambda function.** `pipeline_name`,
+`dataset_name` and `bucket_url` are the state identity and must stay stable.
+
+```json
+{
+  "pipeline_name": "core_banking",
+  "dataset_name": "core_banking",
+  "bucket_url": "s3://bronze-bucket/bronze",
+  "parquet_compression": "zstd",
+  "max_time_s": null,
+
+  "connection": {
+    "dialect": "mssql",
+    "host": "sql01.corp.example",
+    "port": 1433,
+    "database": "CoreBanking",
+    "username": {"secret_id": "ingest/core_banking", "key": "username"},
+    "password": {"secret_id": "ingest/core_banking", "key": "password"},
+    "auth": {"type": "password"},
+    "driver_options": {"Encrypt": "yes"},
+    "isolation_level": "READ COMMITTED",
+    "naive_timezone": "Africa/Johannesburg"
+  },
+
+  "defaults": {"backend": null, "batch_size": 50000},
+
+  "tables": [
+    {
+      "name": "transactions",
+      "schema": "dbo",
+      "table": "Transactions",
+      "primary_key": ["TransactionId"],
+      "columns": null,
+      "where": "BranchCode <> 'TEST'",
+      "cursor": {
+        "column": "UpdatedAt",
+        "type": "timestamp",
+        "initial_value": "2020-01-01T00:00:00Z",
+        "lag": 300,
+        "include_null_cursor": false
+      },
+      "chunking": {"strategy": "keyset", "order_by": ["UpdatedAt", "TransactionId"], "page_size": 200000}
+    },
+    {
+      "name": "branches",
+      "schema": "dbo",
+      "table": "Branches",
+      "primary_key": ["BranchCode"],
+      "backend": "pyarrow"
+    }
+  ]
+}
+```
+
+### 5.1 `connection`
+
+| Key | Meaning |
+|---|---|
+| `dialect` | `mssql`, `postgres`, `mysql`, `oracle`, `db2`, `sqlite`, or another SQLAlchemy dialect name (traditional backend only). |
+| `host`, `port`, `database` | Discrete fields. **Oracle** uses `service_name` instead of `database`. **SQLite** uses `path`. |
+| `username`, `password` | A literal, or a secret reference as in `api_bronze`: `{"env": ...}` or `{"secret_id": ..., "key": ...}`. Any connection field may be a reference. |
+| `auth` | Tagged. `{"type": "password"}` is implemented. `{"type": "kerberos", ...}` parses, then fails at run start (section 8). |
+| `driver_options` | Passed to the traditional driver, e.g. ODBC keywords for MSSQL. The code builds **both** the SQLAlchemy URL and the ConnectorX URL from the discrete fields, because the two formats differ (`+driver` and how query parameters are spelled). |
+| `isolation_level` | Applied to the traditional backend through SQLAlchemy. With ConnectorX, it is honoured only where the engine allows session settings; elsewhere the combination is rejected by validation (*to verify*, S3). |
+| `naive_timezone` | Default `UTC`. Used **only** to convert cursor values and window bounds between UTC (at the API boundary) and naive source timestamps. Data values are never touched (D2). |
+
+### 5.2 Per table
+
+| Key | Meaning |
+|---|---|
+| `name` | Bronze table name (the path prefix). |
+| `schema` + `table`, or `query` | The source table. `query` is the escape hatch for views and joins, and needs a `cursor` to run incrementally. |
+| `primary_key` | Required for `lag`, keyset chunking and offset paging. Also used for dlt's deduplication at the cursor boundary. |
+| `columns` | Projection. This is also how a column ConnectorX cannot read is excluded. `null` means all reflected columns. |
+| `where` | Static predicate, combined with the cursor filter using AND. |
+| `cursor.column`, `cursor.type` | `timestamp` or `integer`. No cursor means a snapshot table, which runs in `full` mode only. |
+| `cursor.initial_value` | ISO-8601 (an offset is allowed and converted through `naive_timezone`) or an integer. |
+| `cursor.lag` | Seconds, or an integer delta for integer cursors. Re-reads a trailing window to catch transactions that committed late. Passed to dlt incremental `lag`. Requires `primary_key`. **Every run re-lands the whole lag window** (S4); bronze accepts the duplicates and silver removes them (section 12). |
+| `cursor.include_null_cursor` | Default `false`. When `true`, adds `OR cursor IS NULL`, which re-reads those rows on every run. |
+| `backend` | `connectorx`, `pyarrow` or `sqlalchemy`. Overrides `defaults.backend`. When both are null, the default is resolved per D3. |
+| `chunking` | `{"strategy": "stream"}` (default) or `{"strategy": "keyset", "order_by": [...], "page_size": N}`. |
+| `batch_size` | Rows per Arrow batch (ConnectorX `batch_size`, or the fetch size on the traditional backend). |
+| `partition` | `{"column": ..., "num": N}`. ConnectorX `partition_on`. Opt-in, never automatic. |
+
+### 5.3 Default backend resolution (D3)
+
+Resolved from the config alone, so the same config always gives the same backend:
+
+| Dialect | Default backend |
+|---|---|
+| mssql, postgres, mysql, oracle, sqlite | `connectorx` |
+| db2, anything else | `pyarrow` |
+
+Each run logs the resolved backend for every table.
+
+---
+
+## 6. Validation (D5)
+
+### 6.1 When the config loads (static)
+
+Each rule fails with `ConfigError` and a message that says how to fix it.
+
+- `backend: connectorx` with an engine ConnectorX does not support (for example Db2).
+- `backend: connectorx` with `auth.type: kerberos` on any engine except mssql. Oracle stays rejected until the spike in section 8 proves otherwise.
+- `chunking.strategy: keyset` without `order_by`, or with an `order_by` that does not start with the cursor column. Keyset also requires `primary_key`.
+- `cursor.lag > 0` without `primary_key`.
+- `partition` combined with anything other than `backend: connectorx`, an integer column, and `chunking: stream`. It is also rejected at run time in `incremental` mode, because it breaks ascending row order.
+- `max_time_s` set while any table is `backend: connectorx` with `chunking: stream`. Cutting such a stream short leaves its query running (S1); the table must use `keyset` to be split-loaded.
+- `query` combined with `schema`/`table`, `columns` or `where`.
+- A source column named `_extracted_at` (checked again at preflight once columns are known).
+- Duplicate `name` values. Names that are not lowercase identifiers.
+
+### 6.2 Preflight at the start of every run
+
+The preflight reflects each table that is about to run, using one SQLAlchemy reflection query per table. It fails the run **before anything is extracted**, with `PreflightError`, and lists every offending column with two fixes: set `"backend": "pyarrow"`, or exclude the column (or cast it in `query`).
+
+Checks:
+
+- **Server version** is at or above a minimum per dialect. The minimums are set from what the integration tests prove, not guessed. A server below the minimum fails; the backend is never switched silently.
+- For tables on ConnectorX:
+  - **DECIMAL/NUMERIC with scale > 10 or precision > 28.** This check is mandatory: it is the only thing standing between a table and silent precision loss (section 3.1).
+  - Column types on the per-dialect deny list from section 3.1.
+- Rows with a NULL cursor are **counted and logged** when `include_null_cursor` is false, so the gap is visible.
+
+The same checks run, without extracting, as `{"mode": "validate"}`. Use that when onboarding a new source.
+
+---
+
+## 7. Runtime design
+
+### 7.1 Request flow
+
+`handler.handler` → `config.SourceConfig` / `RunRequest` → `preflight.check` →
+`pipeline.run_pipeline` → `source.make_resource` (one dlt resource per table)
+→ `extract.<backend>` → Arrow batches with `_extracted_at` appended.
+
+Each table becomes a custom `@dlt.resource` rather than dlt's `sql_table`. Three
+things need it: keyset chunking and offset paging control the query loop,
+preflight owns reflection, and ConnectorX errors have to be wrapped. Two rules
+carry over from `api_bronze`:
+
+- `dlt.sources.incremental(...)` **must be the resource argument's default value**. Building it in the function body silently disables state and filtering.
+- `write_disposition="append"`, hard-coded. `replace` deletes sibling `mode=` partitions.
+
+Queries are built with SQLAlchemy Core, so dialect differences (quoting,
+`LIMIT` vs `FETCH FIRST`/`OFFSET ... FETCH`, `TOP`) come from the dialect, not
+from string templates. For ConnectorX the statement is compiled to a string with
+`literal_binds`, as dlt does (*to verify* per dialect for datetime literals, S2).
+
+### 7.2 Backends
+
+| Backend | Extraction |
+|---|---|
+| `connectorx` | `cx.read_sql(url, sql, return_type="arrow_stream", batch_size=...)`. Each `RecordBatch` is yielded. `RuntimeError` and `pyo3_runtime.PanicException` are caught **narrowly around the ConnectorX call only** and re-raised as `ConnectorXFailed(table, reason)`. |
+| `pyarrow` | SQLAlchemy streaming cursor (`stream_results` / `yield_per`), with rows converted to Arrow per batch using the reflected column types. |
+| `sqlalchemy` | The same query, rows yielded as Arrow without type hints. For odd dialects where the pyarrow path cannot infer a type. |
+
+Bronze uses dlt's `direct` naming convention, so source column names survive
+(*prototyped*, S5). The schema contract is
+`{"tables": "evolve", "columns": "evolve", "data_type": "freeze"}`: a new source
+column lands, and a type change on an existing column fails the run
+(*prototyped*, S5). The filesystem destination sets
+`warn_unsafe_layout_separators=False`: dlt warns that `direct` allows `/` in
+table names, but bronze names are validated lowercase identifiers.
+
+Naive source timestamps stay naive in bronze (D2): every timestamp column the
+reflection reports as without time zone gets the resource column hint
+`{"timezone": false}`. Without the hint dlt labels them UTC without shifting
+them, which is the wrong instant whenever `naive_timezone` is not UTC (S5).
+
+### 7.3 Cursor handling
+
+- Cursor state holds values **as the source represents them** (naive timestamps stay naive). Conversion through `naive_timezone` happens only at the boundaries: config `initial_value`, event window bounds, and `plan` output.
+- The WHERE clause is `cursor >= :start [AND cursor < :end]` (half-open, as in `api_bronze`), ANDed with `where`. With `include_null_cursor` it becomes `(... OR cursor IS NULL)`.
+- The query's lower bound is `cursor.start_value`, which dlt already steps back by `lag`.
+- Without `lag`, dlt deduplicates rows at the boundary by `primary_key`. With `lag`, dlt deduplicates nothing, so each run re-lands every row in the lag window (*prototyped*, S4). Bronze accepts these exact re-reads, and silver removes them (section 12). Deduplicating ourselves was rejected because the state would grow with the number of rows in the lag window.
+- Incremental reads are ordered by the cursor (`row_order="asc"`), which is what makes split loading safe.
+
+### 7.4 Chunking (D7)
+
+- **`stream`**: one query, `ORDER BY cursor`, batches streamed.
+- **`keyset`**: repeated short queries, each an index range scan:
+
+  ```sql
+  SELECT <cols> FROM t
+  WHERE <cursor window> AND <where>
+    AND (c1 > :v1 OR (c1 = :v1 AND c2 > :v2))   -- expanded form: Oracle and MSSQL
+  ORDER BY c1, c2                               -- have no row-value comparison
+  FETCH FIRST :page_size ROWS ONLY              -- dialect-specific, via SQLAlchemy
+  ```
+
+  The last row of each page seeds the next. Ties on the cursor are broken by the primary key inside one run, and by dlt's boundary deduplication across runs. Whether the `order_by` columns are indexed cannot be checked portably; the operator docs say to confirm it with the DBA.
+
+- **Time budget** (incremental only). Keyset checks the deadline **itself, between pages**, and never closes a page mid-read, so no query is left running. `add_limit(max_time=...)` is not used for keyset, because it closes the generator mid-page.
+  - ConnectorX `stream` tables are **never split-loaded**. Dropping their reader returns at once, but the query runs on to the end in a detached thread with the connection open (*prototyped*, S1). On Lambda the frozen container keeps that DB session open.
+  - Validation rejects `max_time_s` alongside such a table (section 6.1). The Lambda-derived budget skips such tables, and that is logged. A ConnectorX table that does not fit one invocation must use `keyset`.
+  - The traditional backends' `stream` keeps `add_limit(max_time=...)`, as in `api_bronze`. The integration suite checks that closing a SQLAlchemy streaming cursor ends the query on the server.
+
+### 7.5 Modes and events
+
+| Event | Behaviour | Path / state |
+|---|---|---|
+| `{"source_id": "x"}` | incremental. `[last cursor − lag, …)` | `mode=incremental/<load date>`; cursor advances |
+| `{"source_id": "x", "mode": "full"}` | full, single invocation. `[initial_value, run start)` for cursor tables, everything for snapshot tables. Writes a manifest automatically on success. | `mode=full/<load date>`; cursor untouched |
+| `{"source_id": "x", "mode": "full", "tables": ["t"], "page": {"offset": 0, "limit": 500000}, "snapshot_id": "...", "partition_date": "2026-11-24"}` | One page of a planned snapshot. ORDER BY the primary key or `order_by`. A page with `"limit": null` is open-ended. | `mode=full/<partition_date>` |
+| `{"source_id": "x", "mode": "backfill", "window_start": ..., "window_end": ...}` | `[start, end)`. ISO or integer to match the cursor type. Optional `partition` read. | `mode=backfill/<window start date>` |
+| `{"source_id": "x", "mode": "plan", "plan": "snapshot" \| "backfill", "tables": [...], ...}` | No extract. **snapshot:** `COUNT(*)`, then `[{table, offset, limit}]` with the last page open-ended, plus a fresh `snapshot_id` and `partition_date`. **backfill:** cursor `MIN`/`MAX`, split into N windows or windows of a given size. | none |
+| `{"source_id": "x", "mode": "finalize", "table": "t", "snapshot_id": ..., "load_ids": [...]}` | Writes `<bucket_url>/<dataset>/_manifests/<table>/<snapshot_id>.json`. | none |
+| `{"source_id": "x", "mode": "validate"}` | Static checks plus preflight, nothing extracted. | none |
+
+Every event also accepts `"tables": [...]` to run a subset.
+
+**Offset paging caveats.** These go in the operator docs. OFFSET paging is not
+consistent across invocations: rows that change while a snapshot is running
+can be duplicated or missed, and deep offsets get slower. Prefer keyset
+wherever a unique sortable key exists. Use offset paging only when the table
+has no usable key, or when its key is not indexed.
+
+**Parallelism.** Paged snapshots and parallel backfill windows run under a
+**separate function and pipeline name** (e.g. `core_banking_backfill`). That is
+the `api_bronze` rule: these runs still write dlt state rows, so they must
+never share a pipeline name with a concurrently running incremental.
+
+An example ASL (`examples/db_snapshot.asl.json`) shows the snapshot flow:
+`plan` → `Map` over pages (with a concurrency limit) → `finalize` with the
+collected `load_ids`.
+
+### 7.6 Failures and observability
+
+| Error type (Lambda `errorType`) | When | Lands? | Cursor |
+|---|---|---|---|
+| `ConfigError` | Static validation fails | no | holds |
+| `PreflightError` | Reflection checks fail | no | holds |
+| `ConnectorXFailed` | ConnectorX raises at any point. The message names the table and the reason, gives the exact fix (`"backend": "pyarrow"` on that table), and warns that switching changes bronze column types. | no | holds |
+| `BackendChanged` | A table's resolved backend differs from the one in state (D6). The message says the bronze types would change and gives the fix: a new table `name`. | no | holds |
+| `NotImplementedError` | `auth.type: kerberos` | no | holds |
+
+The handler unwraps these from dlt's `PipelineStepFailed`, as `api_bronze`
+already does for `BrokenPageError`.
+
+Logs are structured JSON, with one `run start` and one `run done` record. The
+`run done` record includes the backend per table and the row counts.
+
+EMF metrics, dimensioned by pipeline and table:
+
+- `RowsExtracted`
+- `NullCursorRows`
+- `ConnectorXFailed`
+- `PreflightFailed`
+- `BackendChanged`
+
+**Backend change guard (D6).** The resolved backend is written to each
+resource's dlt state. When it differs from the previous successful run, the
+`BackendChanged` metric is emitted and the run fails with `BackendChanged`
+before anything is extracted. A table landing under a new `name` has no
+previous backend, so the guard passes.
+
+### 7.7 State
+
+Identical to `api_bronze`:
+
+- `pipe.drop()` on every invocation, so state is always restored from the destination.
+- One concurrent run per pipeline name.
+- Every run starts from the newest state attached to a completed load.
+
+### 7.8 Memory
+
+ConnectorX's stream channel is unbounded, so `batch_size` and Lambda memory are
+the only controls. Memory is sized per function from a measured validation run
+(peak RSS on the largest table). No custom backpressure is built.
+
+---
+
+## 8. Kerberos (placeholder only, D11)
+
+- The `auth` schema accepts `{"type": "kerberos", "principal": ..., "keytab": {"secret_id": ...}, "krb5_conf": ...}`. At run start it raises `NotImplementedError` pointing to `docs/KERBEROS.md`.
+- `docker/Dockerfile.db` carries a **commented-out** block: `krb5-libs`, `krb5-workstation`, `ENV KRB5_CONFIG=/tmp/krb5.conf KRB5CCNAME=FILE:/tmp/krb5cc`.
+- `docs/KERBEROS.md` records the section 3 findings so a project can pick this up without repeating the research:
+  - per engine: the driver keywords, SPN conventions, and which backend supports it (ConnectorX: MSSQL only);
+  - the two ways to get a ticket: a keytab from Secrets Manager plus `kinit -kt` into a `/tmp` FILE ccache, re-checked on every invocation because warm containers outlive the roughly 10-hour AD tickets; or `KRB5_CLIENT_KTNAME`, letting MIT GSSAPI fetch and renew tickets itself;
+  - Lambda gotchas: the KEYRING ccache may not work; set `rdns = false` and `udp_preference_limit = 1`; the VPC DNS must resolve the KDCs;
+  - the open spikes: ConnectorX MSSQL against AD, Oracle Kerberos through OCI external auth, whether ibm_db and the ConnectorX-bundled krb5 honour `KRB5_CLIENT_KTNAME`, and whether Instant Client Basic includes the Kerberos adapter.
+
+---
+
+## 9. Packaging
+
+- `pyproject.toml` gains an optional extra `db`:
+  - `connectorx>=0.4.6`
+  - `sqlalchemy`
+  - `pyodbc`
+  - `oracledb`
+  - `psycopg[binary]`
+  - `PyMySQL`
+  - `ibm_db` and `ibm_db_sa`, both with the marker `sys_platform == 'linux' and platform_machine == 'x86_64'`, so `uv sync` still works on a Mac.
+- `mise run docker:lock --db` exports `docker/requirements-db.lock`. The API image stays free of database dependencies.
+- `docker/Dockerfile.db`, based on `public.ecr.aws/lambda/python:3.12` (Amazon Linux 2023), `--platform linux/amd64` only:
+  - `unixODBC` and `msodbcsql18` (`ACCEPT_EULA=Y`) from the RHEL 9 repo. The repo URL is the build argument `MSSQL_REPO_URL`.
+  - Oracle Instant Client **Basic** (not Basic Lite, which supports fewer character sets) from `ORACLE_IC_URL`, checked against `ORACLE_IC_SHA256`, unpacked under `/opt/oracle`. It also needs `libaio` (*to verify* on AL2023, S6). `LD_LIBRARY_PATH` is set for ConnectorX, and `oracledb.init_oracle_client(lib_dir=...)` runs at module import.
+  - Python dependencies from the lock with `--require-hashes`.
+  - The same ENV as the API image (`DLT_DATA_DIR`, `DLT_PROJECT_DIR`, telemetry off).
+  - `CMD ["db_bronze.handler.handler"]`.
+- Build arguments exist so a regulated pipeline can point at internal mirrors without editing the Dockerfile.
+- Db2 for z/OS or IBM i needs a Db2 Connect licence file copied into `clidriver/license/`. Documented, not done.
+
+---
+
+## 10. Testing
+
+| Layer | What | Where it runs |
+|---|---|---|
+| Unit | Config validation, default-backend resolution, URL building (SQLAlchemy and ConnectorX), query compilation for every dialect (offline `compile()`), keyset and paging SQL, the preflight rules against fake reflected metadata, `naive_timezone` conversion, error wrapping (including a synthetic `PanicException`), the backend-change guard. An end-to-end run against **SQLite** on both the `connectorx` and `pyarrow` backends: modes, state restore, lag, keyset, plan/page/finalize, manifests. | Anywhere. No network, no Docker. |
+| Integration (`-m integration`) | The same scenarios against docker-compose: Postgres, MySQL 8.4, SQL Server 2022, Oracle Free, Db2 Community (x86 only). Type matrices per engine, including the deny-listed and high-scale decimal columns. Server-version floors. Spike measurements (section 11). | Dev machine or CI with Docker |
+| Image | The integration scenarios invoked through the Lambda Runtime Interface Emulator inside the built `db-bronze` image (`docker:smoke --db`), proving drivers, Instant Client and ODBC registration. | Dev machine or CI with Docker |
+
+Kerberos is not tested (D11). New mise tasks: `test:integration`, plus `--db` flags on `docker:lock`, `docker:build` and `docker:smoke`.
+
+---
+
+## 11. Spikes and open items
+
+| # | Question | If the answer is bad |
+|---|---|---|
+| S1 | Does dropping a ConnectorX `arrow_stream` reader mid-query block until the query completes? | **Answered (prototype, SQLite):** no block, but the producer detaches and reads to the end with the connection open. Split loading requires `keyset` for ConnectorX tables (section 7.4). Still to confirm on Postgres: the server-side query stays active in `pg_stat_activity` after a drop. |
+| S2 | Does `literal_binds` compile datetime and decimal literals correctly for mssql, oracle and db2? | Bind values through ConnectorX-safe literal formatting of our own. |
+| S3 | Can ConnectorX apply `isolation_level` or session settings for each engine? | Reject `isolation_level` together with `connectorx` for that engine. |
+| S4 | Do dlt incremental `lag` and boundary deduplication by `primary_key` work with Arrow items from a custom resource? | **Answered (prototype):** deduplication works without `lag`. With `lag`, dlt deduplicates nothing, so the lag window is re-landed on every run. Decision: bronze accepts it and silver removes the duplicates (sections 7.3, 12). |
+| S5 | Do `direct` naming and `data_type: freeze` apply to Arrow items as expected? | **Answered (prototype):** yes, and freeze also catches decimal precision changes, which led to revising D6. Naive timestamps need `timezone: false` hints (section 7.2). |
+| S6 | Do Instant Client (Basic) and `libaio` work on AL2023? Can thick-mode oracledb and ConnectorX share `libclntsh` in one process? | Pin an Instant Client version known to work; isolate Oracle in its own image. |
+| S7 | What is peak memory for the largest real table under ConnectorX streaming? | Smaller `batch_size`, keyset chunking, or more Lambda memory. |
+| S8 | Is egress to packages.microsoft.com and the Oracle download host allowed from the build pipeline? | Internal mirrors through the build arguments. |
+| S9 | What are the per-dialect minimum server versions? | Set by the integration matrix. |
+
+Still not validated, as for `api_bronze`: real S3, real Lambda in a VPC
+against the production databases, and Glue 6.0 reading typed bronze.
+
+---
+
+## 12. Bronze contract (for silver)
+
+- Paths: `<bucket_url>/<dataset>/<name>/mode=<mode>/year=/month=/day=/<load_id>.<file_id>.parquet`. Append-only, zstd.
+- Columns: the source columns with their source names and backend types, plus `_extracted_at` (`timestamp[us, UTC]`). Source timestamps without a time zone stay naive. Interpret them with the config's `naive_timezone`. A table's types never change within one bronze `name`. A backend change fails with `BackendChanged` and lands under a new `name`. A source type change fails ingestion until someone deals with it.
+- **Duplicates:** with `cursor.lag`, every incremental run re-lands the rows in its lag window, so identical row versions can repeat. Silver deduplicates on (`primary_key`, cursor) and keeps the latest `_extracted_at`.
+- **Completeness:**
+  - `incremental` and `backfill`: a file counts only if its load id has `status = 0` in `_dlt_loads`. This is the `api_bronze` rule.
+  - `full`: a load counts only if it is listed in a manifest at `_manifests/<name>/<snapshot_id>.json`. Single-invocation full runs write their own manifest. Paged snapshots get theirs from `finalize`. A full load without a manifest is an incomplete snapshot and must be ignored.
+- Merging into silver uses `primary_key`, from the config or the documented table metadata. Silver itself is out of scope for v1.
+
+---
+
+## 13. Implementation order
+
+1. Config, validation and URL building, with unit tests.
+2. Query builder (stream, keyset, paging) with offline compile tests for every dialect.
+3. Resource and backends; end-to-end on SQLite for both backends; modes and state.
+4. Preflight and `validate`; the backend-change guard; error types and handler unwrapping.
+5. `plan`, `finalize` and manifests; the example ASL.
+6. `Dockerfile.db`, lock and mise tasks; the image smoke test.
+7. The docker-compose integration suite; run spikes S1–S9 and fold the results back into this document.
+8. `README-db.md` (operator spec), `docs/KERBEROS.md`, `CLAUDE.md` update.

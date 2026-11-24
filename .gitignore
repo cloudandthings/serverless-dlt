@@ -1,5 +1,7 @@
 .venv/
 .smoke/
+# local issue tracker (see .agents/issue-tracker.md)
+.scratch/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
