@@ -6,6 +6,7 @@ import json
 import logging
 import sqlite3
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pyarrow as pa
@@ -58,11 +59,9 @@ def config_dir(tmp_path: Path, monkeypatch) -> Path:
     return path
 
 
-BACKENDS = ["pyarrow"]
-
-
-@pytest.fixture(params=BACKENDS)
+@pytest.fixture(params=["pyarrow", "connectorx"])
 def backend(request) -> str:
+    """Every handler-level scenario runs on every implemented backend."""
     return request.param
 
 
@@ -341,3 +340,46 @@ def test_initial_value_offset_is_converted_to_naive_source_time(db, bucket, invo
         connection={"naive_timezone": "Africa/Johannesburg"},
     )
     assert ids(landed(bucket)) == [2]  # naive bound 2020-01-01 00:00:00 (in UTC it would be 2019-12-31 22:00)
+
+
+@pytest.mark.parametrize("backend", ["connectorx"])
+def test_connectorx_decimal_38_10_and_naive_timestamp_land_unchanged(db, bucket, invoke, monkeypatch):
+    # ConnectorX on SQLite infers types from the stored values and has no decimal, so the stream is
+    # what ConnectorX returns for a decimal(38,10) column on a server engine (section 3.1).
+    import connectorx
+
+    db.execute('ALTER TABLE "Transactions" ADD COLUMN "Balance" DECIMAL(38,10)')
+    balance = Decimal("123456789012345678.0123456789")
+    batch = pa.RecordBatch.from_pydict(
+        {
+            "TransactionId": pa.array([1], pa.int64()),
+            "UpdatedAt": pa.array([datetime(2026, 11, 20, 8, 0)], pa.timestamp("us")),
+            "Branch Code": pa.array(["JHB"], pa.string()),
+            "amountCents": pa.array([100], pa.int64()),
+            "Balance": pa.array([balance], pa.decimal128(38, 10)),
+        }
+    )
+    calls = []
+
+    def read_sql(conn, query, *, return_type, batch_size):
+        calls.append((conn, return_type, batch_size))
+        return pa.RecordBatchReader.from_batches(batch.schema, [batch])
+
+    monkeypatch.setattr(connectorx, "read_sql", read_sql)
+    invoke(batch_size=7)
+    assert calls == [(f"sqlite://{db.path}", "arrow_stream", 7)]
+    [f] = files(bucket)
+    schema = pq.read_schema(f)
+    assert schema.field("Balance").type == pa.decimal128(38, 10)
+    assert schema.field("UpdatedAt").type == pa.timestamp("us")
+    [row] = landed(bucket)
+    assert row["Balance"] == balance
+    assert row["UpdatedAt"] == datetime(2026, 11, 20, 8, 0)
+
+
+@pytest.mark.parametrize("backend", [None])  # neither the table nor defaults name one
+def test_run_log_names_the_backend_resolved_for_each_table(db, invoke, caplog):
+    db.insert((1, "2026-11-20 08:00:00", "JHB", 100))
+    caplog.set_level(logging.INFO, logger="db_bronze")
+    invoke()  # sqlite resolves to connectorx
+    assert '{"table": "transactions", "backend": "connectorx"}' in caplog.text

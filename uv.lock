@@ -101,6 +101,7 @@ aws = [
     { name = "boto3" },
 ]
 db = [
+    { name = "connectorx" },
     { name = "sqlalchemy" },
 ]
 
@@ -117,6 +118,7 @@ silver = [
 [package.metadata]
 requires-dist = [
     { name = "boto3", marker = "extra == 'aws'", specifier = ">=1.40" },
+    { name = "connectorx", marker = "extra == 'db'", specifier = ">=0.4.6" },
     { name = "dlt", extras = ["filesystem", "parquet"], specifier = "==1.32.0" },
     { name = "sqlalchemy", marker = "extra == 'db'", specifier = ">=2" },
 ]
@@ -233,6 +235,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d8/53/6f443c9a4a8358a93a6792e2acffb9d9d5cb0a5cfd8802644b7b1c9a02e4/colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44", size = 27697, upload-time = "2022-10-25T02:36:22.414Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6", size = 25335, upload-time = "2022-10-25T02:36:20.889Z" },
+]
+
+[[package]]
+name = "connectorx"
+version = "0.4.6"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/65/c7/9fdc0b75eb648b92df6a93d52b5dd1031e498fbe1ec150c97aa685fce9a8/connectorx-0.4.6-cp312-cp312-macosx_10_12_x86_64.whl", hash = "sha256:ed208d58cce76d48ff70e2eae38a7f12eb86d26d8cd8c844a16f9d1dce3c5799", size = 49038896, upload-time = "2026-09-17T23:21:46.263Z" },
+    { url = "https://files.pythonhosted.org/packages/4d/41/def72d84200afac59f6b0da7ed2867e0a1f9eadaa7a4c0fd26bb52f55a73/connectorx-0.4.6-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:a80a0286c8f17264f63c14a73b99705c9384fb81460d3f29976499f7ea0c5d95", size = 47436179, upload-time = "2026-09-17T23:22:10.945Z" },
+    { url = "https://files.pythonhosted.org/packages/52/94/4f3a8cd4033007c9a706357ea88209da3adb40fa78898175a7993ebe20f6/connectorx-0.4.6-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:ed60e2735c8f89bbea97047860b1551bd5247d33c532fced252c65cd5e8f9a42", size = 60410025, upload-time = "2026-09-17T23:20:51.56Z" },
+    { url = "https://files.pythonhosted.org/packages/b7/6e/241d85703508cef5774f41c2aadcec64a6b60e77c10da29e0a7f01060f76/connectorx-0.4.6-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:e3da099b69bb36687d9ca723aa7da9432ced6c4aad2f935ca7bc7f7534b80460", size = 57651631, upload-time = "2026-09-17T23:21:18.177Z" },
+    { url = "https://files.pythonhosted.org/packages/c4/16/b5ff270fa00cdff4a964cf8fe597bce62c42016fb682f878d2debe9e0824/connectorx-0.4.6-cp312-cp312-win_amd64.whl", hash = "sha256:e11ac218fd5d110cbd1dbd20d52e1f44edc8f37e51a1e096cbea02d3892b5f60", size = 46334342, upload-time = "2026-09-17T23:22:36.333Z" },
 ]
 
 [[package]]
