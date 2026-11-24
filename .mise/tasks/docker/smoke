@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
-#MISE description="Build the image, then invoke it through the Lambda Runtime Interface Emulator"
-#MISE depends=["docker:build"]
-#USAGE flag "-t --tag <tag>" help="Image tag (must match docker:build)" default="api-bronze:test" env="IMAGE_TAG"
+#MISE description="Build an image, then invoke it through the Lambda Runtime Interface Emulator"
+#USAGE flag "--db" help="Smoke-test the db_bronze image (drivers, Instant Client, SQLite run on both backends)"
+#USAGE flag "-t --tag <tag>" help="Image tag (default api-bronze:test, or db-bronze:test with --db)" env="IMAGE_TAG"
 set -euo pipefail
 cd "$MISE_PROJECT_ROOT"
 
-uv run python scripts/smoke_image.py "${usage_tag:?}"
+# docker:build runs inline rather than via `depends`: it must get the same --db and --tag.
+if [[ "${usage_db:-false}" == "true" ]]; then
+  tag="${usage_tag:-db-bronze:test}"
+  mise run docker:build --db --tag "$tag"
+  uv run python scripts/smoke_db_image.py "$tag"
+else
+  tag="${usage_tag:-api-bronze:test}"
+  mise run docker:build --tag "$tag"
+  uv run python scripts/smoke_image.py "$tag"
+fi

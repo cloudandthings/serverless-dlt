@@ -1,11 +1,28 @@
 #!/usr/bin/env bash
-#MISE description="Build the Lambda container image"
-#MISE depends=["docker:lock"]
-#USAGE flag "-t --tag <tag>" help="Image tag" default="api-bronze:test" env="IMAGE_TAG"
-#USAGE flag "-p --platform <platform>" help="Must match the function's architecture" default="linux/arm64" {
+#MISE description="Build a Lambda container image (api_bronze, or db_bronze with --db)"
+#USAGE flag "--db" help="Build the db_bronze image (docker/Dockerfile.db, linux/amd64 only)"
+#USAGE flag "-t --tag <tag>" help="Image tag (default api-bronze:test, or db-bronze:test with --db)" env="IMAGE_TAG"
+#USAGE flag "-p --platform <platform>" help="Must match the function's architecture (default linux/arm64; --db is linux/amd64 only)" {
 #USAGE   choices "linux/arm64" "linux/amd64"
 #USAGE }
 set -euo pipefail
 cd "$MISE_PROJECT_ROOT"
 
-docker build -f docker/Dockerfile --platform "${usage_platform:?}" -t "${usage_tag:?}" .
+# The lock step runs inline rather than via `depends`: it must get the same --db flag.
+if [[ "${usage_db:-false}" == "true" ]]; then
+  platform="${usage_platform:-linux/amd64}"
+  if [[ "$platform" != "linux/amd64" ]]; then
+    echo "docker:build --db: the db image is linux/amd64 only (ibm_db has no aarch64 wheel; DESIGN-db.md D9)" >&2
+    exit 2
+  fi
+  mise run docker:lock --db
+  dockerfile=docker/Dockerfile.db
+  tag="${usage_tag:-db-bronze:test}"
+else
+  platform="${usage_platform:-linux/arm64}"
+  mise run docker:lock
+  dockerfile=docker/Dockerfile
+  tag="${usage_tag:-api-bronze:test}"
+fi
+
+docker build -f "$dockerfile" --platform "$platform" -t "$tag" .
