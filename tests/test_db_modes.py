@@ -40,14 +40,14 @@ def invoke(db: SourceDB, bucket: Path, tmp_path: Path, pipelines_dir: str, backe
     config_dir.mkdir()
     monkeypatch.setenv("CONFIG_URI", config_dir.as_uri())
 
-    def run(tables: list[dict] | None = None, **event) -> dict:
+    def run(config_tables: list[dict] | None = None, **event) -> dict:
         cfg = {
             "pipeline_name": "core_banking",
             "dataset_name": "core_banking",
             "bucket_url": bucket.as_uri(),
             "connection": {"dialect": "sqlite", "path": str(db.path)},
             "defaults": {"backend": backend},
-            "tables": tables or [TRANSACTIONS],
+            "tables": config_tables or [TRANSACTIONS],
         }
         (config_dir / "core.json").write_text(json.dumps(cfg))
         return handler({"source_id": "core", **event}, None)
@@ -105,7 +105,7 @@ def branches(db: SourceDB) -> SourceDB:
 
 
 def test_full_lands_everything_for_a_snapshot_table(branches, bucket, invoke):
-    result = invoke(tables=[TRANSACTIONS, BRANCHES], mode="full")
+    result = invoke(config_tables=[TRANSACTIONS, BRANCHES], mode="full")
     assert result["rows"]["branches"] == 2
     assert sorted(r["BranchCode"] for r in landed(bucket, "branches")) == ["CPT", "JHB"]
     assert partitions(bucket, "branches") == {today_partition("full")}
@@ -113,5 +113,22 @@ def test_full_lands_everything_for_a_snapshot_table(branches, bucket, invoke):
 
 def test_snapshot_table_in_incremental_fails_with_config_error_and_nothing_lands(branches, bucket, invoke):
     with pytest.raises(ConfigError, match=r"mode=incremental.*\['branches'\].*mode=full"):
-        invoke(tables=[TRANSACTIONS, BRANCHES])
+        invoke(config_tables=[TRANSACTIONS, BRANCHES])
+    assert files(bucket) == [] and files(bucket, "branches") == []
+
+
+def test_tables_subset_runs_only_the_named_tables(branches, bucket, invoke):
+    db = branches
+    db.insert((1, "2026-11-20 08:00:00", "JHB", 100))
+    result = invoke(config_tables=[TRANSACTIONS, BRANCHES], tables=["transactions"])
+    assert set(result["rows"]) == {"transactions"}
+    assert ids(landed(bucket)) == [1] and files(bucket, "branches") == []
+    invoke(config_tables=[TRANSACTIONS, BRANCHES], mode="full", tables=["branches"])
+    assert partitions(bucket) == {today_partition("incremental")}
+    assert partitions(bucket, "branches") == {today_partition("full")}
+
+
+def test_unknown_table_in_subset_fails_with_config_error(branches, bucket, invoke):
+    with pytest.raises(ConfigError, match=r"unknown tables \['transaction'\]"):
+        invoke(config_tables=[TRANSACTIONS, BRANCHES], mode="full", tables=["transaction"])
     assert files(bucket) == [] and files(bucket, "branches") == []

@@ -134,8 +134,17 @@ class SourceConfig:
         return table.backend or self.defaults.backend or default_backend(self.connection.dialect)
 
     def tables_for(self, req: RunRequest) -> tuple[TableConfig, ...]:
-        """The tables one invocation runs. Snapshot tables run in mode=full only."""
+        """The tables one invocation runs: all of them, or the event's `tables` subset.
+
+        Snapshot tables run in mode=full only.
+        """
         tables = self.tables
+        if req.tables is not None:
+            known = [t.name for t in self.tables]
+            unknown = [n for n in req.tables if n not in known]
+            if unknown:
+                raise ConfigError(f"event tables: unknown tables {unknown}; this config has {known}")
+            tables = tuple(t for t in self.tables if t.name in req.tables)
         if req.mode != "full":
             snapshots = [t.name for t in tables if t.cursor is None]
             if snapshots:
@@ -179,10 +188,16 @@ class RunRequest:
     """What one invocation should do. Built from the Lambda event."""
 
     mode: str = "incremental"
+    tables: tuple[str, ...] | None = None  # a subset of the config's table names; None runs them all
 
     @classmethod
     def from_event(cls, event: dict) -> RunRequest:
         mode = event.get("mode", "incremental")
         if mode not in MODES:
             raise ConfigError(f"mode {mode!r} not in {MODES}")
-        return cls(mode)
+        tables = event.get("tables")
+        if tables is not None:
+            if not isinstance(tables, list) or not tables or not all(isinstance(n, str) for n in tables):
+                raise ConfigError(f"event tables: expected a non-empty list of table names, got {tables!r}")
+            tables = tuple(tables)
+        return cls(mode, tables=tables)
