@@ -48,14 +48,6 @@ def test_oracle_integers_pass_whatever_their_precision():
     assert column_findings("oracle", "connectorx", columns) == []
 
 
-@pytest.mark.parametrize("dialect", ["mssql", "postgres", "mysql", "oracle", "sqlite"])
-def test_a_type_reflection_does_not_recognise_is_a_finding_on_connectorx(dialect):
-    """Postgres xml, MySQL geometry, Oracle XMLTYPE and INTERVAL YEAR TO MONTH reflect as NullType."""
-    [finding] = column_findings(dialect, "connectorx", [("X", sa.types.NullType())])
-    assert "X" in finding and "not recognised" in finding
-    assert column_findings(dialect, "pyarrow", [("X", sa.types.NullType())]) == []
-
-
 @pytest.mark.parametrize("dialect", ["sqlite", "mysql"])
 def test_decimal_with_no_declared_precision_passes_elsewhere(dialect):
     assert column_findings(dialect, "connectorx", [("Ok", sa.Numeric())]) == []
@@ -66,7 +58,24 @@ def test_decimal_rule_does_not_apply_to_pyarrow():
 
 
 DENIED = {
-    "postgres": [pg.INTERVAL(), pg.MONEY(), sa.Time(timezone=True), pg.MACADDR(), sa.ARRAY(sa.Integer())],
+    "postgres": [
+        pg.INTERVAL(),
+        pg.MONEY(),
+        sa.Time(timezone=True),
+        pg.MACADDR(),
+        pg.MACADDR8(),
+        pg.CIDR(),
+        pg.BIT(varying=True),
+        pg.TSVECTOR(),
+        pg.TSQUERY(),
+        sa.String(),  # how SQLAlchemy reflects "char" (and name)
+        sa.ARRAY(sa.Uuid()),
+        sa.ARRAY(sa.DateTime()),
+        sa.ARRAY(sa.CHAR(2)),
+        sa.ARRAY(pg.JSONB()),
+        sa.ARRAY(sa.Numeric()),  # each element would lose digits, as for a NUMERIC column
+        sa.ARRAY(sa.Numeric(38, 12)),
+    ],
     "mssql": [mssql.SQL_VARIANT(), mssql.XML()],
     "oracle": [
         oracle.RAW(16),
@@ -88,6 +97,24 @@ DENIED = {
 def test_denied_types_are_findings_on_connectorx_only(dialect, col_type):
     assert len(column_findings(dialect, "connectorx", [("C", col_type)])) == 1
     assert column_findings(dialect, "pyarrow", [("C", col_type)]) == []
+
+
+@pytest.mark.parametrize(
+    "item",
+    [sa.SmallInteger(), sa.Integer(), sa.BigInteger(), sa.Boolean(), pg.REAL(), pg.DOUBLE_PRECISION(),
+     sa.Numeric(10, 2), sa.VARCHAR(5), sa.TEXT()],
+    ids=lambda v: type(v).__name__,
+)
+def test_postgres_arrays_of_elements_connectorx_reads_pass(item):
+    assert column_findings("postgres", "connectorx", [("C", sa.ARRAY(item))]) == []
+
+
+@pytest.mark.parametrize("dialect", ["postgres", "mysql", "mssql", "oracle"])
+def test_a_type_sqlalchemy_does_not_recognise_is_a_finding_on_connectorx_only(dialect):
+    # Postgres xml, geometric types, pg_lsn and composite types; MySQL geometry types (integration type matrix)
+    [finding] = column_findings(dialect, "connectorx", [("C", sa.types.NullType())])
+    assert "C" in finding and "not recognised" in finding
+    assert column_findings(dialect, "pyarrow", [("C", sa.types.NullType())]) == []
 
 
 def test_a_type_denied_on_one_dialect_is_fine_on_another():
@@ -132,3 +159,22 @@ def test_a_server_below_the_minimum_is_a_finding():
 def test_no_minimum_means_no_check():
     assert server_version_finding("postgres", (1,), {"postgres": None}) is None
     assert server_version_finding("postgres", None, {"postgres": (13,)}) is None
+
+
+def test_a_query_tables_columns_are_not_checked_their_types_are_not_reflected(tmp_path):
+    # A server dialect's rules over a SQLite engine: a query's result columns carry no reflected type,
+    # which must not read as "a type SQLAlchemy does not recognise".
+    from db_bronze.config import SourceConfig
+    from db_bronze.preflight import preflight
+
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 's.sqlite'}")
+    with engine.begin() as conn:
+        conn.exec_driver_sql("CREATE TABLE t (id INTEGER PRIMARY KEY, at DATETIME, label TEXT)")
+    cfg = SourceConfig.from_dict({
+        "pipeline_name": "p", "dataset_name": "p", "bucket_url": "file:///b",
+        "connection": {"dialect": "postgres", "host": "h", "database": "d"},
+        "tables": [{"name": "q", "query": "SELECT id, at, label FROM t", "backend": "connectorx",
+                    "cursor": {"column": "at", "type": "timestamp", "initial_value": "2026-01-01"}}],
+    })
+    _, [report] = preflight(cfg, cfg.tables, engine)
+    assert report.findings == []

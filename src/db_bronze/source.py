@@ -73,16 +73,16 @@ def _check_partition_column(tc: TableConfig, table: sa.FromClause, dialect: sa.D
     column = tc.partition.column
     if column not in table.c:
         raise PreflightError(f"table {tc.name}: partition column {column!r} is not a column of the table")
+    if not isinstance(table.c[column].type, sa.Integer):
+        raise PreflightError(
+            f"table {tc.name}: partition column {column!r} is not an integer ({table.c[column].type}). "
+            'Fix: partition on an integer column, or remove "partition"'
+        )
     if dialect.name == "oracle" and dialect.identifier_preparer.quote(column) != column:
         # ConnectorX upper-cases the column in its range query, quotes or not (integration, Oracle)
         raise PreflightError(
             f"table {tc.name}: ConnectorX cannot partition on Oracle by the case-sensitive column {column!r}. "
             'Fix: partition on a column with a case-insensitive name, or remove "partition"'
-        )
-    if not isinstance(table.c[column].type, sa.Integer):
-        raise PreflightError(
-            f"table {tc.name}: partition column {column!r} is not an integer ({table.c[column].type}). "
-            'Fix: partition on an integer column, or remove "partition"'
         )
 
 
@@ -154,10 +154,9 @@ def make_resource(
         if backend == "connectorx":
             # ConnectorX takes SQL text, so values are inlined, as dlt's own sql_table does.
             sql = literal_sql(stmt, engine.dialect)
-            # ConnectorX splices the column into its own range and partition queries unquoted, so
-            # a mixed-case name must arrive quoted for the dialect (integration, Postgres).
-            column = engine.dialect.identifier_preparer.quote(tc.partition.column) if tc.partition else None
-            partition = (column, tc.partition.num) if tc.partition else None
+            # ConnectorX puts the column into its own SQL as given: quote it for the engine (Postgres folds case)
+            quoted = engine.dialect.identifier_preparer.quote(tc.partition.column) if tc.partition else None
+            partition = (quoted, tc.partition.num) if tc.partition else None
             names = list(stmt.selected_columns.keys())
             batches = read_connectorx(connectorx_url(cfg.connection), sql, specs, batch_size, tc.name, partition, names)
         else:

@@ -16,12 +16,13 @@ import connectorx as cx
 import pytest
 import sqlalchemy as sa
 
-from db_bronze import ConfigError
 from db_bronze.config import SourceConfig
 from db_bronze.extract import ColumnSpec, read_pyarrow
 from db_bronze.preflight import MIN_SERVER_VERSION
 from db_bronze.query import literal_sql
 from db_bronze.urls import connectorx_url
+
+from .conftest import connectorx_in_process, fails
 
 pytestmark = pytest.mark.integration
 
@@ -71,6 +72,12 @@ class SlowQuery:
                 conn.exec_driver_sql(CANCEL[self.source.dialect].format(id=session))
 
 
+def connectorx_here(source) -> None:
+    """Skip unless this process can call ConnectorX on the engine directly (Oracle: Instant Client, `--inside`)."""
+    if not connectorx_in_process(source.dialect):
+        pytest.skip(f"{source.dialect}: ConnectorX needs Instant Client in this process; run with --inside")
+
+
 def cx_url(source, **connection) -> str:
     cfg = SourceConfig.from_dict(
         {
@@ -96,6 +103,7 @@ STREAMS = {
 
 
 def test_a_dropped_connectorx_stream_leaves_its_query_running_on_the_server(source):
+    connectorx_here(source)
     slow = SlowQuery(source)
     started = time.monotonic()
     reader = cx.read_sql(cx_url(source), slow.sql, return_type="arrow_stream", batch_size=50)
@@ -166,6 +174,7 @@ AMOUNT = Decimal("123456789012345678.0123456789")
 
 
 def test_datetime_and_decimal_literals_round_trip_through_connectorx(source):
+    connectorx_here(source)
     table = source.create(literals)
     one_us = timedelta(microseconds=1)
     tiny = Decimal("0.0000000001")
@@ -214,6 +223,55 @@ def test_connectorx_drops_digits_of_an_unconstrained_postgres_numeric(source):
     assert value == Decimal("1.1234567890")  # silently, without an error
 
 
+def test_a_microsecond_backfill_window_selects_the_same_rows_on_both_backends(source, run):
+    """S2 through the handler: the window bounds are inlined for ConnectorX and bound for pyarrow."""
+    table = source.create(literals)
+    one_us = timedelta(microseconds=1)
+    source.insert(table, [
+        {"id": i, "at": at, "amount": AMOUNT, "day": date(2026, 11, 20)}
+        for i, at in enumerate([BOUNDARY - one_us, BOUNDARY, BOUNDARY + one_us, BOUNDARY + 2 * one_us], start=1)
+    ])
+    window = {"window_start": "2026-11-20T08:00:00.123456Z", "window_end": "2026-11-20T08:00:00.123458Z"}
+    cursor = {"column": "at", "type": "timestamp", "initial_value": "2026-01-01T00:00:00Z"}
+    for backend in ("pyarrow", "connectorx"):
+        config = {"name": f"lit_{backend}", "table": "literals", "cursor": cursor, "backend": backend}
+        run({"source_id": "lit", "mode": "backfill"} | window, config)
+        assert sorted(r["id"] for r in source.landed(f"lit_{backend}")) == [2, 3], backend
+
+
+def test_a_time_zone_aware_cursor_on_oracle_selects_by_instant(source, run):
+    """Oracle TIMESTAMP WITH TIME ZONE: ConnectorX cannot read it (preflight); pyarrow lands the UTC instant."""
+    if source.dialect != "oracle":
+        pytest.skip("Oracle's TIMESTAMP WITH TIME ZONE")
+    source.execute(
+        "CREATE TABLE tz (id integer PRIMARY KEY, at timestamp with time zone)",
+        "INSERT INTO tz VALUES (1, timestamp '2026-11-20 08:00:00 +02:00')",  # 06:00 UTC
+        "INSERT INTO tz VALUES (2, timestamp '2026-11-20 07:00:00 +00:00')",  # 07:00 UTC
+    )
+    cursor = {"column": "at", "type": "timestamp", "initial_value": "2026-11-20T06:30:00Z"}
+    result = run({"source_id": "tz"}, {"name": "tz", "table": "tz", "cursor": cursor, "backend": "pyarrow"})
+    assert result["rows"] == {"tz": 1}
+    [row] = source.landed("tz")
+    assert row["id"] == 2 and row["at"] == datetime(2026, 11, 20, 7, tzinfo=ZoneInfo("UTC"))
+    report = run({"source_id": "tz", "mode": "validate"}, {"name": "tz_cx", "table": "tz", "backend": "connectorx"})
+    [finding] = report["tables"][0]["findings"]
+    assert "timestamp with time zone" in finding
+
+
+# S6: thick-mode oracledb and ConnectorX in one process -------------------------------------------------------
+
+
+def test_both_backends_run_in_one_invocation(source, run):
+    """S6 (Oracle): both load libclntsh in one process, one table each, in the same invocation."""
+    source.transactions((1, "2026-11-20 08:00:00", "JHB", 100), (2, "2026-11-20 09:00:00", "CPT", 200))
+    base = {"table": "Transactions", "primary_key": ["TransactionId"]}
+    base["cursor"] = {"column": "UpdatedAt", "type": "timestamp", "initial_value": "2026-01-01T00:00:00Z"}
+    result = run({"source_id": "both"}, base | {"name": "tx_pa", "backend": "pyarrow"},
+                 base | {"name": "tx_cx", "backend": "connectorx"})
+    assert result["rows"] == {"tx_pa": 2, "tx_cx": 2}
+    assert result["backends"] == {"tx_pa": "pyarrow", "tx_cx": "connectorx"}
+
+
 # S3: session settings through ConnectorX ----------------------------------------------------------------------
 
 ISOLATION_QUERY = {
@@ -251,7 +309,7 @@ def test_isolation_level_applies_on_the_traditional_backend(source, run):
 def test_isolation_level_with_connectorx(source, run):
     """Postgres: ConnectorX honours libpq `options`, so the level is applied. MySQL, Oracle: no way in, so rejected."""
     if source.dialect in ("mysql", "oracle"):
-        with pytest.raises(ConfigError, match="isolation_level"):
+        with fails("ConfigError", "isolation_level"):  # by errorType: the same check in the image
             isolation_run(source, run, "connectorx")
         return
     isolation_run(source, run, "connectorx")
