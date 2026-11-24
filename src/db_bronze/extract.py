@@ -75,13 +75,17 @@ def _db2_current_schema(connection: sa.Connection) -> str:
 def prepare_engine(engine: sa.Engine) -> sa.Engine:
     """Dialect-specific setup of the engine used for reflection and the traditional backends.
 
-    Db2: ibm_db_sa takes the default schema (where a table without `schema` is
-    reflected) from the connecting user, ignoring the `CurrentSchema` driver
-    option, so reflection would look in the wrong schema while queries run in
-    the right one (integration, Db2). The default schema is CURRENT SCHEMA instead.
+    Db2 (integration): ibm_db_sa takes the default schema (where a table without
+    `schema` is reflected) from the connecting user, ignoring the `CurrentSchema`
+    driver option, so reflection would look in the wrong schema while queries run
+    in the right one; the default schema is CURRENT SCHEMA instead. And ibm_db_sa
+    declares no native Decimal support, so SQLAlchemy passes every DECIMAL through
+    a float, both ways: a bound keyset seed and every value read lose digits past
+    the 15th, silently. ibm_db binds and returns Decimals exactly, so it is told so.
     """
     if engine.dialect.name == DB2_DIALECT:
         engine.dialect._get_default_schema_name = _db2_current_schema
+        engine.dialect.supports_native_decimal = True
     if engine.dialect.name == "mssql":
         register_mssql_types(engine.dialect)
         if engine.dialect.driver == "pyodbc":
