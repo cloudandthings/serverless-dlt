@@ -13,7 +13,8 @@ dependencies = [
 [project.optional-dependencies]
 # Secrets Manager refs (secrets.py). The Lambda base image ships boto3, but pin it.
 aws = ["boto3>=1.40"]
-# db_bronze (DESIGN-db.md). Drivers and ConnectorX are added as their backends land.
+# db_bronze (DESIGN-db.md). Drivers are added as their backends land.
+# ConnectorX >= 0.4.6: in 0.4.5 a failed stream ended silently, looking like a short read (section 3.1).
 db = [
     "connectorx>=0.4.6",
     "sqlalchemy>=2",
