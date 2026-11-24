@@ -5,9 +5,13 @@ Offline: URLs are built and, for MSSQL, turned into the ODBC connection string, 
 
 from __future__ import annotations
 
-import pytest
+from urllib.parse import unquote, urlsplit
 
-from db_bronze.config import ConnectionConfig
+import pytest
+import sqlalchemy as sa
+from sqlalchemy.dialects.mssql.pyodbc import MSDialect_pyodbc
+
+from db_bronze.config import ConfigError, ConnectionConfig
 from db_bronze.urls import connectorx_url, sqlalchemy_url
 
 USER = {"username": "ingest", "password": "s3cret"}
@@ -71,3 +75,68 @@ CONNECTORX = [
 @pytest.mark.parametrize("fields,expected", CONNECTORX, ids=[f["dialect"] for f, _ in CONNECTORX])
 def test_connectorx_url(fields, expected):
     assert connectorx_url(conn(**fields)) == expected
+
+
+SPECIAL = "p@ss:w/rd%?#&= {;}"
+SERVER = {
+    "mssql": {"dialect": "mssql", "host": "sql01", "port": 1433, "database": "Core"},
+    "postgres": {"dialect": "postgres", "host": "pg01", "port": 5432, "database": "core"},
+    "mysql": {"dialect": "mysql", "host": "my01", "port": 3306, "database": "core"},
+    "oracle": {"dialect": "oracle", "host": "ora01", "port": 1521, "service_name": "CORE"},
+    "db2": {"dialect": "db2", "host": "db201", "port": 50000, "database": "CORE"},
+}
+
+
+@pytest.mark.parametrize("dialect", SERVER)
+def test_special_characters_survive_the_sqlalchemy_url(dialect):
+    url = sqlalchemy_url(conn(**SERVER[dialect], username="dom\\ingest@corp", password=SPECIAL))
+    parsed = sa.make_url(url.render_as_string(hide_password=False))
+    assert (parsed.username, parsed.password) == ("dom\\ingest@corp", SPECIAL)
+
+
+@pytest.mark.parametrize("dialect", ["mssql", "postgres", "mysql", "oracle"])
+def test_special_characters_survive_the_connectorx_url(dialect):
+    url = urlsplit(connectorx_url(conn(**SERVER[dialect], username="dom\\ingest@corp", password=SPECIAL)))
+    assert (unquote(url.username), unquote(url.password)) == ("dom\\ingest@corp", SPECIAL)
+    assert url.hostname == SERVER[dialect]["host"]
+
+
+def test_mssql_odbc_keywords_from_driver_options_reach_the_odbc_connection_string():
+    options = {"Encrypt": "yes", "TrustServerCertificate": "no", "ApplicationIntent": "ReadOnly"}
+    url = sqlalchemy_url(conn(**SERVER["mssql"], username="ingest", password="a;b}c", driver_options=options))
+    [connection_string], _ = MSDialect_pyodbc().create_connect_args(url)
+    assert connection_string == (
+        "DRIVER={ODBC Driver 18 for SQL Server};Server=sql01,1433;Database=Core;UID=ingest;PWD={a;b}}c};"
+        "Encrypt=yes;TrustServerCertificate=no;ApplicationIntent=ReadOnly"
+    )
+
+
+def test_mssql_odbc_driver_can_be_chosen_in_driver_options():
+    url = sqlalchemy_url(conn(**SERVER["mssql"], driver_options={"driver": "ODBC Driver 17 for SQL Server"}))
+    assert url.query == {"driver": "ODBC Driver 17 for SQL Server"}
+
+
+@pytest.mark.parametrize(
+    "dialect,options,query",
+    [
+        ("mssql", {"Encrypt": "no"}, "encrypt=false"),
+        (
+            "mssql",
+            {"Encrypt": "Mandatory", "TrustServerCertificate": "yes"},
+            "encrypt=true&trust_server_certificate=true",
+        ),
+        ("mssql", {"ApplicationIntent": "ReadOnly"}, "encrypt=true"),
+        ("postgres", {"sslmode": "require", "application_name": "bronze"}, "sslmode=require"),
+        ("mysql", {"charset": "utf8mb4"}, ""),
+    ],
+)
+def test_driver_options_are_translated_for_connectorx_where_it_has_them(dialect, options, query):
+    assert urlsplit(connectorx_url(conn(**SERVER[dialect], driver_options=options))).query == query
+
+
+@pytest.mark.parametrize(
+    "fields", [SERVER["db2"], {"dialect": "snowflake", "host": "acct", "database": "core"}], ids=["db2", "other"]
+)
+def test_there_is_no_connectorx_url_for_engines_it_does_not_read(fields):
+    with pytest.raises(ConfigError, match=r'ConnectorX does not support .* set "backend": "pyarrow"'):
+        connectorx_url(conn(**fields))
