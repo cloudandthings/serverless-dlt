@@ -17,7 +17,7 @@ from dlt.common.schema import Schema
 from dlt.destinations import filesystem
 
 from .config import ConfigError, RunRequest, SourceConfig, TableConfig
-from .manifest import new_snapshot_id, write_manifest
+from .manifest import finalize, new_snapshot_id, write_manifest
 from .plan import make_plan
 from .source import make_engine, make_resource
 
@@ -71,6 +71,8 @@ def check_run_start(cfg: SourceConfig, req: RunRequest, tables: tuple[TableConfi
 
 def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | None = None) -> dict[str, Any]:
     """Run one invocation. Raises on any failure (cursor state then stays where it was)."""
+    if req.mode == "finalize":
+        return finalize(cfg, req)
     tables = cfg.tables_for(req)
     check_run_start(cfg, req, tables)
     if req.mode == "plan":

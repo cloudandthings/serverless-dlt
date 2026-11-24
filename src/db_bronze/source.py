@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 from .config import RunRequest, SourceConfig, TableConfig, to_source_time
 from .extract import column_specs, naive_timestamp_columns, read_connectorx, read_pyarrow, with_extracted_at
-from .query import cursor_select, page_select, paged_rows, probe_columns, query_source, snapshot_select
+from .query import cursor_select, literal_sql, page_select, paged_rows, probe_columns, query_source, snapshot_select
 from .urls import connectorx_url, sqlalchemy_url
 
 log = logging.getLogger(__name__)
@@ -78,7 +78,7 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, req: RunRequest, engine: s
     def extract(stmt: sa.Select):
         if backend == "connectorx":
             # ConnectorX takes SQL text, so values are inlined, as dlt's own sql_table does.
-            sql = str(stmt.compile(engine, compile_kwargs={"literal_binds": True}))
+            sql = literal_sql(stmt, engine.dialect)
             batches = read_connectorx(connectorx_url(cfg.connection), sql, specs, batch_size)
         else:
             batches = read_pyarrow(engine, stmt, specs, batch_size)

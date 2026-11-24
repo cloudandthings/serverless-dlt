@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from . import secrets
 from .extract import EXTRACTED_AT
 
-MODES = ("incremental", "full", "backfill", "plan")
+MODES = ("incremental", "full", "backfill", "plan", "finalize")
 PLANS = ("snapshot", "backfill")
 BACKENDS = ("connectorx", "pyarrow", "sqlalchemy")
 # Engines ConnectorX reads (section 3.1); these default to it (D3, section 5.3). Db2 is not supported.
@@ -485,6 +485,8 @@ class RunRequest:
     page: Page | None = None  # mode=full: one page of a planned snapshot
     snapshot_id: str | None = None  # page and finalize: the snapshot the loads belong to (from the plan)
     partition_date: str | None = None  # page: the date in the bronze path (from the plan), YYYY-MM-DD
+    table: str | None = None  # finalize: the table the snapshot is of
+    load_ids: tuple[str, ...] = ()  # finalize: every page's load ids
 
     @property
     def partition_datetime(self) -> datetime | None:
@@ -520,7 +522,19 @@ class RunRequest:
         _only_with(event, ("plan", "page_size"), mode == "plan", "mode=plan")
         page = _page(event, tables) if mode == "full" else None
         _only_with(event, ("page", "partition_date"), mode == "full", "mode=full (a page of a planned snapshot)")
-        _only_with(event, ("snapshot_id",), mode == "full", "mode=full (a page of a planned snapshot)")
+        _only_with(event, ("snapshot_id",), mode in ("full", "finalize"), "mode=full (a page) or mode=finalize")
+        _only_with(event, ("table", "load_ids"), mode == "finalize", "mode=finalize")
+        table, load_ids = event.get("table"), event.get("load_ids")
+        if mode == "finalize":
+            if not isinstance(table, str) or not table:
+                raise ConfigError(f'mode=finalize needs "table", the table the snapshot is of: {table!r}')
+            check_snapshot_id(event.get("snapshot_id"))
+            if not isinstance(load_ids, list) or not load_ids or not all(isinstance(i, str) and i for i in load_ids):
+                raise ConfigError(
+                    f'mode=finalize needs "load_ids", a non-empty list of every page\'s load ids: {load_ids!r}'
+                )
+            if tables is not None:
+                raise ConfigError('mode=finalize takes "table", not "tables"')
         return cls(
             mode,
             tables=tables,
@@ -531,6 +545,8 @@ class RunRequest:
             page=page,
             snapshot_id=event.get("snapshot_id"),
             partition_date=event.get("partition_date"),
+            table=table,
+            load_ids=tuple(load_ids or ()),
         )
 
 

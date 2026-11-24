@@ -118,3 +118,16 @@ def page_select(source: sa.FromClause, rows: sa.Select, tc: TableConfig, offset:
     """
     stmt = rows.order_by(*(source.c[c] for c in page_order(tc))).offset(offset)
     return stmt.limit(limit) if limit is not None else stmt
+
+
+def literal_sql(stmt: sa.Select, dialect: sa.Dialect) -> str:
+    """`stmt` as SQL text with every value inlined, for ConnectorX (as dlt's own sql_table does).
+
+    SQLite has no OFFSET without LIMIT, so SQLAlchemy adds `LIMIT -1` for an
+    open-ended page, but as a bind parameter even under `literal_binds`
+    (SQLAlchemy 2.1.9), which ConnectorX rejects. An explicit `LIMIT -1`
+    (no limit, to SQLite) is inlined like any other value.
+    """
+    if dialect.name == "sqlite" and stmt._offset_clause is not None and stmt._limit_clause is None:
+        stmt = stmt.limit(-1)
+    return str(stmt.compile(dialect=dialect, compile_kwargs={"literal_binds": True}))

@@ -110,3 +110,39 @@ def test_page_lands_its_slice_in_key_order_under_the_partition_date(db, bucket, 
         "mode=full/year=2026/month=11/day=24"
     }
     assert not (bucket / "core_banking" / "_manifests").exists()  # finalize writes the manifest, not a page
+
+
+def manifests(bucket: Path) -> dict[str, dict]:
+    root = bucket / "core_banking" / "_manifests"
+    return {f.relative_to(root).as_posix(): json.loads(f.read_text()) for f in sorted(root.rglob("*.json"))}
+
+
+def test_plan_every_page_then_finalize_lands_every_row_exactly_once(db, bucket, invoke):
+    insert_transactions(db, 10)
+    db.insert((11, "2025-06-01 00:00:00", "JHB", 1))  # before initial_value: not part of the snapshot
+    plan = invoke(mode="plan", plan="snapshot", tables=["transactions"], page_size=3)
+    assert len(plan["pages"]) == 4
+    db.insert((12, "2026-11-20 09:00:00", "CPT", 2))  # arrives after the plan: the open-ended last page takes it
+    page_results = [invoke(**page_event(p, plan["snapshot_id"], plan["partition_date"])) for p in plan["pages"]]
+    load_ids = [load_id for r in page_results for load_id in r["load_ids"]]
+    result = invoke(mode="finalize", table="transactions", snapshot_id=plan["snapshot_id"], load_ids=load_ids)
+
+    assert ids(load_rows(bucket, load_ids)) == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12]
+    manifest = manifests(bucket)[f"transactions/{plan['snapshot_id']}.json"]
+    assert manifest["table"] == "transactions" and manifest["snapshot_id"] == plan["snapshot_id"]
+    assert manifest["load_ids"] == load_ids and len(set(load_ids)) == 4
+    assert set(manifests(bucket)) == {f"transactions/{plan['snapshot_id']}.json"}
+    assert result["manifest"].endswith(f"_manifests/transactions/{plan['snapshot_id']}.json")
+    today = datetime.now(UTC)
+    assert {f.parent.relative_to(bucket / "core_banking" / "transactions").as_posix() for f in files(bucket)} == {
+        f"mode=full/year={today:%Y}/month={today:%m}/day={today:%d}"
+    }
+
+
+def test_paged_snapshot_table_lands_every_row_exactly_once(db, bucket, invoke):
+    db.execute("INSERT INTO \"Branches\" VALUES ('JHB', NULL), ('CPT', NULL), ('DBN', NULL), ('PTA', NULL)")
+    plan = invoke(mode="plan", plan="snapshot", tables=["branches"], page_size=2)
+    load_ids = [i for p in plan["pages"] for i in invoke(**page_event(p, plan["snapshot_id"]))["load_ids"]]
+    invoke(mode="finalize", table="branches", snapshot_id=plan["snapshot_id"], load_ids=load_ids)
+    assert sorted(r["BranchCode"] for r in load_rows(bucket, load_ids, "branches")) == ["CPT", "DBN", "JHB", "PTA"]
+    assert manifests(bucket)[f"branches/{plan['snapshot_id']}.json"]["load_ids"] == load_ids
