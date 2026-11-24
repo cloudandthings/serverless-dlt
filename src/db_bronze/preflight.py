@@ -36,6 +36,9 @@ MIN_SERVER_VERSION: dict[str, tuple[int, ...] | None] = {
 # ConnectorX produces Decimal128(38, 10) and holds about 28 significant digits (section 3.1).
 MAX_DECIMAL_SCALE = 10
 MAX_DECIMAL_PRECISION = 28
+# Where a NUMERIC with no declared precision holds any scale, and ConnectorX silently
+# drops digits past the 10th decimal place (integration type matrix, section 10.1).
+UNCONSTRAINED_NUMERIC_DIALECTS = ("postgres",)
 
 
 def _named(*names: str) -> Callable[[sa.types.TypeEngine], bool]:
@@ -118,6 +121,12 @@ def column_findings(dialect: str, backend: str, columns: list[tuple[str, sa.type
             continue
         if isinstance(col_type, sa.Numeric) and not isinstance(col_type, sa.Float):
             p, s = col_type.precision, col_type.scale
+            if p is None and dialect in UNCONSTRAINED_NUMERIC_DIALECTS:
+                findings.append(
+                    f"column {name}: NUMERIC without precision would lose digits past the "
+                    f"{MAX_DECIMAL_SCALE}th decimal place silently on ConnectorX; declare a precision or cast it"
+                )
+                continue
             if (s is not None and s > MAX_DECIMAL_SCALE) or (p is not None and p > MAX_DECIMAL_PRECISION):
                 findings.append(
                     f"column {name}: DECIMAL({p},{s}) would lose digits silently on ConnectorX "
