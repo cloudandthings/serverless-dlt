@@ -24,7 +24,7 @@ from .query import (
     query_source,
     snapshot_select,
 )
-from .urls import connectorx_url, sqlalchemy_url
+from .urls import connectorx_sql, connectorx_url, sqlalchemy_url
 
 log = logging.getLogger(__name__)
 
@@ -133,7 +133,7 @@ def make_resource(
         state["backend"] = backend
         if backend == "connectorx":
             # ConnectorX takes SQL text, so values are inlined, as dlt's own sql_table does.
-            sql = literal_sql(stmt, engine.dialect)
+            sql = connectorx_sql(cfg.connection, literal_sql(stmt, engine.dialect))
             partition = (tc.partition.column, tc.partition.num) if tc.partition else None
             batches = read_connectorx(connectorx_url(cfg.connection), sql, specs, batch_size, tc.name, partition)
         else:

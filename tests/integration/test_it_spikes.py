@@ -26,16 +26,28 @@ from db_bronze.urls import connectorx_url
 pytestmark = pytest.mark.integration
 
 ROWS = 2500  # at 2 ms a row, a slow query runs about 5 s
+# ConnectorX hands over its first SQL Server batch only after seconds, so the query must run on well past that
+ROWS_FOR = {"mssql": 10000}
 SLOW = {
     "postgres": "SELECT g AS id, (pg_sleep(0.002) IS NULL)::int AS {marker} FROM generate_series(1, {rows}) g",
     "mysql": "SELECT /*+ SET_VAR(cte_max_recursion_depth=100000) */ seq AS id, SLEEP(0.002) AS {marker} "
     "FROM (WITH RECURSIVE r(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM r WHERE seq < {rows}) SELECT seq FROM r) x",
+    # T-SQL has no per-row sleep (WAITFOR is not allowed in a function): burn about 2 ms of CPU per row instead
+    "mssql": "SELECT TOP ({rows}) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS id, dbo.burn(2500) AS {marker} "
+    "FROM sys.all_objects a CROSS JOIN sys.all_objects b",
+}
+SLOW_SETUP = {
+    "mssql": "CREATE FUNCTION dbo.burn(@n int) RETURNS int AS BEGIN "
+    "DECLARE @i int = 0; WHILE @i < @n SET @i += 1; RETURN @i END",
 }
 RUNNING = {
     "postgres": "SELECT pid FROM pg_stat_activity WHERE state = 'active' AND query LIKE :q AND pid <> pg_backend_pid()",
     "mysql": "SELECT id FROM information_schema.processlist WHERE info LIKE :q AND id <> connection_id()",
+    # the batch as sent (the request's own sql_handle points into dbo.burn while it runs)
+    "mssql": "SELECT r.session_id FROM sys.dm_exec_requests r "
+    "CROSS APPLY sys.dm_exec_input_buffer(r.session_id, NULL) b WHERE b.event_info LIKE :q AND r.session_id <> @@SPID",
 }
-CANCEL = {"postgres": "SELECT pg_cancel_backend({id})", "mysql": "KILL QUERY {id}"}
+CANCEL = {"postgres": "SELECT pg_cancel_backend({id})", "mysql": "KILL QUERY {id}", "mssql": "KILL {id}"}
 
 
 class SlowQuery:
@@ -44,14 +56,16 @@ class SlowQuery:
     def __init__(self, source) -> None:
         self.source = source
         self.marker = f"slow_{uuid.uuid4().hex[:10]}"
-        self.sql = SLOW[source.dialect].format(marker=self.marker, rows=ROWS)
+        self.sql = SLOW[source.dialect].format(marker=self.marker, rows=ROWS_FOR.get(source.dialect, ROWS))
+        if source.dialect in SLOW_SETUP:
+            source.execute(SLOW_SETUP[source.dialect])
 
     def running(self) -> list:
         with self.source.sa.connect() as conn:
             return list(conn.execute(sa.text(RUNNING[self.source.dialect]), {"q": f"%{self.marker}%"}).scalars())
 
     def cancel(self) -> None:
-        with self.source.sa.connect() as conn:
+        with self.source.sa.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:  # KILL: no transaction
             for session in self.running():
                 conn.exec_driver_sql(CANCEL[self.source.dialect].format(id=session))
 
@@ -91,6 +105,7 @@ def test_a_dropped_connectorx_stream_leaves_its_query_running_on_the_server(sour
 CLOSE = {
     "postgres": "ends",  # psycopg closes the server-side cursor: the query stops at once
     "mysql": "drains",  # PyMySQL reads the rest of an unbuffered result: the close waits for the whole query
+    "mssql": "ends",  # ODBC Driver 18 cancels the rest of the result: the query stops at once
 }
 
 
@@ -119,7 +134,12 @@ def literals(metadata: sa.MetaData) -> sa.Table:
         "literals",
         metadata,
         sa.Column("id", sa.Integer, primary_key=True, autoincrement=False),
-        sa.Column("at", sa.DateTime().with_variant(sa.dialects.mysql.DATETIME(fsp=6), "mysql")),
+        sa.Column(
+            "at",
+            sa.DateTime()
+            .with_variant(sa.dialects.mysql.DATETIME(fsp=6), "mysql")
+            .with_variant(sa.dialects.mssql.DATETIME2(6), "mssql"),
+        ),
         sa.Column("amount", sa.Numeric(28, 10)),
         sa.Column("day", sa.Date),
     )
@@ -183,9 +203,12 @@ def test_connectorx_drops_digits_of_an_unconstrained_postgres_numeric(source):
 ISOLATION_QUERY = {
     "postgres": "SELECT 1 AS id, current_setting('transaction_isolation') AS iso",
     "mysql": "SELECT 1 AS id, @@transaction_isolation AS iso",
+    "mssql": "SELECT 1 AS id, CASE transaction_isolation_level WHEN 1 THEN 'READ UNCOMMITTED' "
+    "WHEN 2 THEN 'READ COMMITTED' WHEN 3 THEN 'REPEATABLE READ' WHEN 4 THEN 'SERIALIZABLE' WHEN 5 THEN 'SNAPSHOT' "
+    "END AS iso FROM sys.dm_exec_sessions WHERE session_id = @@SPID",
 }
-APPLIED = {"postgres": "repeatable read", "mysql": "READ-COMMITTED"}
-LEVEL = {"postgres": "REPEATABLE READ", "mysql": "READ COMMITTED"}  # never the engine's default
+APPLIED = {"postgres": "repeatable read", "mysql": "READ-COMMITTED", "mssql": "REPEATABLE READ"}
+LEVEL = {"postgres": "REPEATABLE READ", "mysql": "READ COMMITTED", "mssql": "REPEATABLE READ"}  # never the default
 
 
 def isolation_run(source, run, backend):
@@ -201,7 +224,10 @@ def test_isolation_level_applies_on_the_traditional_backend(source, run):
 
 
 def test_isolation_level_with_connectorx(source, run):
-    """Postgres: ConnectorX honours libpq `options`, so the level is applied. MySQL: no way in, so rejected."""
+    """Postgres: ConnectorX honours libpq `options`. SQL Server: a SET statement ahead of the query, in the same batch.
+
+    MySQL: no way in, so rejected.
+    """
     if source.dialect == "mysql":
         with pytest.raises(ConfigError, match="isolation_level"):
             isolation_run(source, run, "connectorx")
