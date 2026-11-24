@@ -231,6 +231,7 @@ Each rule fails with `ConfigError` and a message that says how to fix it.
 
 - `backend: connectorx` with an engine ConnectorX does not support (for example Db2).
 - `backend: connectorx` with `auth.type: kerberos` on any engine except mssql. Oracle stays rejected until the spike in section 8 proves otherwise.
+- `isolation_level` on a connection whose tables resolve to `connectorx`, on every engine, until spike S3 records which engines let ConnectorX apply it. The fix is `backend: pyarrow` or no `isolation_level`.
 - `chunking.strategy: keyset` without `order_by`, or with an `order_by` that does not start with the cursor column. Keyset also requires `primary_key`.
 - `cursor.lag > 0` without `primary_key`.
 - `partition` combined with anything other than `backend: connectorx`, an integer column, and `chunking: stream`. It is also rejected at run time in `incremental` mode, because it breaks ascending row order.
