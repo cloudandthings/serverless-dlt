@@ -126,9 +126,12 @@ def run_handler(image: str) -> None:
     }
     (work / "config" / "smoke_core.json").write_text(json.dumps(cfg))
     container = subprocess.run(
-        ["docker", "run", "-d", "--rm", "--platform", PLATFORM, "-p", f"127.0.0.1:{PORT}:8080",
+        ["docker", "run", "-d", "--platform", PLATFORM, "-p", f"127.0.0.1:{PORT}:8080",
          "-v", f"{work / 'bronze'}:/bronze", "-v", f"{work / 'config'}:/config:ro", "-v", f"{work / 'data'}:/data",
-         "-e", "CONFIG_URI=file:///config", "-e", "AWS_LAMBDA_FUNCTION_TIMEOUT=900", image],
+         "-e", "CONFIG_URI=file:///config", "-e", "AWS_LAMBDA_FUNCTION_TIMEOUT=900",
+         # The emulator is a Go binary; under QEMU (amd64 on an arm64 host) Go's async preemption
+         # signals intermittently crash it ("fatal error: wirep: already in go").
+         "-e", "GODEBUG=asyncpreemptoff=1", image],
         check=True, capture_output=True, text=True,
     ).stdout.strip()
     try:
@@ -146,9 +149,13 @@ def run_handler(image: str) -> None:
             assert all(r["_extracted_at"] is not None for r in rows), rows
             print(f"OK: {len(rows)} rows in {files[0].relative_to(work)}")
     finally:
+        # no --rm on the container: a container that died early must still have its logs here
+        state = subprocess.run(["docker", "inspect", "-f", "{{.State.Status}} exit={{.State.ExitCode}} "
+                                "oom={{.State.OOMKilled}}", container], capture_output=True, text=True)
         logs = subprocess.run(["docker", "logs", container], capture_output=True, text=True)
-        subprocess.run(["docker", "stop", container], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", container], capture_output=True)
         if sys.exc_info()[0] is not None:
+            print("container:", state.stdout.strip())
             print(logs.stdout[-3000:], logs.stderr[-3000:])
 
 
