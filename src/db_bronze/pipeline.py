@@ -19,6 +19,7 @@ from dlt.destinations import filesystem
 from .config import ConfigError, RunRequest, SourceConfig, TableConfig
 from .manifest import finalize, new_snapshot_id, write_manifest
 from .plan import make_plan
+from .query import page_order
 from .source import make_engine, make_resource
 
 log = logging.getLogger(__name__)
@@ -61,7 +62,13 @@ def check_run_start(cfg: SourceConfig, req: RunRequest, tables: tuple[TableConfi
         )
     by_cursor = req.mode in ("incremental", "backfill") or (req.mode == "plan" and req.plan == "backfill")
     what = f"plan={req.plan}" if req.mode == "plan" else f"{req.mode!r} mode"
+    paged = req.page is not None or (req.mode == "plan" and req.plan == "snapshot")
     for tc in tables:
+        if paged and not page_order(tc):
+            raise ConfigError(
+                f"table {tc.name}: offset paging needs a unique order, and this table has no stable order; "
+                'set "primary_key", or keyset chunking "order_by"'
+            )
         if tc.cursor is None and by_cursor:
             raise ConfigError(
                 f'table {tc.name} has no cursor, so it is a snapshot table; run it with "mode": "full", '

@@ -15,6 +15,7 @@ import pyarrow.parquet as pq
 import pytest
 from test_db_incremental import SourceDB, files, ids
 
+from db_bronze import ConfigError
 from db_bronze.handler import handler
 
 TRANSACTIONS = {
@@ -147,3 +148,27 @@ def test_paged_snapshot_table_lands_every_row_exactly_once(db, bucket, invoke):
     invoke(mode="finalize", table="branches", snapshot_id=plan["snapshot_id"], load_ids=load_ids)
     assert sorted(r["BranchCode"] for r in load_rows(bucket, load_ids, "branches")) == ["CPT", "DBN", "JHB", "PTA"]
     assert manifests(bucket)[f"branches/{plan['snapshot_id']}.json"]["load_ids"] == load_ids
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        page_event({"table": "branches", "offset": 0, "limit": 2}),
+        {"mode": "plan", "plan": "snapshot", "tables": ["branches"], "page_size": 2},
+    ],
+    ids=["page", "plan"],
+)
+def test_paging_a_table_without_primary_key_or_order_by_is_rejected(db, bucket, config, invoke, event):
+    config["tables"] = [TRANSACTIONS, {k: v for k, v in BRANCHES.items() if k != "primary_key"}]
+    db.execute("INSERT INTO \"Branches\" VALUES ('JHB', NULL)")
+    with pytest.raises(ConfigError, match=r"table branches: .*no stable order.*\"primary_key\".*\"order_by\""):
+        invoke(**event)
+    assert not any(bucket.iterdir())
+
+
+def test_page_orders_by_keyset_order_by_when_set(db, bucket, config, invoke):
+    keyset = {"strategy": "keyset", "order_by": ["UpdatedAt", "TransactionId"], "page_size": 100}
+    config["tables"] = [TRANSACTIONS | {"chunking": keyset}]
+    db.insert(*[(i, f"2026-11-20 08:00:{60 - i:02d}", "JHB", i) for i in range(1, 11)])  # cursor order != key order
+    result = invoke(**page_event({"table": "transactions", "offset": 0, "limit": 3}))
+    assert ids(load_rows(bucket, result["load_ids"])) == [8, 9, 10]
