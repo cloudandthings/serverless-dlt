@@ -229,6 +229,10 @@ class Defaults:
     backend: str | None = None
     batch_size: int = 50_000
 
+    def __post_init__(self) -> None:
+        if not _positive_int(self.batch_size):
+            raise ConfigError(f"defaults.batch_size must be a positive integer: {self.batch_size!r}")
+
 
 @dataclass(frozen=True)
 class TableConfig:
@@ -327,6 +331,8 @@ class SourceConfig:
                     f"duplicate table name {t.name!r}: each is a bronze path prefix; give each table its own name"
                 )
             seen.add(t.name)
+        if self.max_time_s is not None and not (_number(self.max_time_s) and self.max_time_s > 0):
+            raise ConfigError(f"max_time_s must be a number of seconds > 0, or null: {self.max_time_s!r}")
         if self.parquet_compression not in PARQUET_CODECS:
             raise ConfigError(f"parquet_compression {self.parquet_compression!r} not in {PARQUET_CODECS}")
         if self.defaults.backend is not None and self.defaults.backend not in BACKENDS:

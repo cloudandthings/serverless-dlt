@@ -350,3 +350,18 @@ def test_every_connection_field_may_be_a_secret_reference():
     }
     cfg = SourceConfig.from_dict(config("mssql", connection=refs, backend="pyarrow"))
     assert cfg.connection.port == {"env": "DB_PORT"}  # resolved at run time, never at load
+
+
+@pytest.mark.parametrize(
+    "changes,match",
+    [
+        ({"max_time_s": "600"}, "max_time_s must be a number of seconds > 0"),
+        ({"max_time_s": 0}, "max_time_s must be a number of seconds > 0"),
+        ({"defaults": {"batch_size": 0}}, "defaults.batch_size must be a positive integer"),
+        ({"parquet_compression": "lz4"}, "parquet_compression 'lz4' not in"),
+        ({"pipline_name": "typo"}, "unknown keys ['pipline_name']"),
+        ({"tables": []}, "at least one"),
+    ],
+)
+def test_top_level_values(changes, match):
+    assert match in rejected(config(backend="pyarrow") | changes)
