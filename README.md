@@ -9,7 +9,7 @@ completeness markers. A Spark job (Glue 6.0) parses the payload into typed
 silver columns later.
 
 Why it is built this way, what else was considered, and the evidence behind each
-decision are in [DESIGN.md](DESIGN.md). Read it before changing the design.
+decision are in [DESIGN-api.md](DESIGN-api.md). Read it before changing the design.
 
 ## Status
 
@@ -318,7 +318,7 @@ if bronze is not None:
 4. **Audit requirement:** bronze is verbatim per *record*, not per *response*.
    Top-level response fields (`pagination`, totals) and the whitespace between
    records are not kept. If exact response bytes are ever needed for a dispute,
-   add a separate raw zone for those vendors only (see DESIGN.md §8).
+   add a separate raw zone for those vendors only (see DESIGN-api.md §8).
 5. Silver: decide the Iceberg table layout, MERGE cadence, and the quarantine
    table's retention.
 6. S3 lifecycle rules for `_dlt_loads`/`_dlt_pipeline_state`: one small object

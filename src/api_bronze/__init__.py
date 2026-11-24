@@ -1,4 +1,4 @@
-"""REST API -> raw, record-grain Parquet bronze with dlt. See README.md and DESIGN.md."""
+"""REST API -> raw, record-grain Parquet bronze with dlt. See README.md and DESIGN-api.md."""
 
 from .config import ConfigError, IncrementalConfig, ResourceConfig, RunRequest, SourceConfig
 from .envelope import CURSOR_COLUMN, RECORD_SCHEMA, BrokenPageError, envelope_records

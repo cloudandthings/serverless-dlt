@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `api_bronze`: a dlt-based AWS Lambda that lands REST API records into an S3 bronze layer as Parquet, **one row per record, with the record's JSON text cut verbatim** from the response body (never parsed and re-serialised). A separate Spark/Glue job (`silver/silver_transform.py`) parses bronze into typed silver columns.
 
-README.md is the operator-facing spec (bronze contract, config reference, run modes, deployment). DESIGN.md explains every design decision and the evidence behind it. Read DESIGN.md before changing behaviour. `dlt-lambda-ingestion-assessment.md` is the earlier feasibility study (background only).
+README.md is the operator-facing spec (bronze contract, config reference, run modes, deployment). DESIGN-api.md explains every design decision and the evidence behind it. Read DESIGN-api.md before changing behaviour. `dlt-lambda-ingestion-assessment.md` is the earlier feasibility study (background only).
 
 ## Commands
 
@@ -56,3 +56,17 @@ Request flow: `handler.handler` → `config.SourceConfig` / `RunRequest` → `pi
 ## Status
 
 Unit/integration tested locally and image smoke-tested via the emulator. Not yet validated: real S3, real Lambda, Glue 6.0. `silver_transform.merge_into_iceberg` and `main` are untested sketches. See README "Open items".
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as local markdown files under `.scratch/<feature>/` (no remote tracker). See `.agents/issue-tracker.md`.
+
+### Triage labels
+
+Default five-role vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`), recorded as `Status:` lines in issue files. See `.agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `GLOSSARY.md` + `docs/adr/` at repo root. See `.agents/domain.md`.
