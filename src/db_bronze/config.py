@@ -185,6 +185,7 @@ class TableConfig:
             raise ConfigError(f"table name {self.name!r} must match {_NAME.pattern}")
         if self.batch_size is not None and not _positive_int(self.batch_size):
             raise ConfigError(f"table {self.name}: batch_size must be a positive integer")
+        self._check_source()
         if self.cursor and self.cursor.lag and not self.primary_key:
             raise ConfigError(
                 f"table {self.name}: cursor.lag re-reads a window, and dlt needs the primary key for it; "
@@ -196,6 +197,19 @@ class TableConfig:
             raise ConfigError(
                 f'table {self.name}: partition reads cannot be chunked; use "chunking": {{"strategy": "stream"}}, '
                 'or remove "partition"'
+            )
+
+    def _check_source(self) -> None:
+        if self.query is None:
+            if not self.table:
+                raise ConfigError(f'table {self.name}: no source; set "table" (and optionally "schema"), or "query"')
+            return
+        clashing = [k for k in ("schema", "table", "columns", "where") if getattr(self, k) is not None]
+        if clashing:
+            remove = ", ".join(f'"{k}"' for k in clashing)
+            raise ConfigError(
+                f'table {self.name}: "query" replaces "schema"/"table", "columns" and "where"; '
+                f"remove {remove} and put the projection and the filter inside the query"
             )
 
     def _check_keyset(self) -> None:

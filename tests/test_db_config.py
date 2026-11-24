@@ -234,3 +234,26 @@ def test_partition_num_is_a_positive_integer(num):
 def test_partition_on_connectorx_stream_loads():
     cfg = SourceConfig.from_dict(config("postgres", partition=PARTITION))
     assert cfg.tables[0].partition.num == 4
+
+
+QUERY = 'SELECT t.*, b.Region FROM dbo.Transactions t JOIN dbo.Branches b ON b.BranchCode = t.BranchCode'
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{"table": "Transactions"}, {"schema": "dbo"}, {"columns": ["TransactionId"]}, {"where": "Region = 'ZA'"}],
+)
+def test_query_excludes_schema_table_columns_and_where(extra):
+    message = rejected(config(**{"table": None, "query": QUERY} | extra))
+    assert f'remove "{next(iter(extra))}"' in message
+    assert "put the projection and the filter inside the query" in message
+
+
+def test_a_table_needs_a_source():
+    message = rejected(config(table=None))
+    assert 'set "table" (and optionally "schema"), or "query"' in message
+
+
+def test_query_table_loads():
+    cfg = SourceConfig.from_dict(config(table=None, query=QUERY))
+    assert cfg.tables[0].query == QUERY and cfg.tables[0].table is None
