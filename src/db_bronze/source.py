@@ -9,9 +9,9 @@ from datetime import datetime
 import dlt
 import sqlalchemy as sa
 
-from .config import SourceConfig, TableConfig
+from .config import RunRequest, SourceConfig, TableConfig, to_source_time
 from .extract import column_specs, naive_timestamp_columns, read_connectorx, read_pyarrow, with_extracted_at
-from .query import cursor_select, probe_columns, query_source
+from .query import cursor_select, probe_columns, query_source, snapshot_select
 from .urls import connectorx_url, sqlalchemy_url
 
 log = logging.getLogger(__name__)
@@ -35,7 +35,27 @@ def reflect(engine: sa.Engine, tc: TableConfig) -> sa.FromClause:
     return sa.Table(tc.table, sa.MetaData(), schema=tc.schema, autoload_with=engine)
 
 
-def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_started: datetime):
+def window(cfg: SourceConfig, tc: TableConfig, req: RunRequest, run_started: datetime, max_cursor):
+    """(initial_value, end_value) for dlt's incremental, as the source represents them.
+
+    incremental  state-driven; initial_value only applies to the very first run
+    full         [initial_value, run start): end_value makes dlt leave the cursor state alone.
+                 For an integer cursor "run start" is the cursor's MAX when the run starts, plus one.
+    backfill     [window_start, window_end): stateless, like full
+    """
+    tz = cfg.connection.naive_timezone
+    if req.mode == "backfill":
+        return tc.cursor.bound(req.window_start, "window_start", tz), tc.cursor.bound(req.window_end, "window_end", tz)
+    initial = tc.cursor.initial_cursor_value(tz)
+    if req.mode != "full":
+        return initial, None
+    if tc.cursor.type == "timestamp":
+        return initial, to_source_time(run_started, tz)
+    top = max_cursor()
+    return initial, max(initial, top + 1) if top is not None else initial
+
+
+def make_resource(cfg: SourceConfig, tc: TableConfig, req: RunRequest, engine: sa.Engine, run_started: datetime):
     backend = cfg.backend(tc)
     if backend == "sqlalchemy":  # stopgap until the sqlalchemy backend lands
         raise NotImplementedError(
@@ -47,28 +67,15 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_sta
     batch_size = cfg.batch_size(tc)
     # Without this hint dlt labels naive timestamps UTC without shifting them (prototype S5).
     hints = {name: {"timezone": False} for name in naive_timestamp_columns(table)}
-    initial = tc.cursor.initial_cursor_value(cfg.connection.naive_timezone)
-
-    @dlt.resource(
+    resource = dlt.resource(
         name=tc.name,
         write_disposition="append",  # never "replace": it deletes sibling mode= partitions
         primary_key=list(tc.primary_key) or None,
         columns=hints,
         schema_contract=SCHEMA_CONTRACT,
     )
-    def rows(
-        # The incremental MUST be the argument's default value: dlt binds state and
-        # filtering only to an incremental found in the signature. Building it in
-        # the body silently disables both.
-        cursor=dlt.sources.incremental(  # noqa: B008
-            tc.cursor.column,
-            initial_value=initial,
-            lag=tc.cursor.lag,  # dlt steps cursor.start_value back by this
-            row_order="asc",
-            on_cursor_value_missing="include" if tc.cursor.include_null_cursor else "raise",
-        ),
-    ):
-        stmt = cursor_select(table, tc, cursor.start_value, cursor.end_value)
+
+    def extract(stmt: sa.Select):
         if backend == "connectorx":
             # ConnectorX takes SQL text, so values are inlined, as dlt's own sql_table does.
             sql = str(stmt.compile(engine, compile_kwargs={"literal_binds": True}))
@@ -77,5 +84,35 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_sta
             batches = read_pyarrow(engine, stmt, specs, batch_size)
         for batch in batches:
             yield with_extracted_at(batch, run_started)
+
+    if tc.cursor is None:  # a snapshot table: everything, every time (mode=full only)
+
+        @resource
+        def snapshot():
+            yield from extract(snapshot_select(table, tc))
+
+        return snapshot
+
+    def max_cursor():
+        with engine.connect() as conn:
+            return conn.execute(sa.select(sa.func.max(table.c[tc.cursor.column]))).scalar()
+
+    initial, end = window(cfg, tc, req, run_started, max_cursor)
+
+    @resource
+    def rows(
+        # The incremental MUST be the argument's default value: dlt binds state and
+        # filtering only to an incremental found in the signature. Building it in
+        # the body silently disables both.
+        cursor=dlt.sources.incremental(  # noqa: B008
+            tc.cursor.column,
+            initial_value=initial,
+            end_value=end,
+            lag=tc.cursor.lag,  # dlt steps cursor.start_value back by this
+            row_order="asc",
+            on_cursor_value_missing="include" if tc.cursor.include_null_cursor else "raise",
+        ),
+    ):
+        yield from extract(cursor_select(table, tc, cursor.start_value, cursor.end_value))
 
     return rows

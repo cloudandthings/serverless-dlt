@@ -46,6 +46,8 @@ def query_source(tc: TableConfig, columns: list[str]) -> sa.Subquery:
     back cursor values as timestamps or integers even on engines that report no
     type for a computed column. The other columns' types come from the values.
     """
+    if tc.cursor is None:  # a snapshot table: every column's type comes from the values
+        return sa.text(tc.query).columns(*(sa.column(c) for c in columns)).subquery("q")
     cursor_type = sa.DateTime() if tc.cursor.type == "timestamp" else sa.Integer()
     cols = [sa.column(c, cursor_type if c == tc.cursor.column else None) for c in columns]
     return sa.text(tc.query).columns(*cols).subquery("q")
@@ -56,13 +58,23 @@ def probe_columns(tc: TableConfig) -> sa.Select:
     return sa.select(sa.literal_column("*")).select_from(sa.text(tc.query).columns().subquery("q")).where(sa.false())
 
 
+def _projection(source: sa.FromClause, tc: TableConfig) -> list:
+    return [source.c[c] for c in tc.columns] if tc.columns else list(source.c)
+
+
+def snapshot_select(source: sa.FromClause, tc: TableConfig) -> sa.Select:
+    """`SELECT <columns> FROM source [WHERE <where>]`: a snapshot table, read whole."""
+    stmt = sa.select(*_projection(source, tc)).select_from(source)
+    return stmt.where(sa.text(tc.where)) if tc.where else stmt
+
+
 def cursor_select(source: sa.FromClause, tc: TableConfig, start: Any, end: Any = None) -> sa.Select:
     """`SELECT <columns> FROM source WHERE (<cursor in [start, end)> [OR cursor IS NULL]) AND <where> ORDER BY cursor`.
 
     The window is half-open; `end` None leaves it open-ended (incremental mode).
     """
     cursor_col = source.c[tc.cursor.column]
-    columns = [source.c[c] for c in tc.columns] if tc.columns else list(source.c)
+    columns = _projection(source, tc)
 
     def value(v):
         return _Timestamp(v) if tc.cursor.type == "timestamp" else v

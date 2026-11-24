@@ -11,14 +11,14 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field, fields
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import secrets
 from .extract import EXTRACTED_AT
 
-MODES = ("incremental",)
+MODES = ("incremental", "full", "backfill")
 BACKENDS = ("connectorx", "pyarrow", "sqlalchemy")
 # Engines ConnectorX reads (section 3.1); these default to it (D3, section 5.3). Db2 is not supported.
 CONNECTORX_DIALECTS = ("mssql", "postgres", "mysql", "oracle", "sqlite")
@@ -92,6 +92,10 @@ def _check_name(what: str, name: Any) -> None:
 
 def _number(value: Any) -> bool:
     return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _positive_int(value: Any) -> bool:
@@ -221,6 +225,18 @@ class CursorConfig:
         if self.type == "integer":
             return self.initial_value
         return to_source_time(parse_iso(self.initial_value, "cursor.initial_value"), naive_timezone)
+
+    def bound(self, value: str | int, what: str, naive_timezone: str) -> datetime | int:
+        """An event window bound as the source represents it: an integer, or a naive timestamp in source time."""
+        if self.type == "integer":
+            if not _is_int(value):
+                raise ConfigError(f"{what} must be an integer for the integer cursor {self.column!r}: {value!r}")
+            return value
+        if not isinstance(value, str):
+            raise ConfigError(
+                f"{what} must be an ISO-8601 timestamp for the timestamp cursor {self.column!r}: {value!r}"
+            )
+        return to_source_time(parse_iso(value, what), naive_timezone)
 
 
 @dataclass(frozen=True)
@@ -397,6 +413,16 @@ class SourceConfig:
         """The table's backend, resolved from the config alone (D3, section 5.3)."""
         return table.backend or self.defaults.backend or default_backend(self.connection.dialect)
 
+    def tables_for(self, req: RunRequest) -> tuple[TableConfig, ...]:
+        """The tables one invocation runs: all of them, or the event's `tables` subset."""
+        if req.tables is None:
+            return self.tables
+        known = [t.name for t in self.tables]
+        unknown = [n for n in req.tables if n not in known]
+        if unknown:
+            raise ConfigError(f'event "tables": unknown tables {unknown}; this config has {known}')
+        return tuple(t for t in self.tables if t.name in req.tables)
+
     def batch_size(self, table: TableConfig) -> int:
         return table.batch_size or self.defaults.batch_size
 
@@ -450,10 +476,48 @@ class RunRequest:
     """What one invocation should do. Built from the Lambda event."""
 
     mode: str = "incremental"
+    tables: tuple[str, ...] | None = None  # a subset of the config's table names; None runs them all
+    window_start: str | int | None = None  # backfill only, inclusive; ISO-8601 or integer, as the cursor
+    window_end: str | int | None = None  # backfill only, exclusive
+
+    @property
+    def partition_datetime(self) -> datetime | None:
+        """The date bronze paths carry instead of the load date: a timestamp backfill's window start (UTC)."""
+        if self.mode != "backfill" or not isinstance(self.window_start, str):
+            return None
+        dt = parse_iso(self.window_start, "window_start")
+        return dt.astimezone(UTC) if dt.tzinfo else dt.replace(tzinfo=UTC)
 
     @classmethod
     def from_event(cls, event: dict) -> RunRequest:
         mode = event.get("mode", "incremental")
         if mode not in MODES:
             raise ConfigError(f"mode {mode!r} not in {MODES}")
-        return cls(mode)
+        start, end = event.get("window_start"), event.get("window_end")
+        if mode == "backfill":
+            _check_window(start, end)
+        elif start is not None or end is not None:
+            raise ConfigError(f"window_start/window_end are only valid with mode=backfill, not {mode}")
+        tables = event.get("tables")
+        if tables is not None:
+            if not isinstance(tables, list) or not tables or not all(isinstance(n, str) for n in tables):
+                raise ConfigError(f'event "tables": expected a non-empty list of table names, got {tables!r}')
+            tables = tuple(tables)
+        return cls(mode, tables=tables, window_start=start, window_end=end)
+
+
+def _check_window(start: Any, end: Any) -> None:
+    """A backfill window: both bounds, both integers or both ISO-8601, and end after start."""
+    if start is None or end is None:
+        raise ConfigError("mode=backfill needs window_start and window_end")
+    if _is_int(start) and _is_int(end):
+        ordered = end > start
+    elif isinstance(start, str) and isinstance(end, str):
+        s, e = parse_iso(start, "window_start"), parse_iso(end, "window_end")
+        if (s.tzinfo is None) != (e.tzinfo is None):
+            raise ConfigError("window_start and window_end must both carry an offset, or neither")
+        ordered = e > s
+    else:
+        raise ConfigError(f"window_start and window_end must both be integers or both ISO-8601: {start!r}, {end!r}")
+    if not ordered:
+        raise ConfigError(f"window_end must be after window_start: [{start!r}, {end!r})")
