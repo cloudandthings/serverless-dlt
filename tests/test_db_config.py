@@ -9,8 +9,8 @@ import pytest
 from db_bronze import ConfigError, SourceConfig
 
 # The section 5 example. One deviation: the example sets `isolation_level` on an mssql connection whose
-# `transactions` table resolves to connectorx, which validation rejects until spike S3 says which engines
-# can honour it. Here the transactions table is pinned to pyarrow.
+# `transactions` table resolves to connectorx, which validation rejects: spike S3 found ConnectorX can apply
+# it only on Postgres so far. Here the transactions table is pinned to pyarrow.
 EXAMPLE = {
     "pipeline_name": "core_banking",
     "dataset_name": "core_banking",
@@ -295,11 +295,24 @@ def test_duplicate_table_names_are_rejected():
     assert "duplicate table name 'transactions'" in message and "give each table its own name" in message
 
 
-@pytest.mark.parametrize("dialect", CONNECTORX_DIALECTS)
-def test_isolation_level_with_connectorx_is_rejected_on_every_engine(dialect):
+@pytest.mark.parametrize("dialect", [d for d in CONNECTORX_DIALECTS if d != "postgres"])
+def test_isolation_level_with_connectorx_is_rejected_where_connectorx_cannot_apply_it(dialect):
     message = rejected(config(dialect, connection={"isolation_level": "READ COMMITTED"}))  # resolves to connectorx
     assert "isolation_level" in message
     assert 'set "backend": "pyarrow" on the table or in defaults, or remove "isolation_level"' in message
+
+
+@pytest.mark.parametrize("level", ["READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE"])
+def test_isolation_level_with_connectorx_loads_on_postgres(level):
+    # ConnectorX passes libpq `options` to the server, so the level becomes the session default (S3).
+    cfg = SourceConfig.from_dict(config("postgres", connection={"isolation_level": level}))
+    assert cfg.connection.isolation_level == level
+
+
+@pytest.mark.parametrize("level", ["SNAPSHOT", "AUTOCOMMIT"])
+def test_isolation_levels_postgres_does_not_have_are_rejected_with_connectorx(level):
+    message = rejected(config("postgres", connection={"isolation_level": level}))
+    assert f"isolation_level {level!r}" in message and 'set "backend": "pyarrow"' in message
 
 
 @pytest.mark.parametrize("dialect", CONNECTORX_DIALECTS)

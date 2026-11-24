@@ -37,6 +37,11 @@ CHUNKING_STRATEGIES = ("stream", "keyset")
 AUTH_TYPES = ("password", "kerberos")
 # What SQLAlchemy's `isolation_level` accepts across the supported dialects (SNAPSHOT: mssql).
 ISOLATION_LEVELS = ("READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE", "SNAPSHOT", "AUTOCOMMIT")
+# Engines where ConnectorX can apply `isolation_level` (spike S3), and the levels it can apply there.
+# Postgres: ConnectorX passes libpq `options` to the server, so `-c default_transaction_isolation=...`
+# becomes the session default. MySQL: its URL takes no session settings, and the level is not
+# settable through a SET_VAR hint. mssql and oracle: until their integration tickets measure it.
+CONNECTORX_ISOLATION = {"postgres": ("READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE")}
 PARQUET_CODECS = ("zstd", "snappy", "gzip", "none")
 SERVER_DIALECTS = ("mssql", "postgres", "mysql", "db2")  # host + database; oracle uses service_name
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -440,11 +445,11 @@ class SourceConfig:
                 f"table {t.name}: ConnectorX does not support dialect {dialect!r} (it reads {CONNECTORX_DIALECTS}); "
                 'set "backend": "pyarrow" on the table or in defaults'
             )
-        if self.connection.isolation_level is not None:
-            # Until spike S3 records which engines let ConnectorX apply session settings.
+        level = self.connection.isolation_level
+        if level is not None and level not in CONNECTORX_ISOLATION.get(dialect, ()):
             raise ConfigError(
-                f"table {t.name}: ConnectorX cannot apply connection.isolation_level "
-                f"{self.connection.isolation_level!r} (spike S3 is open for every engine); "
+                f"table {t.name}: ConnectorX cannot apply connection.isolation_level {level!r} on {dialect} "
+                f"(it can on: {CONNECTORX_ISOLATION}); "
                 'set "backend": "pyarrow" on the table or in defaults, or remove "isolation_level"'
             )
         if self.connection.auth.type == "kerberos" and dialect != "mssql":

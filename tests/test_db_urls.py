@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import sys
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 import sqlalchemy as sa
@@ -135,6 +135,21 @@ def test_mssql_odbc_driver_can_be_chosen_in_driver_options():
 )
 def test_driver_options_are_translated_for_connectorx_where_it_has_them(dialect, options, query):
     assert urlsplit(connectorx_url(conn(**SERVER[dialect], driver_options=options))).query == query
+
+
+def test_postgres_isolation_level_reaches_connectorx_as_a_session_default():
+    url = connectorx_url(conn(**SERVER["postgres"], isolation_level="REPEATABLE READ"))
+    assert parse_qs(urlsplit(url).query) == {"options": ["-c default_transaction_isolation=repeatable\\ read"]}
+    assert "+" not in url  # ConnectorX does not read "+" as a space: spaces must be %20
+
+
+def test_postgres_isolation_level_joins_libpq_options_from_driver_options():
+    options = {"options": "-c statement_timeout=60000", "sslmode": "require"}
+    url = connectorx_url(conn(**SERVER["postgres"], isolation_level="SERIALIZABLE", driver_options=options))
+    assert parse_qs(urlsplit(url).query) == {
+        "sslmode": ["require"],
+        "options": ["-c statement_timeout=60000 -c default_transaction_isolation=serializable"],
+    }
 
 
 @pytest.mark.parametrize(

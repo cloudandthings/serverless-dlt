@@ -23,11 +23,12 @@ log = logging.getLogger(__name__)
 
 # Minimum server version per dialect, as a tuple; None: not set yet. The integration
 # matrix fills these in (spike S9); a server below the minimum fails the run, and the
-# backend is never switched silently.
+# backend is never switched silently. Postgres 11 and MySQL 8.0 are the oldest series
+# the whole integration suite has passed on (11.16, 8.0.46; DESIGN-db.md section 11).
 MIN_SERVER_VERSION: dict[str, tuple[int, ...] | None] = {
     "mssql": None,
-    "postgres": None,
-    "mysql": None,
+    "postgres": (11,),
+    "mysql": (8, 0),
     "oracle": None,
     "sqlite": None,
     "db2": None,
