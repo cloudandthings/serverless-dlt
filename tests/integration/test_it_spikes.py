@@ -16,12 +16,13 @@ import connectorx as cx
 import pytest
 import sqlalchemy as sa
 
-from db_bronze import ConfigError
 from db_bronze.config import SourceConfig
 from db_bronze.extract import ColumnSpec, read_pyarrow
 from db_bronze.preflight import MIN_SERVER_VERSION
 from db_bronze.query import literal_sql
 from db_bronze.urls import connectorx_url
+
+from .conftest import fails
 
 pytestmark = pytest.mark.integration
 
@@ -203,7 +204,7 @@ def test_isolation_level_applies_on_the_traditional_backend(source, run):
 def test_isolation_level_with_connectorx(source, run):
     """Postgres: ConnectorX honours libpq `options`, so the level is applied. MySQL: no way in, so rejected."""
     if source.dialect == "mysql":
-        with pytest.raises(ConfigError, match="isolation_level"):
+        with fails("ConfigError", "isolation_level"):  # by errorType: the same check in the image
             isolation_run(source, run, "connectorx")
         return
     isolation_run(source, run, "connectorx")
