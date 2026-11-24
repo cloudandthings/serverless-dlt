@@ -7,6 +7,8 @@ folded in below. S1 (server side), S2, S3 and S9 answered for Postgres and MySQL
 by the integration suite (`tests/integration/`, ticket 13) on 24 November 2026.
 Ticket 14 ran the full scenario suite on Postgres and MySQL, on the host and in the
 image, settled their deny lists and took a first peak-memory reading (S7).
+Ticket 15 ran it on SQL Server 2022, settled the SQL Server deny list and answered
+S1 (server side), S2, S3 and S9 for SQL Server, on 24 November 2026.
 
 This is the database counterpart of `api_bronze` (see `DESIGN-api.md`). It records
 the requirement, the facts that constrain the design, every decision taken and
@@ -78,15 +80,15 @@ are upgraded as tests land.
 | Streaming | `cx.read_sql(conn, query, return_type="arrow_stream", batch_size=N)` returns a `pyarrow.RecordBatchReader`. Introduced in 0.4.4. |
 | **Pin ≥ 0.4.6** | In 0.4.5 a producer error ended the stream silently, so a failed read looked like a short, successful one. 0.4.6 joins the producer thread and raises. |
 | Memory | The producer pushes into an **unbounded** channel. If Parquet writing is slower than the database read, batches accumulate in memory. *Prototyped:* holding a reader 2 s without consuming buffered a whole 3M-row result (+250 MiB). |
-| **Dropping a stream** | *Prototyped (S1):* `close()`/`del` on the reader returns at once, but the producer thread **detaches and reads the query to the end**, holding the connection open (33 s query: idle at +34 s). On Lambda the frozen container keeps the DB session, snapshot and locks open until the next thaw. *Integration (S1):* on Postgres the query is still `active` in `pg_stat_activity` after the drop, and on MySQL it is still in the processlist. |
+| **Dropping a stream** | *Prototyped (S1):* `close()`/`del` on the reader returns at once, but the producer thread **detaches and reads the query to the end**, holding the connection open (33 s query: idle at +34 s). On Lambda the frozen container keeps the DB session, snapshot and locks open until the next thaw. *Integration (S1):* on Postgres the query is still `active` in `pg_stat_activity` after the drop, on MySQL it is still in the processlist, and on SQL Server it is still in `sys.dm_exec_requests`. On SQL Server the first batch arrives only after most of the query has run. |
 | Engines | postgres, redshift, mysql, mssql, oracle, sqlite, bigquery, clickhouse, duckdb, trino. Trino cannot stream. **Db2 is not supported.** |
 | Oracle | Compiled into the wheel, but it loads `libclntsh.so` at runtime, so it **needs Oracle Instant Client**. |
 | Kerberos | **MSSQL only.** The Linux wheel bundles MIT krb5 and supports `trusted_connection=true`. Postgres (tokio-postgres) and MySQL (mysql crate) have no GSSAPI. Oracle external auth through OCI is plausible but untested. |
 | Unmapped types | Raise `pyo3_runtime.PanicException`. It derives from **`BaseException`**, so `except Exception` does not catch it. Other errors raise `RuntimeError`. *Integration:* a server error in the middle of an `arrow_stream` also surfaces as `PanicException` ("cx writer failed"), on the batch read. |
-| Type gaps | **MSSQL:** sql_variant, xml, UDTs (hierarchyid, geography). **Oracle:** RAW, ROWID, INTERVAL, TIMESTAMP WITH LOCAL TIME ZONE, NCLOB, BFILE, XMLTYPE. *Integration (settled by ticket 14):* **Postgres:** interval, money, timetz, macaddr, macaddr8, xml, cidr, varbit, the geometric types (point, line, lseg, box, path, polygon, circle), tsvector, tsquery, `"char"`, pg_lsn, composite types, and arrays of any element type except smallint, integer, bigint, boolean, real, double precision, numeric, varchar and text (those arrays are read as `large_list`; a numeric element is `decimal128(38,10)`, so the decimal rule applies to it; a value with more dimensions than one fails the read). Postgres inet, `bit(n)`, ranges, enums, `name` and `oid` are read. **MySQL:** the geometry types (geometry, point, linestring, polygon and their multi- and collection forms); every other MySQL type is read. The preflight deny list matches these (section 6.2). |
+| Type gaps | **Oracle:** RAW, ROWID, INTERVAL, TIMESTAMP WITH LOCAL TIME ZONE, NCLOB, BFILE, XMLTYPE. *Integration (settled by ticket 14):* **Postgres:** interval, money, timetz, macaddr, macaddr8, xml, cidr, varbit, the geometric types (point, line, lseg, box, path, polygon, circle), tsvector, tsquery, `"char"`, pg_lsn, composite types, and arrays of any element type except smallint, integer, bigint, boolean, real, double precision, numeric, varchar and text (those arrays are read as `large_list`; a numeric element is `decimal128(38,10)`, so the decimal rule applies to it; a value with more dimensions than one fails the read). Postgres inet, `bit(n)`, ranges, enums, `name` and `oid` are read. **MySQL:** the geometry types (geometry, point, linestring, polygon and their multi- and collection forms); every other MySQL type is read. *Integration (settled by ticket 15):* **MSSQL:** sql_variant, xml and the CLR types (hierarchyid, geography, geometry) panic ("not yet implemented"). Two more are read **wrongly, without an error**: `money` arrives as a double, too narrow for its 19 digits (`922337203685477.5807` lands as `922337203685477.6`), and `datetimeoffset` arrives with its offset applied twice (`08:00+02:00` lands as `04:00Z`, not `06:00Z`). smallmoney (10 digits) survives as a double. The preflight deny list matches these (section 6.2). |
 | **Decimals** | Always produced as `Decimal128(38,10)` and limited to about 28 significant digits. **A column with scale above 10 loses digits silently, without raising an error.** *Integration:* MySQL `decimal(65,30)` loses them silently; Postgres `numeric(38,12)` fails with `RuntimeError`; and a Postgres **`numeric` without precision** loses every digit past the 10th decimal place silently (`1.123456789012345678` lands as `1.1234567890`). |
-| Integer widths | *Integration:* on Postgres, `arrow_stream` widens `smallint` and `integer` to int64 and `real` to double (the plain `arrow` return type does not). On MySQL the source widths stay (int8, int16, int32, float). |
-| Session settings | *Integration (S3):* the Postgres URL takes libpq's `options`, so `-c default_transaction_isolation=...` (and any other `-c` setting) becomes the session default, on every connection including `partition_on` ones. The MySQL URL rejects unknown parameters (no `init` command), and `transaction_isolation` cannot be set with a `SET_VAR` hint. Multi-statement SQL is rejected on both. Spaces in URL parameters must be `%20`: ConnectorX reads `+` literally. |
+| Integer widths | *Integration:* on Postgres, `arrow_stream` widens `smallint` and `integer` to int64 and `real` to double (the plain `arrow` return type does not). On MySQL the source widths stay (int8, int16, int32, float). On SQL Server `tinyint`, `smallint` and `int` widen to int64 and `real` to double. A SQL Server `datetime` arrives as the 1/300 s it holds (`.123` as `.123333`), where pyodbc rounds it to the millisecond. |
+| Session settings | *Integration (S3):* the Postgres URL takes libpq's `options`, so `-c default_transaction_isolation=...` (and any other `-c` setting) becomes the session default, on every connection including `partition_on` ones. The MySQL URL rejects unknown parameters (no `init` command), and `transaction_isolation` cannot be set with a `SET_VAR` hint. Multi-statement SQL is rejected on both. Spaces in URL parameters must be `%20`: ConnectorX reads `+` literally. The SQL Server URL **ignores** unknown parameters silently (an `isolation_level` parameter does nothing), but a plain read runs the SQL as a batch, so `SET TRANSACTION ISOLATION LEVEL ...; SELECT ...` applies the level to the query. A `partition_on` read parses the SQL and rejects anything but a single SELECT. |
 | `partition_on` | Integer column, N parallel connections. Works with `arrow_stream`, but batches from different partitions interleave, so **rows do not arrive in cursor order**. *Integration:* ConnectorX puts the column name into its own range and partition SQL as given, so on Postgres an unquoted mixed-case name is folded to lower case and fails; the name is passed quoted for the engine. |
 
 ### 3.2 dlt 1.32.0
@@ -102,7 +104,7 @@ are upgraded as tests land.
 
 | Engine | Driver | Kerberos (for section 8) |
 |---|---|---|
-| MSSQL | `pyodbc` + msodbcsql18 + unixODBC (OS packages, from Microsoft's RHEL 9 repo) | `Trusted_Connection=yes`. SPN `MSSQLSvc/<fqdn>:<port>`. The driver does not renew tickets. `ActiveDirectoryIntegrated` is Entra ID, not on-premises AD. |
+| MSSQL | `pyodbc` + msodbcsql18 + unixODBC (OS packages, from Microsoft's RHEL 9 repo). *Integration (S1):* closing the cursor mid-result ends the query on the server at once. pyodbc reads neither `sql_variant` nor the CLR types (ODBC `SQL_SS_UDT`, -151) without an output converter; db_bronze adds one for the CLR types (section 7.2). | `Trusted_Connection=yes`. SPN `MSSQLSvc/<fqdn>:<port>`. The driver does not renew tickets. `ActiveDirectoryIntegrated` is Entra ID, not on-premises AD. |
 | Postgres | `psycopg[binary]` 3.3.x | The bundled libpq is built `--with-gssapi`. `krbsrvname` defaults to `postgres`. |
 | MySQL | `PyMySQL` | None. Kerberos needs MySQL Enterprise on the server plus mysql-connector-python with its `gssapi` extra. *Integration (S1):* closing PyMySQL's streaming (unbuffered) cursor early reads the rest of the result, so the close blocks until the query has run to the end. |
 | Oracle | `oracledb` in **thick** mode + Instant Client | Thin mode has no Kerberos. Thick mode uses `sqlnet.ora` with `SQLNET.AUTHENTICATION_SERVICES=(KERBEROS5)`. |
@@ -196,7 +198,7 @@ connection = one pipeline = one Lambda function.** `pipeline_name`,
 | `username`, `password` | A literal, or a secret reference as in `api_bronze`: `{"env": ...}` or `{"secret_id": ..., "key": ...}`. Any connection field may be a reference. |
 | `auth` | Tagged. `{"type": "password"}` is implemented. `{"type": "kerberos", ...}` parses, then fails at run start (section 8). |
 | `driver_options` | Passed to the traditional driver, e.g. ODBC keywords for MSSQL. The code builds **both** the SQLAlchemy URL and the ConnectorX URL from the discrete fields, because the two formats differ (`+driver` and how query parameters are spelled). |
-| `isolation_level` | Applied to the traditional backend through SQLAlchemy. With ConnectorX, it is honoured only where the engine allows session settings; elsewhere the combination is rejected by validation (S3). *Integration:* on **Postgres** it reaches ConnectorX as `options=-c default_transaction_isolation=<level>`, joined to any libpq `options` in `driver_options`. On **MySQL** ConnectorX cannot apply it. mssql and oracle stay rejected until their integration tickets measure them. |
+| `isolation_level` | Applied to the traditional backend through SQLAlchemy. With ConnectorX, it is honoured only where the engine allows session settings; elsewhere the combination is rejected by validation (S3). *Integration:* on **Postgres** it reaches ConnectorX as `options=-c default_transaction_isolation=<level>`, joined to any libpq `options` in `driver_options`. On **SQL Server** it goes ahead of the ConnectorX query in the same batch, as `SET TRANSACTION ISOLATION LEVEL <level>; <query>` (any of the five SQL Server levels, SNAPSHOT included), but not on a `partition` read. On **MySQL** ConnectorX cannot apply it. oracle stays rejected until its integration ticket measures it. |
 | `naive_timezone` | Default `UTC`. Used **only** to convert cursor values and window bounds between UTC (at the API boundary) and naive source timestamps. Data values are never touched (D2). |
 
 ### 5.2 Per table
@@ -238,7 +240,7 @@ Each rule fails with `ConfigError` and a message that says how to fix it.
 
 - `backend: connectorx` with an engine ConnectorX does not support (for example Db2).
 - `backend: connectorx` with `auth.type: kerberos` on any engine except mssql. Oracle stays rejected until the spike in section 8 proves otherwise.
-- `isolation_level` on a connection whose tables resolve to `connectorx`, except on Postgres with one of the four standard levels (S3). The fix is `backend: pyarrow` or no `isolation_level`.
+- `isolation_level` on a connection whose tables resolve to `connectorx`, except on Postgres with one of the four standard levels, and on SQL Server with one of its five levels on a table without `partition` (S3). The fix is `backend: pyarrow` or no `isolation_level` (or no `partition`).
 - `chunking.strategy: keyset` without `order_by`, or with an `order_by` that does not start with the cursor column. Keyset also requires `primary_key`.
 - `cursor.lag > 0` without `primary_key`.
 - `partition` combined with anything other than `backend: connectorx`, an integer column, and `chunking: stream`. It is also rejected at run time in `incremental` mode, because it breaks ascending row order.
@@ -261,7 +263,13 @@ Checks:
     exactly the xml, geometric, pg_lsn, composite and geometry types, none of which ConnectorX reads.
     SQLAlchemy reflects Postgres `"char"` and `name` alike (a plain `String`), so both are findings,
     although ConnectorX reads `name`. A `query` table's column types are not reflected, so a type
-    ConnectorX cannot read there fails the run with `ConnectorXFailed` instead.
+    ConnectorX cannot read there fails the run with `ConnectorXFailed` instead. SQL Server's CLR
+    types (hierarchyid, geography, geometry) are registered with the reflection under their own names,
+    so they are named in the finding; `money` and `datetimeoffset` are findings because ConnectorX
+    reads them wrongly without an error (section 3.1).
+- On every backend: a type no backend lands losslessly. On SQL Server that is `sql_variant`: pyodbc
+  reads only the bytes of its value, without its type. The fix is to exclude the column or cast it in
+  `query`.
 - Rows with a NULL cursor are **counted and logged** when `include_null_cursor` is false, so the gap is visible.
 
 The same checks run, without extracting, as `{"mode": "validate"}`. Use that when onboarding a new source.
@@ -290,7 +298,18 @@ from string templates. For ConnectorX the statement is compiled to a string with
 `literal_binds`, as dlt does. *Integration (S2):* on Postgres and MySQL the
 inlined datetime (to the microsecond), time-zone-aware datetime (Postgres
 `timestamptz`), date and `numeric(28,10)` literals select exactly the rows the
-bound statement does. mssql, oracle and db2 are still *to verify*.
+bound statement does. *Integration (S2), SQL Server:* SQLAlchemy inlines a
+timestamp as text with six decimals, and SQL Server converts the text to the
+column's type: `datetime` takes three decimals and `smalldatetime` none, so the
+query fails (errors 241 and 295), and every incremental and `full` run would
+(their bounds carry microseconds). The cursor bounds and keyset seeds are
+therefore inlined for SQL Server as `CAST('...' AS DATETIME2)` (`DATETIMEOFFSET`
+for a value with an offset). The comparison is then made at `datetime2`
+precision, as pyodbc's bound parameters are, so on `datetime`, `smalldatetime`,
+`datetime2(7)` and `datetimeoffset` cursors the inlined window selects exactly
+the rows the bound one does. Note that a `datetime` stores 1/300 s, so `.127` is
+`.12666...` and sits inside a window ending at `.126999`, on both backends. Decimal
+and date literals inline correctly as they are. oracle and db2 are still *to verify*.
 
 ### 7.2 Backends
 
@@ -316,7 +335,13 @@ definition order), and Postgres **`numeric` without precision** (no decimal type
 holds every value). Postgres arrays land as lists typed by their element, with
 the same conversions applied to each element, so the type never depends on the
 values. Types SQLAlchemy does not recognise land as the driver hands them over:
-text on Postgres, binary (WKB) for MySQL geometry. MySQL `BIGINT UNSIGNED` lands as uint64 and MySQL `DOUBLE`
+text on Postgres, binary (WKB) for MySQL geometry. SQL Server's CLR types (hierarchyid,
+geography, geometry) land as binary, SQL Server's own serialization (what
+`CAST(c AS varbinary(max))` gives), through a pyodbc output converter for
+`SQL_SS_UDT`. SQL Server `datetimeoffset` lands as `timestamp[us, UTC]`, the
+instant (SQLAlchemy reflects it as without time zone, so it is special-cased).
+`datetime2` and `time` with 7 decimals are truncated to the microsecond on both
+backends, Arrow's finest unit here. MySQL `BIGINT UNSIGNED` lands as uint64 and MySQL `DOUBLE`
 (which SQLAlchemy reflects as Decimal) as double. Section 10.1 lists every type.
 
 Naive source timestamps stay naive in bronze (D2): every timestamp column the
@@ -350,7 +375,7 @@ them, which is the wrong instant whenever `naive_timezone` is not UTC (S5).
 - **Time budget** (incremental only). Keyset checks the deadline **itself, between pages**, and never closes a page mid-read, so no query is left running. `add_limit(max_time=...)` is not used for keyset, because it closes the generator mid-page.
   - ConnectorX `stream` tables are **never split-loaded**. Dropping their reader returns at once, but the query runs on to the end in a detached thread with the connection open (*prototyped*, S1). On Lambda the frozen container keeps that DB session open.
   - Validation rejects `max_time_s` alongside such a table (section 6.1). The Lambda-derived budget skips such tables, and that is logged. A ConnectorX table that does not fit one invocation must use `keyset`.
-  - The traditional backends' `stream` keeps `add_limit(max_time=...)`, as in `api_bronze`, where closing the stream ends the query. *Integration (S1):* on **Postgres** closing psycopg's server-side cursor ends the query at once. On **MySQL** closing PyMySQL's unbuffered cursor reads the rest of the result first, so the close blocks until the query has run to the end: a MySQL `stream` table is treated like a ConnectorX one (never split-loaded; validation rejects `max_time_s`, and the Lambda-derived budget skips it).
+  - The traditional backends' `stream` keeps `add_limit(max_time=...)`, as in `api_bronze`, where closing the stream ends the query. *Integration (S1):* on **Postgres** closing psycopg's server-side cursor ends the query at once. On **MySQL** closing PyMySQL's unbuffered cursor reads the rest of the result first, so the close blocks until the query has run to the end: a MySQL `stream` table is treated like a ConnectorX one (never split-loaded; validation rejects `max_time_s`, and the Lambda-derived budget skips it). On **SQL Server** closing pyodbc's cursor ends the query at once, so a traditional `stream` table is split-loaded as on Postgres.
 
 ### 7.5 Modes and events
 
@@ -483,6 +508,17 @@ down (`--keep` leaves them running). Later engines join by adding a service and
 an `Engine` entry, plus their entry in the per-engine tables of the scenario
 modules (the type matrix, `UNREADABLE`, `TRADITIONAL_STREAM_STOPS_EARLY`).
 `COMPOSE_PROJECT_NAME` and the port variables run a second stack beside the first.
+`DB_BRONZE_IT_ENGINES` (e.g. `mssql`) limits a run, and the services it brings up,
+to some engines.
+
+SQL Server (`mssql`, 2022 by default, `DB_BRONZE_IT_MSSQL_IMAGE` to change it) is
+amd64 only. On an arm64 host it needs Rosetta (Docker Desktop, or colima with
+`--vz-rosetta`): under QEMU user-mode emulation `sqlservr` refuses to start
+("Invalid mapping of address ... in reserved address space") or segfaults. The
+host side reaches it through pyodbc and ODBC Driver 18 (`msodbcsql18`, from
+Microsoft's Homebrew tap on macOS), which loads OpenSSL 1.1 or 3 from Homebrew's
+`openssl` prefix; where that now links OpenSSL 4, run pytest with
+`DYLD_LIBRARY_PATH=$(brew --prefix openssl@3)/lib`.
 
 The handler-level scenarios of the SQLite suite run against every engine on both
 backends (`test_it_modes.py`, `test_it_keyset.py`, `test_it_paged.py`,
@@ -556,6 +592,27 @@ and each one it allows lands on ConnectorX.
 | binary, varbinary, blob | binary | large_binary |
 | geometry, point, linestring, polygon, multipoint, multilinestring, multipolygon, geometrycollection | binary | preflight |
 
+**SQL Server** (2022, CU 28)
+
+| Source type | `pyarrow` | `connectorx` |
+|---|---|---|
+| tinyint, smallint, int, bigint | int64 | int64 |
+| bit | bool | bool |
+| decimal(18,4), decimal(28,10) | decimal128(p, s) | decimal128(38, 10) |
+| decimal(38,12), decimal(38,0) | decimal128(p, s) | preflight (decimal rule) |
+| money | decimal128(19, 4) | preflight (double, digits lost) |
+| smallmoney | decimal128(10, 4) | double |
+| float, real | double | double |
+| char, varchar, varchar(max), nchar, nvarchar, nvarchar(max), text, ntext, uniqueidentifier | string | string |
+| date | date32 | date32 |
+| datetime, datetime2, datetime2(6), smalldatetime | timestamp[us] | timestamp[us] |
+| datetimeoffset | timestamp[us, UTC] | preflight (offset applied twice) |
+| time | time64[us] | time64[us] |
+| binary, varbinary, varbinary(max), image | binary | large_binary |
+| xml | string | preflight |
+| hierarchyid, geography, geometry | binary (SQL Server serialization) | preflight |
+| sql_variant | preflight (no backend) | preflight |
+
 The two backends differ on most integer widths, on binary vs large_binary, and
 on every decimal, which is why a backend change fails with `BackendChanged`
 (D6).
@@ -566,9 +623,9 @@ on every decimal, which is why a backend change fails with `BackendChanged`
 
 | # | Question | If the answer is bad |
 |---|---|---|
-| S1 | Does dropping a ConnectorX `arrow_stream` reader mid-query block until the query completes? | **Answered (prototype, SQLite):** no block, but the producer detaches and reads to the end with the connection open. Split loading requires `keyset` for ConnectorX tables (section 7.4). **Server side (integration, Postgres and MySQL):** after the drop the query is still active in `pg_stat_activity` and in the MySQL processlist. Closing the traditional backend's streaming cursor ends the query at once on Postgres, but on MySQL the close reads the rest of the result and blocks until the query ends, so MySQL `stream` tables are not split-loaded either (sections 6.1, 7.4). |
-| S2 | Does `literal_binds` compile datetime and decimal literals correctly for mssql, oracle and db2? | **Answered for Postgres and MySQL (integration):** yes; microsecond, time-zone-aware, date and wide-decimal literals select the same rows as bound parameters (section 7.1). mssql, oracle and db2: their integration tickets. If the answer is bad: bind values through ConnectorX-safe literal formatting of our own. |
-| S3 | Can ConnectorX apply `isolation_level` or session settings for each engine? | **Answered for Postgres and MySQL (integration):** Postgres yes, through libpq `options` in the ConnectorX URL, so validation accepts `isolation_level` with `connectorx` there. MySQL no, so it stays rejected (sections 3.1, 5.1, 6.1). mssql and oracle: their integration tickets. |
+| S1 | Does dropping a ConnectorX `arrow_stream` reader mid-query block until the query completes? | **Answered (prototype, SQLite):** no block, but the producer detaches and reads to the end with the connection open. Split loading requires `keyset` for ConnectorX tables (section 7.4). **Server side (integration, Postgres and MySQL):** after the drop the query is still active in `pg_stat_activity` and in the MySQL processlist. Closing the traditional backend's streaming cursor ends the query at once on Postgres, but on MySQL the close reads the rest of the result and blocks until the query ends, so MySQL `stream` tables are not split-loaded either (sections 6.1, 7.4). **SQL Server (integration):** the dropped ConnectorX query is still in `sys.dm_exec_requests`; closing pyodbc's cursor ends the query at once, so traditional `stream` tables are split-loaded there. |
+| S2 | Does `literal_binds` compile datetime and decimal literals correctly for mssql, oracle and db2? | **Answered for Postgres and MySQL (integration):** yes; microsecond, time-zone-aware, date and wide-decimal literals select the same rows as bound parameters (section 7.1). **SQL Server (integration): no** for `datetime` and `smalldatetime` (a six-decimal text literal fails to convert), so cursor bounds are inlined as `CAST(... AS DATETIME2)` (`DATETIMEOFFSET` with an offset), which selects exactly what the bound query does on every SQL Server timestamp type; decimal and date literals are fine (section 7.1). oracle and db2: their integration tickets. |
+| S3 | Can ConnectorX apply `isolation_level` or session settings for each engine? | **Answered for Postgres and MySQL (integration):** Postgres yes, through libpq `options` in the ConnectorX URL, so validation accepts `isolation_level` with `connectorx` there. MySQL no, so it stays rejected (sections 3.1, 5.1, 6.1). **SQL Server (integration):** yes, as a `SET TRANSACTION ISOLATION LEVEL` ahead of the query in the same batch (its URL ignores unknown parameters), except on `partition` reads, which ConnectorX parses as a single SELECT; validation accepts the combination without `partition`. oracle: its integration ticket. |
 | S4 | Do dlt incremental `lag` and boundary deduplication by `primary_key` work with Arrow items from a custom resource? | **Answered (prototype):** deduplication works without `lag`. With `lag`, dlt deduplicates nothing, so the lag window is re-landed on every run. Decision: bronze accepts it and silver removes the duplicates (sections 7.3, 12). |
 | S5 | Do `direct` naming and `data_type: freeze` apply to Arrow items as expected? | **Answered (prototype):** yes, and freeze also catches decimal precision changes, which led to revising D6. Naive timestamps need `timezone: false` hints (section 7.2). |
 | S6 | Do Instant Client (Basic) and `libaio` work on AL2023? Can thick-mode oracledb and ConnectorX share `libclntsh` in one process? | Pin an Instant Client version known to work; isolate Oracle in its own image. **First part answered (image smoke test, 24 Nov 2026, linux/amd64 under emulation):** Instant Client Basic 23.26.4.0.0 with `libaio-0.3.111` (AL2023 package) loads. In one process, oracledb 26.1.0 enters thick mode (client 23.26.4) and ConnectorX 0.4.6 then loads `libclntsh` too: an Oracle connection to a closed port fails with `ORA-12541` from OCI, not `DPI-1047`. Same image: unixODBC 2.3.9 (AL2023) with msodbcsql18 18.7.1.1 from the RHEL 9 repo, listed by `pyodbc.drivers()`; ibm_db 3.3.0 imports once `pam` is installed. Still open: both libraries against a real Oracle server in the same process (ticket 16). |
