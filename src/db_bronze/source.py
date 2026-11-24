@@ -4,16 +4,15 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime
-from urllib.parse import quote
 
 import dlt
 import sqlalchemy as sa
 
-from .config import ConnectionConfig, SourceConfig, TableConfig
+from .config import SourceConfig, TableConfig
 from .extract import column_specs, naive_timestamp_columns, read_connectorx, read_pyarrow, with_extracted_at
 from .query import cursor_select, probe_columns, query_source
+from .urls import connectorx_url, sqlalchemy_url
 
 log = logging.getLogger(__name__)
 
@@ -22,12 +21,9 @@ SCHEMA_CONTRACT = {"tables": "evolve", "columns": "evolve", "data_type": "freeze
 
 
 def make_engine(cfg: SourceConfig) -> sa.Engine:
-    return sa.create_engine(sa.URL.create("sqlite", database=cfg.connection.path))
-
-
-def connectorx_url(conn: ConnectionConfig) -> str:
-    """The ConnectorX URL, built from the same discrete fields as the SQLAlchemy URL (section 5.1)."""
-    return "sqlite://" + quote(os.path.abspath(conn.path))
+    """The SQLAlchemy engine: reflection, and extraction on the traditional backends."""
+    options = {"isolation_level": cfg.connection.isolation_level} if cfg.connection.isolation_level else {}
+    return sa.create_engine(sqlalchemy_url(cfg.connection), **options)
 
 
 def reflect(engine: sa.Engine, tc: TableConfig) -> sa.FromClause:
@@ -40,9 +36,13 @@ def reflect(engine: sa.Engine, tc: TableConfig) -> sa.FromClause:
 
 
 def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_started: datetime):
+    backend = cfg.backend(tc)
+    if backend == "sqlalchemy":  # stopgap until the sqlalchemy backend lands
+        raise NotImplementedError(
+            f'table {tc.name}: backend "sqlalchemy" is not implemented yet; set "backend": "pyarrow"'
+        )
     table = reflect(engine, tc)
     specs = column_specs(table)
-    backend = cfg.backend(tc)
     log.info("table %s", json.dumps({"table": tc.name, "backend": backend}))
     batch_size = cfg.batch_size(tc)
     # Without this hint dlt labels naive timestamps UTC without shifting them (prototype S5).

@@ -1,8 +1,9 @@
-"""Source config and run request: plain dataclasses, validated strictly (DESIGN-db.md section 5).
+"""Source config and run request: plain dataclasses, validated strictly (DESIGN-db.md sections 5 and 6.1).
 
 One config document = one database connection = one dlt pipeline = one Lambda
 function. Unknown keys are rejected, so a typo fails loudly instead of silently
-falling back to a default. Copied in style from `api_bronze.config` (D1).
+falling back to a default. Every static rule fails with `ConfigError` and a
+message that says how to fix it. Copied in style from `api_bronze.config` (D1).
 """
 
 from __future__ import annotations
@@ -14,13 +15,22 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from . import secrets
+from .extract import EXTRACTED_AT
+
 MODES = ("incremental",)
-BACKENDS = ("connectorx", "pyarrow")
-# Engines ConnectorX reads (section 3.1). Every other dialect defaults to pyarrow (D3, section 5.3).
+BACKENDS = ("connectorx", "pyarrow", "sqlalchemy")
+# Engines ConnectorX reads (section 3.1); these default to it (D3, section 5.3). Db2 is not supported.
 CONNECTORX_DIALECTS = ("mssql", "postgres", "mysql", "oracle", "sqlite")
 CURSOR_TYPES = ("timestamp", "integer")
+CHUNKING_STRATEGIES = ("stream", "keyset")
+AUTH_TYPES = ("password", "kerberos")
+# What SQLAlchemy's `isolation_level` accepts across the supported dialects (SNAPSHOT: mssql).
+ISOLATION_LEVELS = ("READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE", "SNAPSHOT", "AUTOCOMMIT")
 PARQUET_CODECS = ("zstd", "snappy", "gzip", "none")
+SERVER_DIALECTS = ("mssql", "postgres", "mysql", "db2")  # host + database; oracle uses service_name
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
+_DIALECT = re.compile(r"^[a-z][a-z0-9_]*(\+[a-z0-9_]+)?$")
 
 
 class ConfigError(ValueError):
@@ -65,24 +75,121 @@ def _build(cls, data: Any, where: str, **overrides):
         raise ConfigError(f"{where}: {e}") from e
 
 
+def _names(value: Any, where: str) -> tuple[str, ...]:
+    """A list of source column names, as a tuple."""
+    if not isinstance(value, list | tuple) or not all(isinstance(v, str) and v for v in value):
+        raise ConfigError(f"{where}: expected a list of column names, got {value!r}")
+    return tuple(value)
+
+
+def _check_name(what: str, name: Any) -> None:
+    if not isinstance(name, str) or not _NAME.match(name):
+        raise ConfigError(
+            f"{what} {name!r} must match {_NAME.pattern}: use lowercase letters, digits and underscores, "
+            "starting with a letter"
+        )
+
+
+def _number(value: Any) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+@dataclass(frozen=True)
+class AuthConfig:
+    """Tagged: `password` is implemented; `kerberos` parses and fails at run start (section 8)."""
+
+    type: str = "password"
+    principal: str | None = None
+    keytab: dict | None = None  # a secret reference
+    krb5_conf: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.type not in AUTH_TYPES:
+            raise ConfigError(f"connection.auth.type {self.type!r} not in {AUTH_TYPES}")
+        kerberos_keys = {"principal": self.principal, "keytab": self.keytab, "krb5_conf": self.krb5_conf}
+        if self.type != "kerberos" and any(v is not None for v in kerberos_keys.values()):
+            raise ConfigError(
+                f"connection.auth: only kerberos takes {sorted(kerberos_keys)}; remove them for {self.type!r}"
+            )
+        if self.keytab is not None and not secrets.is_ref(self.keytab):
+            raise ConfigError(
+                'connection.auth.keytab must be a secret reference: {"secret_id": ...} or {"env": ...}'
+            )
+
+
 @dataclass(frozen=True)
 class ConnectionConfig:
-    dialect: str  # only sqlite so far
-    path: str | None = None  # SQLite database file
+    dialect: str  # mssql | postgres | mysql | oracle | db2 | sqlite | another SQLAlchemy dialect
+    host: str | dict | None = None
+    port: int | dict | None = None
+    database: str | dict | None = None
+    service_name: str | dict | None = None  # oracle, instead of database
+    path: str | dict | None = None  # sqlite database file
+    username: str | dict | None = None
+    password: str | dict | None = None
+    auth: AuthConfig = field(default_factory=AuthConfig)
+    driver_options: dict[str, Any] = field(default_factory=dict)  # passed to the traditional driver
+    isolation_level: str | None = None  # applied to the traditional backend
     naive_timezone: str = "UTC"  # what naive source timestamps mean; converts cursor bounds only
 
     def __post_init__(self) -> None:
+        if not isinstance(self.dialect, str) or not _DIALECT.match(self.dialect):
+            raise ConfigError(
+                f"connection.dialect {self.dialect!r} is not a SQLAlchemy dialect name; use one of "
+                f"{('mssql', 'postgres', 'mysql', 'oracle', 'db2', 'sqlite')} or another dialect's name"
+            )
+        for name in ("host", "database", "service_name", "path", "username", "password"):
+            value = getattr(self, name)
+            if value is not None and not (isinstance(value, str) and value) and not secrets.is_ref(value):
+                raise ConfigError(f"connection.{name} must be a string or a secret reference: {value!r}")
+        port = self.port
+        if port is not None and not secrets.is_ref(port) and not (_positive_int(port) and port <= 65535):
+            raise ConfigError(f"connection.port must be an integer or a secret reference: {port!r}")
+        if not isinstance(self.driver_options, dict):
+            raise ConfigError(f"connection.driver_options must be an object: {self.driver_options!r}")
+        for key, value in self.driver_options.items():
+            if not (isinstance(value, str) or _number(value) or secrets.is_ref(value)):
+                raise ConfigError(
+                    f"connection.driver_options[{key!r}] must be a string, a number or a secret reference: {value!r}"
+                )
+        self._check_fields_for_dialect()
+        if self.isolation_level is not None and self.isolation_level not in ISOLATION_LEVELS:
+            raise ConfigError(f"connection.isolation_level {self.isolation_level!r} not in {ISOLATION_LEVELS}")
         try:
             ZoneInfo(self.naive_timezone)
-        except (ZoneInfoNotFoundError, ValueError) as e:
+        except (ZoneInfoNotFoundError, ValueError, TypeError):
             raise ConfigError(
-                f"connection.naive_timezone {self.naive_timezone!r} is not an IANA time zone, "
-                "e.g. 'Africa/Johannesburg'"
-            ) from e
-        if self.dialect != "sqlite":
-            raise ConfigError(f"connection.dialect {self.dialect!r}: only 'sqlite' is supported so far")
-        if not self.path:
-            raise ConfigError("connection.path is required for sqlite")
+                f"connection.naive_timezone {self.naive_timezone!r} is not an IANA time zone; "
+                'use a name such as "UTC" or "Africa/Johannesburg"'
+            ) from None
+
+    def _check_fields_for_dialect(self) -> None:
+        d = self.dialect
+        if d == "sqlite":
+            if not self.path:
+                raise ConfigError('connection: set "path" to the database file for sqlite')
+            server_keys = ("host", "port", "database", "service_name", "username", "password")
+            given = [k for k in server_keys if getattr(self, k) is not None]
+            if given:
+                raise ConfigError(f'connection: sqlite takes only "path"; remove "{given[0]}"')
+            return
+        if self.path is not None:
+            raise ConfigError(f'connection: only sqlite takes "path"; for {d!r} set "host" and "database"')
+        if d == "oracle":
+            if self.database is not None:
+                raise ConfigError('connection: oracle takes "service_name", not "database"; rename the key')
+            required = ("host", "service_name")
+        else:
+            if self.service_name is not None:
+                raise ConfigError(f'connection: only oracle takes "service_name"; for {d!r} use "database"')
+            required = ("host", "database") if d in SERVER_DIALECTS else ()
+        for key in required:
+            if getattr(self, key) is None:
+                raise ConfigError(f'connection: {d} needs a server address; set "{key}"')
 
 
 @dataclass(frozen=True)
@@ -92,7 +199,7 @@ class CursorConfig:
     initial_value: str | int  # ISO-8601 for timestamp cursors, an integer for integer cursors
     # Seconds (timestamp) or an integer delta: re-read this trailing window on every run. dlt then
     # deduplicates nothing, so the whole window lands again each run (prototype S4, DESIGN-db.md 12).
-    lag: float | int | None = None
+    lag: int | float | None = None
     include_null_cursor: bool = False  # adds `OR cursor IS NULL`: those rows land on every run
 
     def __post_init__(self) -> None:
@@ -102,6 +209,12 @@ class CursorConfig:
             raise ConfigError(f"cursor.initial_value must be an integer for an integer cursor: {self.initial_value!r}")
         if self.type == "timestamp":
             parse_iso(self.initial_value, "cursor.initial_value")
+        if self.lag is not None and (not _number(self.lag) or self.lag < 0):
+            raise ConfigError(f"cursor.lag must be a number >= 0 (seconds, or an integer delta): {self.lag!r}")
+        if self.type == "integer" and self.lag is not None and not isinstance(self.lag, int):
+            raise ConfigError(f"cursor.lag {self.lag!r}: an integer cursor needs an integer lag")
+        if not isinstance(self.include_null_cursor, bool):
+            raise ConfigError(f"cursor.include_null_cursor must be true or false: {self.include_null_cursor!r}")
 
     def initial_cursor_value(self, naive_timezone: str) -> datetime | int:
         """The initial value as the source represents it: an integer, or a naive timestamp in source time."""
@@ -111,9 +224,38 @@ class CursorConfig:
 
 
 @dataclass(frozen=True)
+class ChunkingConfig:
+    strategy: str = "stream"  # stream | keyset
+    order_by: tuple[str, ...] = ()
+    page_size: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.strategy not in CHUNKING_STRATEGIES:
+            raise ConfigError(f"chunking.strategy {self.strategy!r} not in {CHUNKING_STRATEGIES}")
+        if self.strategy == "stream" and (self.order_by or self.page_size is not None):
+            raise ConfigError("chunking: order_by and page_size apply only to keyset; remove them or use keyset")
+
+
+@dataclass(frozen=True)
+class PartitionConfig:
+    column: str  # ConnectorX partition_on; the preflight checks it is an integer column
+    num: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.column, str) or not self.column:
+            raise ConfigError(f"partition.column must be a column name: {self.column!r}")
+        if not _positive_int(self.num):
+            raise ConfigError(f"partition.num must be a positive integer: {self.num!r}")
+
+
+@dataclass(frozen=True)
 class Defaults:
     backend: str | None = None
     batch_size: int = 50_000
+
+    def __post_init__(self) -> None:
+        if not _positive_int(self.batch_size):
+            raise ConfigError(f"defaults.batch_size must be a positive integer: {self.batch_size!r}")
 
 
 @dataclass(frozen=True)
@@ -121,23 +263,73 @@ class TableConfig:
     name: str  # bronze table name (path prefix)
     table: str | None = None  # source table name, exactly as in the database
     schema: str | None = None  # source schema; None is the connection's default
+    query: str | None = None  # instead of schema + table: a view or join; needs a cursor to run incrementally
     primary_key: tuple[str, ...] = ()
-    cursor: CursorConfig | None = None
-    backend: str | None = None  # overrides defaults.backend
-    batch_size: int | None = None  # rows per Arrow batch; overrides defaults.batch_size
     columns: tuple[str, ...] | None = None  # projection; None is every reflected column
     where: str | None = None  # static predicate, ANDed with the cursor filter
-    query: str | None = None  # instead of schema + table: a view or join; needs a cursor
+    cursor: CursorConfig | None = None  # None: a snapshot table
+    backend: str | None = None  # overrides defaults.backend
+    chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
+    batch_size: int | None = None  # rows per Arrow batch; overrides defaults.batch_size
+    partition: PartitionConfig | None = None
 
     def __post_init__(self) -> None:
-        if not _NAME.match(self.name):
-            raise ConfigError(f"table name {self.name!r} must match {_NAME.pattern}")
-        if self.cursor is None:
-            raise ConfigError(f"table {self.name}: a cursor is required (snapshot tables are not supported yet)")
-        if (self.table is None) == (self.query is None):
-            raise ConfigError(f"table {self.name}: set either `table` (with optional `schema`) or `query`")
-        if self.batch_size is not None and (not isinstance(self.batch_size, int) or self.batch_size < 1):
+        _check_name("table name", self.name)
+        if self.batch_size is not None and not _positive_int(self.batch_size):
             raise ConfigError(f"table {self.name}: batch_size must be a positive integer")
+        self._check_source()
+        named = {
+            *self.primary_key,
+            *(self.columns or ()),
+            *self.chunking.order_by,
+            *([self.cursor.column] if self.cursor else []),
+            *([self.partition.column] if self.partition else []),
+        }
+        if EXTRACTED_AT in named:
+            raise ConfigError(
+                f'table {self.name}: a source column is named "{EXTRACTED_AT}", which db_bronze adds to every row; '
+                f'leave it out of "columns", or rename it in a "query" (SELECT "{EXTRACTED_AT}" AS ...)'
+            )
+        if self.cursor and self.cursor.lag and not self.primary_key:
+            raise ConfigError(
+                f"table {self.name}: cursor.lag re-reads a window, and dlt needs the primary key for it; "
+                'set "primary_key", or remove "lag"'
+            )
+        if self.chunking.strategy == "keyset":
+            self._check_keyset()
+        if self.partition and self.chunking.strategy != "stream":
+            raise ConfigError(
+                f'table {self.name}: partition reads cannot be chunked; use "chunking": {{"strategy": "stream"}}, '
+                'or remove "partition"'
+            )
+
+    def _check_source(self) -> None:
+        if self.query is None:
+            if not self.table:
+                raise ConfigError(f'table {self.name}: no source; set "table" (and optionally "schema"), or "query"')
+            return
+        clashing = [k for k in ("schema", "table", "columns", "where") if getattr(self, k) is not None]
+        if clashing:
+            remove = ", ".join(f'"{k}"' for k in clashing)
+            raise ConfigError(
+                f'table {self.name}: "query" replaces "schema"/"table", "columns" and "where"; '
+                f"remove {remove} and put the projection and the filter inside the query"
+            )
+
+    def _check_keyset(self) -> None:
+        where = f"table {self.name}: keyset chunking"
+        cursor = self.cursor.column if self.cursor else "<cursor column>"
+        if not self.chunking.order_by:
+            raise ConfigError(f'{where} needs an order; set "order_by": ["{cursor}", <primary key columns>]')
+        if self.cursor and self.chunking.order_by[0] != self.cursor.column:
+            raise ConfigError(
+                f'{where}: "order_by" {list(self.chunking.order_by)} does not start with the cursor; '
+                f'start "order_by" with the cursor column "{cursor}", then the primary key columns'
+            )
+        if not self.primary_key:
+            raise ConfigError(f'{where} breaks ties by the primary key; set "primary_key"')
+        if not _positive_int(self.chunking.page_size):
+            raise ConfigError(f'{where}: set "page_size" to a positive number of rows per page')
 
 
 @dataclass(frozen=True)
@@ -149,25 +341,60 @@ class SourceConfig:
     tables: tuple[TableConfig, ...]
     defaults: Defaults = field(default_factory=Defaults)
     parquet_compression: str = "zstd"
+    max_time_s: float | None = None  # its rules belong to the time-budget work (section 7.4)
 
     def __post_init__(self) -> None:
-        for n in (self.pipeline_name, self.dataset_name):
-            if not _NAME.match(n):
-                raise ConfigError(f"name {n!r} must match {_NAME.pattern}")
+        _check_name("pipeline_name", self.pipeline_name)
+        _check_name("dataset_name", self.dataset_name)
         if not self.tables:
             raise ConfigError("tables: at least one is required")
-        names = [t.name for t in self.tables]
-        if len(set(names)) != len(names):
-            raise ConfigError(f"table names must be unique: {names}")
+        seen: set[str] = set()
+        for t in self.tables:
+            if t.name in seen:
+                raise ConfigError(
+                    f"duplicate table name {t.name!r}: each is a bronze path prefix; give each table its own name"
+                )
+            seen.add(t.name)
+        if self.max_time_s is not None and not (_number(self.max_time_s) and self.max_time_s > 0):
+            raise ConfigError(f"max_time_s must be a number of seconds > 0, or null: {self.max_time_s!r}")
         if self.parquet_compression not in PARQUET_CODECS:
             raise ConfigError(f"parquet_compression {self.parquet_compression!r} not in {PARQUET_CODECS}")
+        if self.defaults.backend is not None and self.defaults.backend not in BACKENDS:
+            raise ConfigError(f"defaults.backend {self.defaults.backend!r} not in {BACKENDS}")
         for t in self.tables:
-            backend = self.backend(t)
-            if backend not in BACKENDS:
-                raise ConfigError(f"table {t.name}: backend {backend!r} not in {BACKENDS}")
+            self._check_backend(t)
+
+    def _check_backend(self, t: TableConfig) -> None:
+        if t.backend is not None and t.backend not in BACKENDS:
+            raise ConfigError(f"table {t.name}: backend {t.backend!r} not in {BACKENDS}")
+        if t.partition and self.backend(t) != "connectorx":
+            raise ConfigError(
+                f"table {t.name}: partition is a ConnectorX read (partition_on), but the table resolves to "
+                f'{self.backend(t)!r}; set "backend": "connectorx", or remove "partition"'
+            )
+        if self.backend(t) != "connectorx":
+            return
+        dialect = self.connection.dialect
+        if dialect not in CONNECTORX_DIALECTS:
+            raise ConfigError(
+                f"table {t.name}: ConnectorX does not support dialect {dialect!r} (it reads {CONNECTORX_DIALECTS}); "
+                'set "backend": "pyarrow" on the table or in defaults'
+            )
+        if self.connection.isolation_level is not None:
+            # Until spike S3 records which engines let ConnectorX apply session settings.
+            raise ConfigError(
+                f"table {t.name}: ConnectorX cannot apply connection.isolation_level "
+                f"{self.connection.isolation_level!r} (spike S3 is open for every engine); "
+                'set "backend": "pyarrow" on the table or in defaults, or remove "isolation_level"'
+            )
+        if self.connection.auth.type == "kerberos" and dialect != "mssql":
+            raise ConfigError(
+                f"table {t.name}: ConnectorX supports Kerberos only on mssql, not {dialect!r} (docs/KERBEROS.md); "
+                'set "backend": "pyarrow" on the table or in defaults'
+            )
 
     def backend(self, table: TableConfig) -> str:
-        """The table's backend, resolved from the config alone (D3): table, then defaults, then the dialect."""
+        """The table's backend, resolved from the config alone (D3, section 5.3)."""
         return table.backend or self.defaults.backend or default_backend(self.connection.dialect)
 
     def batch_size(self, table: TableConfig) -> int:
@@ -177,27 +404,45 @@ class SourceConfig:
     def from_dict(cls, data: dict) -> SourceConfig:
         if not isinstance(data, dict):
             raise ConfigError("config: expected an object")
-        connection = _build(ConnectionConfig, data.get("connection"), "connection")
+        raw_conn = data.get("connection")
+        auth = raw_conn.get("auth", {}) if isinstance(raw_conn, dict) else {}
+        connection = _build(
+            ConnectionConfig, raw_conn, "connection", auth=_build(AuthConfig, auth, "connection.auth")
+        )
         defaults = _build(Defaults, data.get("defaults", {}), "defaults")
         raw_tables = data.get("tables")
         if not isinstance(raw_tables, list):
             raise ConfigError("tables: expected a list")
-        tables = []
-        for i, t in enumerate(raw_tables):
-            where = f"tables[{i}]"
-            cur = t.get("cursor") if isinstance(t, dict) else None
-            cursor = _build(CursorConfig, cur, f"{where}.cursor") if cur is not None else None
-            pk = tuple(t.get("primary_key") or ()) if isinstance(t, dict) else ()
-            columns = t.get("columns") if isinstance(t, dict) else None
-            columns = tuple(columns) if columns is not None else None
-            tables.append(_build(TableConfig, t, where, cursor=cursor, primary_key=pk, columns=columns))
-        return _build(
-            cls, data, "config", connection=connection, defaults=defaults, tables=tuple(tables)
-        )
+        tables = [_table(t, f"tables[{i}]") for i, t in enumerate(raw_tables)]
+        return _build(cls, data, "config", connection=connection, defaults=defaults, tables=tuple(tables))
 
     @classmethod
     def from_json(cls, text: str | bytes) -> SourceConfig:
-        return cls.from_dict(json.loads(text))
+        try:
+            data = json.loads(text)
+        except ValueError as e:
+            raise ConfigError(f"config is not valid JSON: {e}") from e
+        return cls.from_dict(data)
+
+
+def _table(t: Any, where: str) -> TableConfig:
+    if not isinstance(t, dict):
+        raise ConfigError(f"{where}: expected an object, got {type(t).__name__}")
+    nested: dict[str, Any] = {}
+    if t.get("cursor") is not None:
+        nested["cursor"] = _build(CursorConfig, t["cursor"], f"{where}.cursor")
+    if t.get("chunking") is not None:
+        chunking = t["chunking"]
+        order_by = chunking.get("order_by") if isinstance(chunking, dict) else None
+        order_by = _names(order_by, f"{where}.chunking.order_by") if order_by is not None else ()
+        nested["chunking"] = _build(ChunkingConfig, chunking, f"{where}.chunking", order_by=order_by)
+    if t.get("partition") is not None:
+        nested["partition"] = _build(PartitionConfig, t["partition"], f"{where}.partition")
+    if t.get("primary_key") is not None:
+        nested["primary_key"] = _names(t["primary_key"], f"{where}.primary_key")
+    if t.get("columns") is not None:
+        nested["columns"] = _names(t["columns"], f"{where}.columns")
+    return _build(TableConfig, t, where, **nested)
 
 
 @dataclass(frozen=True)

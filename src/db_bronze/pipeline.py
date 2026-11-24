@@ -15,7 +15,7 @@ import dlt
 from dlt.common.schema import Schema
 from dlt.destinations import filesystem
 
-from .config import RunRequest, SourceConfig
+from .config import ConfigError, RunRequest, SourceConfig
 from .source import make_engine, make_resource
 
 log = logging.getLogger(__name__)
@@ -46,8 +46,24 @@ def bronze_schema(cfg: SourceConfig) -> Schema:
     return Schema(cfg.pipeline_name, normalizers={"names": "direct"})
 
 
+def check_run_start(cfg: SourceConfig, req: RunRequest) -> None:
+    """Fail before anything is touched when the run cannot be done (DESIGN-db.md section 7.6)."""
+    if cfg.connection.auth.type == "kerberos":
+        raise NotImplementedError(
+            'connection.auth.type "kerberos" is reserved but not implemented yet; see docs/KERBEROS.md '
+            'for what adding it involves, or use {"type": "password"}'
+        )
+    for tc in cfg.tables:
+        if tc.cursor is None and req.mode != "full":
+            raise ConfigError(
+                f'table {tc.name} has no cursor, so it is a snapshot table; run it with "mode": "full", '
+                f"or give it a cursor to run in {req.mode!r} mode"
+            )
+
+
 def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | None = None) -> dict[str, Any]:
     """Run one invocation. Raises on any failure (cursor state then stays where it was)."""
+    check_run_start(cfg, req)
     os.environ["DATA_WRITER__COMPRESSION"] = cfg.parquet_compression
 
     run_started = datetime.now(UTC)
