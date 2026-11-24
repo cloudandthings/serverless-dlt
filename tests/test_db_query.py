@@ -39,7 +39,8 @@ def transactions(metadata: sa.MetaData | None = None) -> sa.Table:
 def table_config(**overrides) -> TableConfig:
     cursor = {"column": "UpdatedAt", "type": "timestamp", "initial_value": "2020-01-01T00:00:00"}
     cursor |= overrides.pop("cursor", {})
-    return TableConfig(**{"name": "transactions", "table": "Transactions", "cursor": CursorConfig(**cursor)} | overrides)
+    base = {"name": "transactions", "table": "Transactions", "cursor": CursorConfig(**cursor)}
+    return TableConfig(**base | overrides)
 
 
 START, END = datetime(2026, 11, 20, 8, 0), datetime(2026, 11, 21, 0, 0)
@@ -93,7 +94,10 @@ def test_window_is_half_open():
     engine = sa.create_engine("sqlite://")
     metadata = sa.MetaData()
     table = sa.Table(
-        "Transactions", metadata, sa.Column("TransactionId", sa.Integer, primary_key=True), sa.Column("UpdatedAt", sa.DateTime)
+        "Transactions",
+        metadata,
+        sa.Column("TransactionId", sa.Integer, primary_key=True),
+        sa.Column("UpdatedAt", sa.DateTime),
     )
     metadata.create_all(engine)
     with engine.begin() as conn:

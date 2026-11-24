@@ -69,7 +69,8 @@ class ConnectionConfig:
             ZoneInfo(self.naive_timezone)
         except (ZoneInfoNotFoundError, ValueError) as e:
             raise ConfigError(
-                f"connection.naive_timezone {self.naive_timezone!r} is not an IANA time zone, e.g. 'Africa/Johannesburg'"
+                f"connection.naive_timezone {self.naive_timezone!r} is not an IANA time zone, "
+                "e.g. 'Africa/Johannesburg'"
             ) from e
         if self.dialect != "sqlite":
             raise ConfigError(f"connection.dialect {self.dialect!r}: only 'sqlite' is supported so far")

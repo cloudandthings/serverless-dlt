@@ -31,12 +31,12 @@ class _Timestamp(FunctionElement):
 
 @compiles(_Timestamp)
 def _timestamp_default(element, compiler, **kw):
-    return compiler.process(list(element.clauses)[0], **kw)
+    return compiler.process(next(iter(element.clauses)), **kw)
 
 
 @compiles(_Timestamp, "sqlite")
 def _timestamp_sqlite(element, compiler, **kw):
-    return f"julianday({compiler.process(list(element.clauses)[0], **kw)})"
+    return f"julianday({compiler.process(next(iter(element.clauses)), **kw)})"
 
 
 def query_source(tc: TableConfig, columns: list[str]) -> sa.Subquery:
