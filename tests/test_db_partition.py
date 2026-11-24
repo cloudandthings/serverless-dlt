@@ -110,7 +110,7 @@ def test_partitioned_read_hands_partition_on_to_connectorx(invoke, monkeypatch):
 
     monkeypatch.setattr(cx, "read_sql", spy)
     invoke(TRANSACTIONS | {"partition": PARTITION}, mode="full")
-    assert [(c.get("partition_on"), c.get("partition_num")) for c in calls] == [("TransactionId", 3)]
+    assert [(c.get("partition_on"), c.get("partition_num")) for c in calls] == [('"TransactionId"', 3)]  # quoted: mixed case
     calls.clear()
     invoke(mode="full")
     assert [c.get("partition_on") for c in calls] == [None]

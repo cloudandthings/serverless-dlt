@@ -134,7 +134,10 @@ def make_resource(
         if backend == "connectorx":
             # ConnectorX takes SQL text, so values are inlined, as dlt's own sql_table does.
             sql = literal_sql(stmt, engine.dialect)
-            partition = (tc.partition.column, tc.partition.num) if tc.partition else None
+            # ConnectorX splices the column into its own range and partition queries unquoted, so
+            # a mixed-case name must arrive quoted for the dialect (integration, Postgres).
+            column = engine.dialect.identifier_preparer.quote(tc.partition.column) if tc.partition else None
+            partition = (column, tc.partition.num) if tc.partition else None
             batches = read_connectorx(connectorx_url(cfg.connection), sql, specs, batch_size, tc.name, partition)
         else:
             batches = read_pyarrow(engine, stmt, specs, batch_size)
