@@ -17,6 +17,8 @@ aws = ["boto3>=1.40"]
 # ConnectorX >= 0.4.6: in 0.4.5 a failed stream ended silently, looking like a short read (section 3.1).
 db = [
     "connectorx>=0.4.6",
+    "psycopg[binary]>=3.2",
+    "pymysql>=1.1",
     "sqlalchemy>=2",
 ]
 
@@ -35,7 +37,13 @@ packages = ["src/api_bronze", "src/db_bronze"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["spark: needs pyspark 4.1 and Java (uv sync --group silver)"]
+markers = [
+    "spark: needs pyspark 4.1 and Java (uv sync --group silver)",
+    "integration: needs Docker; real source engines from tests/integration/compose.yaml (mise run test:integration)",
+]
+# The integration suite is opt-in, so a plain run never needs Docker. A later -m on the
+# command line replaces this one (pytest -m integration).
+addopts = ["-m", "not integration"]
 filterwarnings = ["ignore::DeprecationWarning"]
 
 [tool.ruff]

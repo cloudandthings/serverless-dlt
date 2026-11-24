@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#MISE description="Bring up the source engines (docker-compose) and run the db_bronze integration suite"
+#USAGE arg "[pytest_args]..." help="Passed to pytest, e.g. -- -k mysql"
+#USAGE flag "--keep" help="Leave the engines running afterwards (faster re-runs); stop them with: docker compose -f tests/integration/compose.yaml down"
+set -euo pipefail
+cd "$MISE_PROJECT_ROOT"
+
+# usage hands the variadic args over as one shell-quoted string
+eval "pytest_args=(${usage_pytest_args:-})"
+
+compose=(docker compose -f tests/integration/compose.yaml)
+if [[ "${usage_keep:-false}" != "true" ]]; then
+  trap '"${compose[@]}" down --volumes --remove-orphans' EXIT
+fi
+"${compose[@]}" up -d --wait
+uv run pytest -m integration ${pytest_args[@]+"${pytest_args[@]}"}
