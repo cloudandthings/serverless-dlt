@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field, fields
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -35,6 +35,31 @@ _DIALECT = re.compile(r"^[a-z][a-z0-9_]*(\+[a-z0-9_]+)?$")
 
 class ConfigError(ValueError):
     pass
+
+
+def parse_iso(value: str, where: str) -> datetime:
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError as e:
+        raise ConfigError(f"{where} is not ISO-8601: {value!r}") from e
+
+
+def to_source_time(value: datetime, naive_timezone: str) -> datetime:
+    """A timestamp as the source's naive columns represent it.
+
+    A value with an offset is converted to wall-clock time in `naive_timezone`
+    and its offset dropped. A naive value is already source time. Used only at
+    the boundaries (config `initial_value`, event window bounds); data values are
+    never converted (DESIGN-db.md 7.3).
+    """
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(ZoneInfo(naive_timezone)).replace(tzinfo=None)
+
+
+def default_backend(dialect: str) -> str:
+    """The backend a table gets when neither it nor `defaults` names one: from the dialect alone (D3)."""
+    return "connectorx" if dialect in CONNECTORX_DIALECTS else "pyarrow"
 
 
 def _build(cls, data: Any, where: str, **overrides):
@@ -109,7 +134,7 @@ class ConnectionConfig:
     auth: AuthConfig = field(default_factory=AuthConfig)
     driver_options: dict[str, Any] = field(default_factory=dict)  # passed to the traditional driver
     isolation_level: str | None = None  # applied to the traditional backend
-    naive_timezone: str = "UTC"
+    naive_timezone: str = "UTC"  # what naive source timestamps mean; converts cursor bounds only
 
     def __post_init__(self) -> None:
         if not isinstance(self.dialect, str) or not _DIALECT.match(self.dialect):
@@ -172,8 +197,10 @@ class CursorConfig:
     column: str  # source column name, exactly as in the database
     type: str  # timestamp | integer
     initial_value: str | int  # ISO-8601 for timestamp cursors, an integer for integer cursors
-    lag: int | float | None = None  # seconds, or an integer delta for integer cursors
-    include_null_cursor: bool = False
+    # Seconds (timestamp) or an integer delta: re-read this trailing window on every run. dlt then
+    # deduplicates nothing, so the whole window lands again each run (prototype S4, DESIGN-db.md 12).
+    lag: int | float | None = None
+    include_null_cursor: bool = False  # adds `OR cursor IS NULL`: those rows land on every run
 
     def __post_init__(self) -> None:
         if self.type not in CURSOR_TYPES:
@@ -181,7 +208,7 @@ class CursorConfig:
         if self.type == "integer" and (not isinstance(self.initial_value, int) or isinstance(self.initial_value, bool)):
             raise ConfigError(f"cursor.initial_value must be an integer for an integer cursor: {self.initial_value!r}")
         if self.type == "timestamp":
-            self.initial_timestamp  # noqa: B018 (validates)
+            parse_iso(self.initial_value, "cursor.initial_value")
         if self.lag is not None and (not _number(self.lag) or self.lag < 0):
             raise ConfigError(f"cursor.lag must be a number >= 0 (seconds, or an integer delta): {self.lag!r}")
         if self.type == "integer" and self.lag is not None and not isinstance(self.lag, int):
@@ -189,14 +216,11 @@ class CursorConfig:
         if not isinstance(self.include_null_cursor, bool):
             raise ConfigError(f"cursor.include_null_cursor must be true or false: {self.include_null_cursor!r}")
 
-    @property
-    def initial_timestamp(self) -> datetime:
-        """The ISO initial value as a naive UTC timestamp (an offset, if any, is converted to UTC)."""
-        try:
-            dt = datetime.fromisoformat(str(self.initial_value))
-        except ValueError as e:
-            raise ConfigError(f"cursor.initial_value is not ISO-8601: {self.initial_value!r}") from e
-        return dt.astimezone(UTC).replace(tzinfo=None) if dt.tzinfo else dt
+    def initial_cursor_value(self, naive_timezone: str) -> datetime | int:
+        """The initial value as the source represents it: an integer, or a naive timestamp in source time."""
+        if self.type == "integer":
+            return self.initial_value
+        return to_source_time(parse_iso(self.initial_value, "cursor.initial_value"), naive_timezone)
 
 
 @dataclass(frozen=True)
@@ -239,7 +263,7 @@ class TableConfig:
     name: str  # bronze table name (path prefix)
     table: str | None = None  # source table name, exactly as in the database
     schema: str | None = None  # source schema; None is the connection's default
-    query: str | None = None  # escape hatch for views and joins, instead of schema/table
+    query: str | None = None  # instead of schema + table: a view or join; needs a cursor to run incrementally
     primary_key: tuple[str, ...] = ()
     columns: tuple[str, ...] | None = None  # projection; None is every reflected column
     where: str | None = None  # static predicate, ANDed with the cursor filter
@@ -371,10 +395,7 @@ class SourceConfig:
 
     def backend(self, table: TableConfig) -> str:
         """The table's backend, resolved from the config alone (D3, section 5.3)."""
-        explicit = table.backend or self.defaults.backend
-        if explicit:
-            return explicit
-        return "connectorx" if self.connection.dialect in CONNECTORX_DIALECTS else "pyarrow"
+        return table.backend or self.defaults.backend or default_backend(self.connection.dialect)
 
     def batch_size(self, table: TableConfig) -> int:
         return table.batch_size or self.defaults.batch_size

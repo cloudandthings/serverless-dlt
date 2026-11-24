@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 
@@ -9,8 +10,9 @@ import dlt
 import sqlalchemy as sa
 
 from .config import SourceConfig, TableConfig
-from .extract import column_specs, naive_timestamp_columns, read_pyarrow, with_extracted_at
-from .urls import sqlalchemy_url
+from .extract import column_specs, naive_timestamp_columns, read_connectorx, read_pyarrow, with_extracted_at
+from .query import cursor_select, probe_columns, query_source
+from .urls import connectorx_url, sqlalchemy_url
 
 log = logging.getLogger(__name__)
 
@@ -24,23 +26,28 @@ def make_engine(cfg: SourceConfig) -> sa.Engine:
     return sa.create_engine(sqlalchemy_url(cfg.connection), **options)
 
 
-def reflect(engine: sa.Engine, tc: TableConfig) -> sa.Table:
+def reflect(engine: sa.Engine, tc: TableConfig) -> sa.FromClause:
+    """The reflected source table, or for a `query` table a subquery over its result columns."""
+    if tc.query:
+        with engine.connect() as conn:
+            columns = list(conn.execute(probe_columns(tc)).keys())
+        return query_source(tc, columns)
     return sa.Table(tc.table, sa.MetaData(), schema=tc.schema, autoload_with=engine)
 
 
 def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_started: datetime):
     backend = cfg.backend(tc)
-    if backend != "pyarrow":  # stopgap until the connectorx and sqlalchemy backends land
+    if backend == "sqlalchemy":  # stopgap until the sqlalchemy backend lands
         raise NotImplementedError(
-            f'table {tc.name}: backend {backend!r} is not implemented yet; set "backend": "pyarrow"'
+            f'table {tc.name}: backend "sqlalchemy" is not implemented yet; set "backend": "pyarrow"'
         )
     table = reflect(engine, tc)
     specs = column_specs(table)
+    log.info("table %s", json.dumps({"table": tc.name, "backend": backend}))
     batch_size = cfg.batch_size(tc)
     # Without this hint dlt labels naive timestamps UTC without shifting them (prototype S5).
     hints = {name: {"timezone": False} for name in naive_timestamp_columns(table)}
-    cursor_col = table.c[tc.cursor.column]
-    initial = tc.cursor.initial_value if tc.cursor.type == "integer" else tc.cursor.initial_timestamp
+    initial = tc.cursor.initial_cursor_value(cfg.connection.naive_timezone)
 
     @dlt.resource(
         name=tc.name,
@@ -56,11 +63,19 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_sta
         cursor=dlt.sources.incremental(  # noqa: B008
             tc.cursor.column,
             initial_value=initial,
+            lag=tc.cursor.lag,  # dlt steps cursor.start_value back by this
             row_order="asc",
+            on_cursor_value_missing="include" if tc.cursor.include_null_cursor else "raise",
         ),
     ):
-        stmt = sa.select(table).where(cursor_col >= cursor.start_value).order_by(cursor_col)
-        for batch in read_pyarrow(engine, stmt, specs, batch_size):
+        stmt = cursor_select(table, tc, cursor.start_value, cursor.end_value)
+        if backend == "connectorx":
+            # ConnectorX takes SQL text, so values are inlined, as dlt's own sql_table does.
+            sql = str(stmt.compile(engine, compile_kwargs={"literal_binds": True}))
+            batches = read_connectorx(connectorx_url(cfg.connection), sql, specs, batch_size)
+        else:
+            batches = read_pyarrow(engine, stmt, specs, batch_size)
+        for batch in batches:
             yield with_extracted_at(batch, run_started)
 
     return rows
