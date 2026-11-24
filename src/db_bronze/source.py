@@ -53,6 +53,7 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_sta
         cursor=dlt.sources.incremental(  # noqa: B008
             tc.cursor.column,
             initial_value=initial,
+            lag=tc.cursor.lag,  # dlt steps cursor.start_value back by this
             row_order="asc",
         ),
     ):

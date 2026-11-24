@@ -54,6 +54,9 @@ class CursorConfig:
     column: str  # source column name, exactly as in the database
     type: str  # timestamp | integer
     initial_value: str | int  # ISO-8601 for timestamp cursors, an integer for integer cursors
+    # Seconds (timestamp) or an integer delta: re-read this trailing window on every run. dlt then
+    # deduplicates nothing, so the whole window lands again each run (prototype S4, DESIGN-db.md 12).
+    lag: float | int | None = None
 
     def __post_init__(self) -> None:
         if self.type not in CURSOR_TYPES:

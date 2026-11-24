@@ -104,6 +104,12 @@ def landed(bucket: Path, table: str = "transactions") -> list[dict]:
     return [r for f in files(bucket, table) for r in pq.read_table(f).to_pylist()]
 
 
+def load(bucket: Path, result: dict, table: str = "transactions") -> list[dict]:
+    """The rows one handler run landed."""
+    [load_id] = result["load_ids"]
+    return [r for f in files(bucket, table) if f.name.startswith(f"{load_id}.") for r in pq.read_table(f).to_pylist()]
+
+
 def ids(rows: list[dict]) -> list[int]:
     return sorted(r["TransactionId"] for r in rows)
 
@@ -278,3 +284,19 @@ def test_query_table_with_a_cursor(db, bucket, invoke):
     assert pq.read_schema(f).names == ["TransactionId", "UpdatedAt", "Region", "_extracted_at"]
     assert pq.read_schema(f).field("UpdatedAt").type == pa.timestamp("us")
     assert rows[0]["UpdatedAt"] == datetime(2026, 11, 20, 8, 0)
+
+
+def test_lag_lands_a_late_commit_and_re_lands_the_lag_window_on_every_run(db, bucket, invoke):
+    """Prototype S4: with `lag`, dlt deduplicates nothing at the boundary (DESIGN-db.md 7.3, 12)."""
+    cursor = {"column": "UpdatedAt", "type": "timestamp", "initial_value": "2026-01-01T00:00:00Z", "lag": 10}
+    db.insert(*[(i, f"2026-11-20 08:00:{i * 10:02}", "JHB", i) for i in range(1, 6)])  # :10 .. :50
+    invoke(cursor=cursor)
+    db.insert(
+        (6, "2026-11-20 08:00:50", "JHB", 6),  # ties the boundary
+        (7, "2026-11-20 08:00:45", "JHB", 7),  # committed late, inside the lag window
+        (8, "2026-11-20 08:01:00", "JHB", 8),
+    )
+    r2 = invoke(cursor=cursor)
+    assert ids(load(bucket, r2)) == [4, 5, 6, 7, 8]  # window [08:00:40, ...)
+    r3 = invoke(cursor=cursor)  # no source changes
+    assert ids(load(bucket, r3)) == [5, 6, 8]  # window [08:00:50, ...) lands again
