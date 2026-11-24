@@ -27,7 +27,9 @@ import posixpath
 
 import fsspec
 
+from . import metrics
 from .config import RunRequest, SourceConfig
+from .errors import DbBronzeError
 from .pipeline import run_pipeline
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), force=True)
@@ -48,7 +50,40 @@ def load_config(event: dict) -> SourceConfig:
 def handler(event: dict, context) -> dict:
     cfg = load_config(event)
     req = RunRequest.from_event(event)
-    log.info("run start %s", json.dumps({"pipeline": cfg.pipeline_name, "mode": req.mode}))
-    result = run_pipeline(cfg, req)
-    log.info("run done %s", json.dumps(result))
+    log.info(json.dumps({"event": "run start", "pipeline": cfg.pipeline_name, "mode": req.mode}))
+    try:
+        result = run_pipeline(cfg, req)
+    except Exception as e:
+        # dlt wraps errors raised in a resource in PipelineStepFailed; surface ours as the Lambda errorType
+        known = _find_in_chain(e, DbBronzeError)
+        if known is None:
+            raise
+        _report(cfg, known)
+        if known is e:
+            raise
+        raise known from e
+    for table, count in result["rows"].items():
+        metrics.emit(
+            cfg.pipeline_name,
+            table,
+            RowsExtracted=count,
+            NullCursorRows=result.get("null_cursor_rows", {}).get(table, 0),
+        )
+    log.info(json.dumps({"event": "run done", **result}))
     return result
+
+
+def _report(cfg: SourceConfig, error: DbBronzeError) -> None:
+    log.error("run failed %s", json.dumps({"error": type(error).__name__, "message": str(error)}))
+    if error.metric:
+        metrics.emit(cfg.pipeline_name, error.table or "", **{error.metric: 1})
+
+
+def _find_in_chain(exc: BaseException, kind: type[BaseException]) -> BaseException | None:
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        if isinstance(exc, kind):
+            return exc
+        seen.add(id(exc))
+        exc = exc.__cause__ or exc.__context__
+    return None

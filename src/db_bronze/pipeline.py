@@ -18,7 +18,7 @@ from dlt.destinations import filesystem
 from .config import ConfigError, RunRequest, SourceConfig, TableConfig
 from .manifest import new_snapshot_id, write_manifest
 from .preflight import preflight, raise_on_findings
-from .source import make_engine, make_resource
+from .source import RunStats, make_engine, make_resource
 
 log = logging.getLogger(__name__)
 
@@ -101,11 +101,13 @@ def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | Non
     )
     pipe = pipe.drop()  # every invocation is a cold start: state comes from bronze
     engine = make_engine(cfg)
+    stats = RunStats()
     try:
         server, reports = preflight(cfg, tables, engine)
         raise_on_findings(server, reports)  # before anything is extracted
         resources = [
-            make_resource(cfg, tc, req, engine, run_started, r.table) for tc, r in zip(tables, reports, strict=True)
+            make_resource(cfg, tc, req, engine, run_started, r.table, stats)
+            for tc, r in zip(tables, reports, strict=True)
         ]
         info = pipe.run(resources, loader_file_format="parquet", schema=bronze_schema(cfg))
     finally:
@@ -127,6 +129,8 @@ def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | Non
         "snapshot_id": snapshot_id,
         "load_ids": load_ids,
         "rows": rows,
+        "backends": {tc.name: cfg.backend(tc) for tc in tables},
+        "null_cursor_rows": {tc.name: stats.null_cursor_rows.get(tc.name, 0) for tc in tables},
         "is_empty": not any(rows.values()),
         "started_at": run_started.isoformat(),
     }

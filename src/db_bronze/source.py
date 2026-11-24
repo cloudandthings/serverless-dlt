@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime
 
 import dlt
 import sqlalchemy as sa
 
 from .config import RunRequest, SourceConfig, TableConfig, to_source_time
+from .errors import BackendChanged
 from .extract import column_specs, naive_timestamp_columns, read_connectorx, read_pyarrow, with_extracted_at
 from .query import cursor_select, probe_columns, query_source, snapshot_select
 from .urls import connectorx_url, sqlalchemy_url
@@ -18,6 +20,13 @@ log = logging.getLogger(__name__)
 
 # A new source column lands; a type change on an existing column fails the run (section 7.2).
 SCHEMA_CONTRACT = {"tables": "evolve", "columns": "evolve", "data_type": "freeze"}
+
+
+@dataclass
+class RunStats:
+    """Counts the extraction adds up for the run's metrics."""
+
+    null_cursor_rows: dict[str, int] = field(default_factory=dict)
 
 
 def make_engine(cfg: SourceConfig) -> sa.Engine:
@@ -62,6 +71,7 @@ def make_resource(
     engine: sa.Engine,
     run_started: datetime,
     table: sa.FromClause | None = None,  # the reflection preflight already did
+    stats: RunStats | None = None,
 ):
     backend = cfg.backend(tc)
     if backend == "sqlalchemy":  # stopgap until the sqlalchemy backend lands
@@ -83,13 +93,23 @@ def make_resource(
     )
 
     def extract(stmt: sa.Select):
+        # Before anything is read: a backend change would change bronze's column types (D6).
+        # State only persists with a successful load, so "previous" is the last successful run's.
+        state = dlt.current.resource_state()
+        previous = state.get("backend")
+        if previous is not None and previous != backend:
+            raise BackendChanged(tc.name, previous, backend)
+        state["backend"] = backend
         if backend == "connectorx":
             # ConnectorX takes SQL text, so values are inlined, as dlt's own sql_table does.
             sql = str(stmt.compile(engine, compile_kwargs={"literal_binds": True}))
-            batches = read_connectorx(connectorx_url(cfg.connection), sql, specs, batch_size)
+            batches = read_connectorx(connectorx_url(cfg.connection), sql, specs, batch_size, tc.name)
         else:
             batches = read_pyarrow(engine, stmt, specs, batch_size)
         for batch in batches:
+            if stats is not None and tc.cursor is not None:
+                nulls = batch.column(tc.cursor.column).null_count
+                stats.null_cursor_rows[tc.name] = stats.null_cursor_rows.get(tc.name, 0) + nulls
             yield with_extracted_at(batch, run_started)
 
     if tc.cursor is None:  # a snapshot table: everything, every time (mode=full only)
