@@ -17,6 +17,7 @@ from dlt.destinations import filesystem
 
 from .config import ConfigError, RunRequest, SourceConfig, TableConfig
 from .manifest import new_snapshot_id, write_manifest
+from .plan import make_plan
 from .source import make_engine, make_resource
 
 log = logging.getLogger(__name__)
@@ -57,11 +58,13 @@ def check_run_start(cfg: SourceConfig, req: RunRequest, tables: tuple[TableConfi
             'connection.auth.type "kerberos" is reserved but not implemented yet; see docs/KERBEROS.md '
             'for what adding it involves, or use {"type": "password"}'
         )
+    by_cursor = req.mode in ("incremental", "backfill") or (req.mode == "plan" and req.plan == "backfill")
+    what = f"plan={req.plan}" if req.mode == "plan" else f"{req.mode!r} mode"
     for tc in tables:
-        if tc.cursor is None and req.mode != "full":
+        if tc.cursor is None and by_cursor:
             raise ConfigError(
                 f'table {tc.name} has no cursor, so it is a snapshot table; run it with "mode": "full", '
-                f'give it a cursor to run in {req.mode!r} mode, or leave it out with "tables": [...]'
+                f'give it a cursor to run in {what}, or leave it out with "tables": [...]'
             )
 
 
@@ -69,6 +72,8 @@ def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | Non
     """Run one invocation. Raises on any failure (cursor state then stays where it was)."""
     tables = cfg.tables_for(req)
     check_run_start(cfg, req, tables)
+    if req.mode == "plan":
+        return make_plan(cfg, req, tables)
     os.environ["DATA_WRITER__COMPRESSION"] = cfg.parquet_compression
 
     run_started = datetime.now(UTC)

@@ -18,7 +18,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from . import secrets
 from .extract import EXTRACTED_AT
 
-MODES = ("incremental", "full", "backfill")
+MODES = ("incremental", "full", "backfill", "plan")
+PLANS = ("snapshot", "backfill")
 BACKENDS = ("connectorx", "pyarrow", "sqlalchemy")
 # Engines ConnectorX reads (section 3.1); these default to it (D3, section 5.3). Db2 is not supported.
 CONNECTORX_DIALECTS = ("mssql", "postgres", "mysql", "oracle", "sqlite")
@@ -479,6 +480,8 @@ class RunRequest:
     tables: tuple[str, ...] | None = None  # a subset of the config's table names; None runs them all
     window_start: str | int | None = None  # backfill only, inclusive; ISO-8601 or integer, as the cursor
     window_end: str | int | None = None  # backfill only, exclusive
+    plan: str | None = None  # mode=plan: "snapshot" (pages) or "backfill" (windows)
+    page_size: int | None = None  # plan=snapshot: rows per page
 
     @property
     def partition_datetime(self) -> datetime | None:
@@ -503,7 +506,21 @@ class RunRequest:
             if not isinstance(tables, list) or not tables or not all(isinstance(n, str) for n in tables):
                 raise ConfigError(f'event "tables": expected a non-empty list of table names, got {tables!r}')
             tables = tuple(tables)
-        return cls(mode, tables=tables, window_start=start, window_end=end)
+        plan, page_size = event.get("plan"), event.get("page_size")
+        if mode == "plan":
+            if plan not in PLANS:
+                raise ConfigError(f'mode=plan needs "plan" in {PLANS}, got {plan!r}')
+            if plan == "snapshot" and not _positive_int(page_size):
+                raise ConfigError(f'plan=snapshot needs "page_size", a positive number of rows: {page_size!r}')
+        _only_with(event, ("plan", "page_size"), mode == "plan", "mode=plan")
+        return cls(mode, tables=tables, window_start=start, window_end=end, plan=plan, page_size=page_size)
+
+
+def _only_with(event: dict, keys: tuple[str, ...], allowed: bool, what: str) -> None:
+    """Reject event keys that belong to another kind of event, so a mistyped event fails instead of being ignored."""
+    given = [k for k in keys if event.get(k) is not None]
+    if given and not allowed:
+        raise ConfigError(f"event keys {given} are only valid with {what}; remove them")
 
 
 def _check_window(start: Any, end: Any) -> None:

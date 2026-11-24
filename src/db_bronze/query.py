@@ -88,3 +88,33 @@ def cursor_select(source: sa.FromClause, tc: TableConfig, start: Any, end: Any =
     if tc.where:
         stmt = stmt.where(sa.text(tc.where))
     return stmt.order_by(cursor_col)
+
+
+def paged_rows(source: sa.FromClause, tc: TableConfig, start: Any = None) -> sa.Select:
+    """What a paged snapshot reads, unordered: everything for a snapshot table, `[start, …)` for a cursor table.
+
+    A plan counts it and every page slices it, so both see the same rows. A
+    cursor table has no upper bound: the last page is open-ended anyway.
+    """
+    if tc.cursor is None:
+        return snapshot_select(source, tc)
+    return cursor_select(source, tc, start).order_by(None)
+
+
+def count_select(rows: sa.Select) -> sa.Select:
+    """`SELECT COUNT(*) FROM (<rows>)`."""
+    return sa.select(sa.func.count()).select_from(rows.subquery("counted"))
+
+
+def page_order(tc: TableConfig) -> tuple[str, ...]:
+    """The columns a page is ordered by: keyset `order_by` if set, else the primary key. Empty: not pageable."""
+    return tc.chunking.order_by or tc.primary_key
+
+
+def page_select(source: sa.FromClause, rows: sa.Select, tc: TableConfig, offset: int, limit: int | None) -> sa.Select:
+    """One page of `rows`: `ORDER BY <page_order> OFFSET :offset [FETCH :limit]`, in the dialect's own syntax.
+
+    `limit` None is the open-ended last page.
+    """
+    stmt = rows.order_by(*(source.c[c] for c in page_order(tc))).offset(offset)
+    return stmt.limit(limit) if limit is not None else stmt
