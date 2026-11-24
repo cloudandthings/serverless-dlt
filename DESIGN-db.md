@@ -5,6 +5,8 @@ and S5 answered by prototype on 24 November 2026 (branch
 `prototype/db-bronze-spikes`, `src/db_bronze/PROTOTYPE_spikes/FINDINGS.md`) and
 folded in below. S1 (server side), S2, S3 and S9 answered for Postgres and MySQL
 by the integration suite (`tests/integration/`, ticket 13) on 24 November 2026.
+Ticket 14 ran the full scenario suite on Postgres and MySQL, on the host and in the
+image, settled their deny lists and took a first peak-memory reading (S7).
 
 This is the database counterpart of `api_bronze` (see `DESIGN-api.md`). It records
 the requirement, the facts that constrain the design, every decision taken and
@@ -492,7 +494,10 @@ Runtime Interface Emulator on the compose network, with the buckets in a folder
 mounted at the same path, and a failed invocation raises an exception named after
 the Lambda `errorType`. Tests that only exercise the host (the spikes, the
 ConnectorX ground truth of the type matrix) run unchanged. The session prints the
-peak memory of the run.
+peak memory of the run. On an arm64 host the amd64 image runs under QEMU, where the
+emulator (a Go binary) crashes every 20 to 30 invocations; the harness mounts the
+arm64 emulator from the arm64 variant of the same AWS base image instead, which
+runs natively, so only the handler itself is emulated.
 
 ### 10.1 Landed types (*integration*, 24 Nov 2026)
 
@@ -567,7 +572,7 @@ on every decimal, which is why a backend change fails with `BackendChanged`
 | S4 | Do dlt incremental `lag` and boundary deduplication by `primary_key` work with Arrow items from a custom resource? | **Answered (prototype):** deduplication works without `lag`. With `lag`, dlt deduplicates nothing, so the lag window is re-landed on every run. Decision: bronze accepts it and silver removes the duplicates (sections 7.3, 12). |
 | S5 | Do `direct` naming and `data_type: freeze` apply to Arrow items as expected? | **Answered (prototype):** yes, and freeze also catches decimal precision changes, which led to revising D6. Naive timestamps need `timezone: false` hints (section 7.2). |
 | S6 | Do Instant Client (Basic) and `libaio` work on AL2023? Can thick-mode oracledb and ConnectorX share `libclntsh` in one process? | Pin an Instant Client version known to work; isolate Oracle in its own image. **First part answered (image smoke test, 24 Nov 2026, linux/amd64 under emulation):** Instant Client Basic 23.26.4.0.0 with `libaio-0.3.111` (AL2023 package) loads. In one process, oracledb 26.1.0 enters thick mode (client 23.26.4) and ConnectorX 0.4.6 then loads `libclntsh` too: an Oracle connection to a closed port fails with `ORA-12541` from OCI, not `DPI-1047`. Same image: unixODBC 2.3.9 (AL2023) with msodbcsql18 18.7.1.1 from the RHEL 9 repo, listed by `pyodbc.drivers()`; ibm_db 3.3.0 imports once `pam` is installed. Still open: both libraries against a real Oracle server in the same process (ticket 16). |
-| S7 | What is peak memory for the largest real table under ConnectorX streaming? | Smaller `batch_size`, keyset chunking, or more Lambda memory. |
+| S7 | What is peak memory for the largest real table under ConnectorX streaming? | Smaller `batch_size`, keyset chunking, or more Lambda memory. **First input (integration, 24 Nov 2026):** the whole Postgres and MySQL scenario suite (tables of tens of rows, so this is the fixed cost of a run, not the data) peaks at **588 MiB** for the image container across the session (cgroup `memory.peak`: emulator plus the warm Python runtime, amd64 under QEMU, where jemalloc cannot return memory, so an overestimate) and **254 MiB** RSS for the host pytest process running the handler in-process. A 1 GB function has room for the fixed cost; the per-table figure still needs a run on the largest real table. |
 | S8 | Is egress to packages.microsoft.com and the Oracle download host allowed from the build pipeline? | Internal mirrors through the build arguments. |
 | S9 | What are the per-dialect minimum server versions? | **Answered for Postgres and MySQL (integration):** the whole integration suite passes on Postgres 11.16, 12.22 and 17.12, and on MySQL 8.0.46 and 8.4.13. Preflight minimums: Postgres 11, MySQL 8.0. Older series were not run (Postgres 10 and MySQL 5.7 are long out of vendor support). |
 

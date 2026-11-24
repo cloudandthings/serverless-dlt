@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
 import resource
 import socket
@@ -273,12 +274,11 @@ class LambdaImage:
             ["docker", "inspect", "-f", "{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}", container],
             check=True, capture_output=True, text=True,
         ).stdout.split()[0]
+        self.ready = False  # the emulator has answered once
         self.container = subprocess.run(
             ["docker", "run", "-d", "--platform", "linux/amd64", "--network", network,
              "-p", f"127.0.0.1:{self.port}:8080", "-v", f"{self.shared}:{self.shared}",
-             "-e", "AWS_LAMBDA_FUNCTION_TIMEOUT=900",
-             # the emulator is a Go binary; under QEMU Go's async preemption intermittently crashes it
-             "-e", "GODEBUG=asyncpreemptoff=1", image],
+             "-e", "AWS_LAMBDA_FUNCTION_TIMEOUT=900", *_native_emulator(self.shared.parent), image],
             check=True, capture_output=True, text=True,
         ).stdout.strip()
 
@@ -293,13 +293,25 @@ class LambdaImage:
                 with urllib.request.urlopen(request, timeout=900) as response:
                     result = json.loads(response.read() or b"null")
                 break
-            except OSError:
-                if attempt == 239:
+            except OSError as e:
+                if not self.running():
+                    logs = subprocess.run(["docker", "logs", self.container], capture_output=True, text=True)
+                    lines = (logs.stdout + logs.stderr).splitlines()
+                    fatal = [line for line in lines if line.startswith(("fatal error", "panic:", "SIG"))]
+                    invokes = sum("INVOKE RTDONE" in line for line in lines)
+                    raise RuntimeError(f"the Lambda container died after {invokes} invocations: {fatal}") from e
+                if self.ready or attempt == 239:  # only retry while the emulator starts listening
                     raise
                 time.sleep(0.5)
+        self.ready = True
         if isinstance(result, dict) and "errorType" in result and "errorMessage" in result:
             raise type(result["errorType"], (Exception,), {})(result["errorMessage"])
         return result
+
+    def running(self) -> bool:
+        state = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", self.container],
+                               capture_output=True, text=True)
+        return state.stdout.strip() == "true"
 
     def peak_memory(self) -> int | None:
         """The container's peak memory (cgroup v2 memory.peak, or v1), in bytes."""
@@ -311,6 +323,31 @@ class LambdaImage:
 
     def stop(self) -> None:
         subprocess.run(["docker", "rm", "-f", self.container], capture_output=True)
+
+
+def _native_emulator(cache: Path) -> list[str]:
+    """`docker run` arguments that swap in the host's own build of the emulator on an arm64 host.
+
+    The image is amd64 only, so on an arm64 host it runs under QEMU. The emulator is a Go
+    binary, and under QEMU the Go runtime crashes every few dozen invocations ("found pointer
+    to free object", "unexpected signal"), which a whole suite cannot survive. An arm64 binary
+    runs natively even inside an amd64 container, so the emulator comes from the arm64 variant
+    of the same AWS base image (docker/Dockerfile.db); only the handler runs under QEMU.
+    """
+    if platform.machine().lower() not in ("arm64", "aarch64"):
+        return []
+    rie = cache / "rie" / "aws-lambda-rie-arm64"
+    if not rie.exists():
+        rie.parent.mkdir(parents=True, exist_ok=True)
+        base = "public.ecr.aws/lambda/python:3.12"
+        container = subprocess.run(["docker", "create", "--platform", "linux/arm64", base],
+                                   check=True, capture_output=True, text=True).stdout.strip()
+        try:
+            subprocess.run(["docker", "cp", f"{container}:/usr/local/bin/aws-lambda-rie", str(rie)],
+                           check=True, capture_output=True)
+        finally:
+            subprocess.run(["docker", "rm", container], capture_output=True)
+    return ["-v", f"{rie}:/usr/local/bin/aws-lambda-rie:ro"]
 
 
 def _compose(*args: str) -> str:
