@@ -17,10 +17,10 @@ import pytest
 import sqlalchemy as sa
 
 from db_bronze import ConfigError
-from db_bronze.config import SourceConfig
+from db_bronze.config import CursorConfig, SourceConfig, TableConfig
 from db_bronze.extract import ColumnSpec, read_pyarrow
 from db_bronze.preflight import MIN_SERVER_VERSION
-from db_bronze.query import literal_sql
+from db_bronze.query import cursor_select, literal_sql
 from db_bronze.urls import connectorx_url
 
 pytestmark = pytest.mark.integration
@@ -187,6 +187,51 @@ def test_a_time_zone_aware_literal_round_trips_on_postgres(source):
     bound = datetime(2026, 11, 20, 8, 0, 0, 123456, tzinfo=ZoneInfo("Africa/Johannesburg"))  # 06:00 UTC
     sql = literal_sql(sa.select(table.c.id).where(table.c.at >= bound), source.sa.dialect)
     assert cx.read_sql(cx_url(source), sql, return_type="arrow").column("id").to_pylist() == [2]
+
+
+# column type: (stored values, cursor window [start, end), the ids the bound query selects)
+MSSQL_TIMESTAMPS = {
+    # DATETIME counts in 1/300 s: .127 is .12666..., so it is inside a window ending at .126999
+    "datetime": (["2026-11-20 07:59:59.997", "2026-11-20 08:00:00.123", "2026-11-20 08:00:00.127"],
+                 (datetime(2026, 11, 20, 8, 0, 0, 123000), datetime(2026, 11, 20, 8, 0, 0, 126999)), [2, 3]),
+    "smalldatetime": (["2026-11-20 07:59", "2026-11-20 08:00", "2026-11-20 08:01"],
+                      (datetime(2026, 11, 20, 7, 59, 30, 1), datetime(2026, 11, 20, 8, 0, 30, 123456)), [2]),
+    "datetime2(7)": (["2026-11-20 08:00:00.1234560", "2026-11-20 08:00:00.1234565", "2026-11-20 08:00:00.1234570"],
+                     (datetime(2026, 11, 20, 8, 0, 0, 123456), datetime(2026, 11, 20, 8, 0, 0, 123457)), [1, 2]),
+    "datetimeoffset": (["2026-11-20 08:00:00.123455+02:00", "2026-11-20 06:00:00.123456+00:00",
+                        "2026-11-20 08:00:00.123457+02:00"],
+                       (datetime(2026, 11, 20, 6, 0, 0, 123456, tzinfo=ZoneInfo("UTC")),
+                        datetime(2026, 11, 20, 8, 0, 0, 123457, tzinfo=ZoneInfo("Africa/Johannesburg"))), [2]),
+}
+
+
+@pytest.mark.parametrize("column_type", MSSQL_TIMESTAMPS)
+def test_a_cursor_window_inlined_for_connectorx_selects_what_the_bound_one_does_on_sql_server(source, column_type):
+    """SQL Server converts a text literal to the column's type, and DATETIME takes 3 decimals at most (S2).
+
+    The cursor query inlines its bounds as DATETIME2 (DATETIMEOFFSET with an
+    offset), so a microsecond bound works against every timestamp type.
+    """
+    if source.dialect != "mssql":
+        pytest.skip("SQL Server's timestamp types")
+    values, (start, end), expected = MSSQL_TIMESTAMPS[column_type]
+    source.execute(
+        f"CREATE TABLE ts (id integer PRIMARY KEY, at {column_type})",
+        *(f"INSERT INTO ts VALUES ({i}, '{v}')" for i, v in enumerate(values, 1)),
+    )
+    table = sa.Table("ts", sa.MetaData(), autoload_with=source.sa)
+    cursor = CursorConfig(column="at", type="timestamp", initial_value="2026-01-01")
+    tc = TableConfig(name="ts", table="ts", cursor=cursor)
+    stmt = cursor_select(table, tc, start, end)
+    with source.sa.connect() as conn:
+        bound = list(conn.execute(stmt).scalars())
+    inlined = cx.read_sql(cx_url(source), literal_sql(stmt, source.sa.dialect), return_type="arrow").column("id")
+    assert bound == expected
+    assert inlined.to_pylist() == bound
+    if column_type == "datetime":  # why: the plain SQLAlchemy literal does not even run against DATETIME
+        plain = sa.select(table.c.id).where(table.c.at >= start)
+        with pytest.raises(RuntimeError, match="Conversion failed when converting date and/or time"):
+            cx.read_sql(cx_url(source), literal_sql(plain, source.sa.dialect), return_type="arrow")
 
 
 def test_connectorx_drops_digits_of_an_unconstrained_postgres_numeric(source):
