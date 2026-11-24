@@ -82,6 +82,7 @@ def make_resource(
     req: RunRequest,
     engine: sa.Engine,
     run_started: datetime,
+    table: sa.FromClause | None = None,  # the reflection preflight already did
     stats: RunStats | None = None,
 ):
     backend = cfg.backend(tc)
@@ -89,7 +90,7 @@ def make_resource(
         raise NotImplementedError(
             f'table {tc.name}: backend "sqlalchemy" is not implemented yet; set "backend": "pyarrow"'
         )
-    table = reflect(engine, tc)
+    table = table if table is not None else reflect(engine, tc)
     specs = column_specs(table)
     if tc.partition:
         _check_partition_column(tc, table)

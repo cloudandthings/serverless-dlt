@@ -348,7 +348,7 @@ def test_connectorx_decimal_38_10_and_naive_timestamp_land_unchanged(db, bucket,
     # what ConnectorX returns for a decimal(38,10) column on a server engine (section 3.1).
     import connectorx
 
-    db.execute('ALTER TABLE "Transactions" ADD COLUMN "Balance" DECIMAL(38,10)')
+    db.execute('ALTER TABLE "Transactions" ADD COLUMN "Balance" DECIMAL(28,10)')
     balance = Decimal("123456789012345678.0123456789")
     batch = pa.RecordBatch.from_pydict(
         {
