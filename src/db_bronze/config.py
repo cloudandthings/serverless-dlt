@@ -79,7 +79,6 @@ class CursorConfig:
             raise ConfigError(f"cursor.initial_value is not ISO-8601: {self.initial_value!r}") from e
         return dt.astimezone(UTC).replace(tzinfo=None) if dt.tzinfo else dt
 
-
     def bound(self, value: str | int, what: str) -> datetime | int:
         """An event window bound in source terms: an integer, or an ISO timestamp as naive UTC."""
         if self.type == "integer":
@@ -87,7 +86,9 @@ class CursorConfig:
                 raise ConfigError(f"{what} must be an integer for the integer cursor {self.column!r}: {value!r}")
             return value
         if not isinstance(value, str):
-            raise ConfigError(f"{what} must be an ISO-8601 timestamp for the timestamp cursor {self.column!r}: {value!r}")
+            raise ConfigError(
+                f"{what} must be an ISO-8601 timestamp for the timestamp cursor {self.column!r}: {value!r}"
+            )
         dt = parse_iso(value, what)
         return dt.astimezone(UTC).replace(tzinfo=None) if dt.tzinfo else dt
 

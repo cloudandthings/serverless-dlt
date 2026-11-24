@@ -2,6 +2,11 @@
 
 Event:
     {"source_id": "core_banking"}           incremental (default)
+    {"source_id": ..., "mode": "full"}      [initial_value, run start); snapshot tables in full;
+                                            writes _manifests/<name>/<snapshot_id>.json on success
+    {"source_id": ..., "mode": "backfill", "window_start": ..., "window_end": ...}
+                                            [start, end), ISO-8601 or integer to match the cursor
+    "tables": [...]                         on any event: run only these tables
     {"config": {...}}                       inline config (tests, ad hoc)
 
 Config lookup when `source_id` is given: `${CONFIG_URI}/${source_id}.json`, where
