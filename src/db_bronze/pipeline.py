@@ -6,6 +6,7 @@ dropped and state is restored from bronze, as in `api_bronze`.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import UTC, datetime
@@ -71,6 +72,33 @@ def check_run_start(cfg: SourceConfig, req: RunRequest, tables: tuple[TableConfi
             )
 
 
+def time_budget(cfg: SourceConfig, req: RunRequest, tc: TableConfig, max_time_s: float | None) -> float | None:
+    """The seconds `tc` may spend extracting this run, or None for no limit (section 7.4).
+
+    Incremental only. The smaller of the caller's budget and `cfg.max_time_s`
+    wins. A ConnectorX stream table is never split-loaded: dropping its stream
+    leaves the query running with the connection open (prototype S1). Validation
+    keeps `max_time_s` away from such tables, so only the caller's budget is
+    skipped here, and that is logged.
+    """
+    limits = [x for x in (max_time_s, cfg.max_time_s) if x is not None]
+    if not limits or req.mode != "incremental":
+        return None
+    if cfg.backend(tc) == "connectorx" and tc.chunking.strategy == "stream":
+        log.warning(
+            json.dumps(
+                {
+                    "event": "time budget skipped",
+                    "table": tc.name,
+                    "reason": "a ConnectorX stream cannot be stopped early without leaving its query running; "
+                    'use "chunking": {"strategy": "keyset", ...} to split-load this table',
+                }
+            ),
+        )
+        return None
+    return min(limits)
+
+
 def validate(cfg: SourceConfig, req: RunRequest) -> dict[str, Any]:
     """`mode=validate`: the preflight for every table, and a report. Extracts and writes nothing."""
     tables = cfg.tables_for(req)
@@ -89,8 +117,16 @@ def validate(cfg: SourceConfig, req: RunRequest) -> dict[str, Any]:
     }
 
 
-def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | None = None) -> dict[str, Any]:
-    """Run one invocation. Raises on any failure (cursor state then stays where it was)."""
+def run_pipeline(
+    cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | None = None, max_time_s: float | None = None
+) -> dict[str, Any]:
+    """Run one invocation. Raises on any failure (cursor state then stays where it was).
+
+    `max_time_s` is the caller's time budget (the handler derives it from
+    Lambda's remaining time); see `time_budget`. `time_limited` in the result
+    says a budget applied to at least one table: callers loop while `is_empty`
+    is false.
+    """
     if req.mode == "validate":
         return validate(cfg, req)
     tables = cfg.tables_for(req)
@@ -110,8 +146,9 @@ def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | Non
     try:
         server, reports = preflight(cfg, tables, engine)
         raise_on_findings(server, reports)  # before anything is extracted
+        budgets = {tc.name: time_budget(cfg, req, tc, max_time_s) for tc in tables}
         resources = [
-            make_resource(cfg, tc, req, engine, run_started, r.table, stats)
+            make_resource(cfg, tc, req, engine, run_started, r.table, stats, max_time_s=budgets[tc.name])
             for tc, r in zip(tables, reports, strict=True)
         ]
         info = pipe.run(resources, loader_file_format="parquet", schema=bronze_schema(cfg))
@@ -137,5 +174,6 @@ def run_pipeline(cfg: SourceConfig, req: RunRequest, *, pipelines_dir: str | Non
         "backends": {tc.name: cfg.backend(tc) for tc in tables},
         "null_cursor_rows": {tc.name: stats.null_cursor_rows.get(tc.name, 0) for tc in tables},
         "is_empty": not any(rows.values()),
+        "time_limited": any(b is not None for b in budgets.values()),
         "started_at": run_started.isoformat(),
     }

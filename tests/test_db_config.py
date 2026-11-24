@@ -172,6 +172,7 @@ def keyset(**chunking) -> dict:
         ({"chunking": keyset(), "primary_key": []}, 'set "primary_key"'),
         ({"chunking": keyset(page_size=None)}, 'set "page_size"'),
         ({"chunking": keyset(page_size=0)}, 'set "page_size"'),
+        ({"chunking": keyset(), "columns": ["UpdatedAt", "Amount"]}, 'add ["TransactionId"] to "columns"'),
         ({"chunking": {"strategy": "pages"}}, "chunking.strategy 'pages' not in"),
         ({"chunking": {"strategy": "stream", "page_size": 10}}, "remove them or use keyset"),
     ],
@@ -365,3 +366,19 @@ def test_every_connection_field_may_be_a_secret_reference():
 )
 def test_top_level_values(changes, match):
     assert match in rejected(config(backend="pyarrow") | changes)
+
+
+@pytest.mark.parametrize("where", ["table", "defaults", "dialect"])
+def test_max_time_s_with_a_connectorx_stream_table_is_rejected_with_the_fix(where):
+    backend = {"table": {"backend": "connectorx"}, "defaults": {}, "dialect": {}}[where]
+    defaults = {"backend": "connectorx"} if where == "defaults" else None
+    cfg = config("postgres", defaults=defaults, **backend) | {"max_time_s": 600}
+    message = rejected(cfg)
+    assert "max_time_s" in message and "transactions" in message
+    assert '"strategy": "keyset"' in message
+
+
+@pytest.mark.parametrize("table", [{"backend": "pyarrow"}, {"chunking": keyset()}])
+def test_max_time_s_with_a_keyset_or_traditional_stream_table_loads(table):
+    cfg = SourceConfig.from_dict(config("postgres", **table) | {"max_time_s": 600})
+    assert cfg.max_time_s == 600

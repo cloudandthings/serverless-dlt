@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -13,7 +14,7 @@ import sqlalchemy as sa
 from .config import RunRequest, SourceConfig, TableConfig, to_source_time
 from .errors import BackendChanged, PreflightError
 from .extract import column_specs, naive_timestamp_columns, read_connectorx, read_pyarrow, with_extracted_at
-from .query import cursor_select, probe_columns, query_source, snapshot_select
+from .query import cursor_select, keyset_select, probe_columns, query_source, snapshot_select
 from .urls import connectorx_url, sqlalchemy_url
 
 log = logging.getLogger(__name__)
@@ -84,7 +85,14 @@ def make_resource(
     run_started: datetime,
     table: sa.FromClause | None = None,  # the reflection preflight already did
     stats: RunStats | None = None,
+    max_time_s: float | None = None,
 ):
+    """The table's dlt resource. `max_time_s` bounds extraction (split loading, section 7.4).
+
+    A keyset table checks the deadline itself, between pages; a stream table is
+    cut by dlt's `add_limit(max_time=...)`. The caller never passes a budget for
+    a ConnectorX stream table: cutting that stream short leaves its query running.
+    """
     backend = cfg.backend(tc)
     if backend == "sqlalchemy":  # stopgap until the sqlalchemy backend lands
         raise NotImplementedError(
@@ -155,6 +163,35 @@ def make_resource(
             on_cursor_value_missing="include" if tc.cursor.include_null_cursor else "raise",
         ),
     ):
-        yield from extract(cursor_select(table, tc, cursor.start_value, cursor.end_value))
+        if tc.chunking.strategy == "keyset":
+            yield from keyset_pages(cursor.start_value, cursor.end_value, cursor.last_value)
+        else:
+            yield from extract(cursor_select(table, tc, cursor.start_value, cursor.end_value))
 
+    def keyset_pages(start, end, landed_up_to):
+        """Page after page, each seeded by the last row of the one before; a short page is the last (7.4).
+
+        The deadline is checked between pages only, so no query is ever left
+        running. A page whose last cursor value is not past `landed_up_to` (the
+        cursor in state) may hold only rows dlt drops as already landed, so the
+        read never stops there: every run that stops early has landed new rows.
+        """
+        deadline = time.monotonic() + max_time_s if max_time_s is not None else None
+        after = None
+        while True:
+            count, last = 0, None
+            for batch in extract(keyset_select(table, tc, start, end, after)):
+                count += batch.num_rows
+                last = batch if batch.num_rows else last
+                yield batch
+            if count < tc.chunking.page_size:
+                return
+            after = tuple(last.column(name)[last.num_rows - 1].as_py() for name in tc.chunking.order_by)
+            past_landed = landed_up_to is None or after[0] > landed_up_to
+            if deadline is not None and past_landed and time.monotonic() >= deadline:
+                log.info(json.dumps({"event": "time budget reached", "table": tc.name, "stopped": "between pages"}))
+                return
+
+    if max_time_s is not None and tc.chunking.strategy == "stream":
+        return rows.add_limit(max_time=max_time_s)
     return rows
