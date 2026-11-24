@@ -10,6 +10,7 @@ import sqlalchemy as sa
 
 from .config import SourceConfig, TableConfig
 from .extract import column_specs, naive_timestamp_columns, read_pyarrow, with_extracted_at
+from .urls import sqlalchemy_url
 
 log = logging.getLogger(__name__)
 
@@ -18,7 +19,9 @@ SCHEMA_CONTRACT = {"tables": "evolve", "columns": "evolve", "data_type": "freeze
 
 
 def make_engine(cfg: SourceConfig) -> sa.Engine:
-    return sa.create_engine(sa.URL.create("sqlite", database=cfg.connection.path))
+    """The SQLAlchemy engine: reflection, and extraction on the traditional backends."""
+    options = {"isolation_level": cfg.connection.isolation_level} if cfg.connection.isolation_level else {}
+    return sa.create_engine(sqlalchemy_url(cfg.connection), **options)
 
 
 def reflect(engine: sa.Engine, tc: TableConfig) -> sa.Table:

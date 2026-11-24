@@ -14,7 +14,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.mssql.pyodbc import MSDialect_pyodbc
 
 from db_bronze import secrets as db_secrets
-from db_bronze.config import ConfigError, ConnectionConfig
+from db_bronze.config import ConfigError, ConnectionConfig, SourceConfig
 from db_bronze.urls import connectorx_url, sqlalchemy_url
 
 USER = {"username": "ingest", "password": "s3cret"}
@@ -209,3 +209,25 @@ def test_a_missing_environment_variable_names_it(monkeypatch):
     monkeypatch.delenv("CORE_DB_USER", raising=False)
     with pytest.raises(KeyError, match="CORE_DB_USER"):
         sqlalchemy_url(conn(**SERVER["postgres"], username={"env": "CORE_DB_USER"}))
+
+
+@pytest.mark.parametrize("level", [None, "READ UNCOMMITTED"])
+def test_the_traditional_engine_applies_the_isolation_level(tmp_path, level):
+    from db_bronze.source import make_engine
+
+    connection = {"dialect": "sqlite", "path": str(tmp_path / "x.sqlite"), "isolation_level": level}
+    cfg = SourceConfig.from_dict(
+        {
+            "pipeline_name": "p",
+            "dataset_name": "d",
+            "bucket_url": "file:///tmp/unused",
+            "connection": {k: v for k, v in connection.items() if v},
+            "tables": [{"name": "t", "table": "T", "backend": "pyarrow"}],
+        }
+    )
+    engine = make_engine(cfg)
+    try:
+        with engine.connect() as c:
+            assert c.get_isolation_level() == (level or "SERIALIZABLE")  # SERIALIZABLE: SQLite's default
+    finally:
+        engine.dispose()
