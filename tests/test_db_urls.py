@@ -5,12 +5,15 @@ Offline: URLs are built and, for MSSQL, turned into the ODBC connection string, 
 
 from __future__ import annotations
 
+import json
+import sys
 from urllib.parse import unquote, urlsplit
 
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.dialects.mssql.pyodbc import MSDialect_pyodbc
 
+from db_bronze import secrets as db_secrets
 from db_bronze.config import ConfigError, ConnectionConfig
 from db_bronze.urls import connectorx_url, sqlalchemy_url
 
@@ -140,3 +143,69 @@ def test_driver_options_are_translated_for_connectorx_where_it_has_them(dialect,
 def test_there_is_no_connectorx_url_for_engines_it_does_not_read(fields):
     with pytest.raises(ConfigError, match=r'ConnectorX does not support .* set "backend": "pyarrow"'):
         connectorx_url(conn(**fields))
+
+
+class FakeSecretsManager:
+    """Stands in for boto3's Secrets Manager client: the AWS boundary."""
+
+    def __init__(self, secrets: dict[str, str]) -> None:
+        self.secrets = secrets
+
+    def client(self, service: str):
+        assert service == "secretsmanager"
+        return self
+
+    def get_secret_value(self, SecretId: str) -> dict:  # boto3 spelling
+        return {"SecretString": self.secrets[SecretId]}
+
+
+@pytest.fixture
+def aws_secrets(monkeypatch):
+    def install(secrets: dict[str, str]) -> None:
+        monkeypatch.setitem(sys.modules, "boto3", FakeSecretsManager(secrets))
+
+    db_secrets.clear_cache()
+    yield install
+    db_secrets.clear_cache()
+
+
+REFS = {
+    "username": {"env": "CORE_DB_USER"},
+    "password": {"secret_id": "ingest/core", "key": "password"},
+    "host": {"secret_id": "ingest/core_host"},
+    "port": {"env": "CORE_DB_PORT"},
+}
+
+
+@pytest.fixture
+def referenced(monkeypatch, aws_secrets):
+    monkeypatch.setenv("CORE_DB_USER", "ingest")
+    monkeypatch.setenv("CORE_DB_PORT", "5433")
+    aws_secrets({"ingest/core": json.dumps({"password": SPECIAL}), "ingest/core_host": "pg01.corp"})
+
+
+def test_secret_references_resolve_in_the_sqlalchemy_url(referenced):
+    url = sqlalchemy_url(conn(dialect="postgres", database="core", **REFS))
+    assert (url.username, url.password, url.host, url.port) == ("ingest", SPECIAL, "pg01.corp", 5433)
+
+
+def test_secret_references_resolve_in_the_connectorx_url(referenced):
+    url = urlsplit(connectorx_url(conn(dialect="postgres", database="core", **REFS)))
+    assert (unquote(url.username), unquote(url.password), url.hostname, url.port) == (
+        "ingest",
+        SPECIAL,
+        "pg01.corp",
+        5433,
+    )
+
+
+def test_a_secret_reference_in_driver_options_resolves(monkeypatch):
+    monkeypatch.setenv("SSL_MODE", "verify-full")
+    url = sqlalchemy_url(conn(**SERVER["postgres"], driver_options={"sslmode": {"env": "SSL_MODE"}}))
+    assert url.query == {"sslmode": "verify-full"}
+
+
+def test_a_missing_environment_variable_names_it(monkeypatch):
+    monkeypatch.delenv("CORE_DB_USER", raising=False)
+    with pytest.raises(KeyError, match="CORE_DB_USER"):
+        sqlalchemy_url(conn(**SERVER["postgres"], username={"env": "CORE_DB_USER"}))
