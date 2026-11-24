@@ -9,7 +9,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import mssql, mysql, oracle, postgresql, sqlite
 
 from db_bronze.config import CursorConfig, TableConfig, to_source_time
-from db_bronze.query import cursor_select, query_source
+from db_bronze.query import cursor_select, literal_sql, page_select, paged_rows, query_source
 
 DIALECTS = {
     "sqlite": sqlite.dialect(),
@@ -120,3 +120,29 @@ def test_window_is_half_open():
 )
 def test_bounds_with_an_offset_convert_to_naive_source_time(value, naive_timezone, expected):
     assert to_source_time(datetime.fromisoformat(value), naive_timezone) == expected
+
+
+PAGE_SYNTAX = {  # each dialect's own row-limit syntax for OFFSET 400 [and 100 rows]
+    "sqlite": ("LIMIT 100 OFFSET 400", "LIMIT -1 OFFSET 400"),
+    "postgresql": ("LIMIT 100 OFFSET 400", "LIMIT ALL OFFSET 400"),
+    "mysql": ("LIMIT 400, 100", "LIMIT 400, 18446744073709551615"),
+    "mssql": ("mssql_rn > 400 AND mssql_rn <= 100 + 400", "mssql_rn > 400"),
+    "oracle": ("OFFSET 400 ROWS FETCH FIRST 100 ROWS ONLY", "OFFSET 400 ROWS"),
+}
+
+
+@pytest.mark.parametrize("dialect", PAGE_SYNTAX)
+def test_page_queries_compile_offline_with_the_dialects_row_limit_ordered_by_the_primary_key(dialect):
+    d = DIALECTS[dialect]
+    tc = table_config(primary_key=("TransactionId",))
+    rows = paged_rows(transactions(), tc, START)
+    for limit, syntax in zip((100, None), PAGE_SYNTAX[dialect], strict=True):
+        sql = " ".join(literal_sql(page_select(transactions(), rows, tc, 400, limit), d).split())
+        assert "ORDER BY" in sql and "TransactionId" in sql.split("ORDER BY")[1]
+        assert syntax in sql
+
+
+def test_db2_page_query_compiles_offline():
+    tc = table_config(primary_key=("TransactionId",))
+    stmt = page_select(transactions(), paged_rows(transactions(), tc, START), tc, 400, 100)
+    assert "ORDER BY" in str(stmt.compile(dialect=db2_dialect()))
