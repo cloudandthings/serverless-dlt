@@ -9,7 +9,7 @@ import dlt
 import sqlalchemy as sa
 
 from .config import SourceConfig, TableConfig
-from .extract import arrow_types, naive_timestamp_columns, read_pyarrow, with_extracted_at
+from .extract import column_specs, naive_timestamp_columns, read_pyarrow, with_extracted_at
 
 log = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ def reflect(engine: sa.Engine, tc: TableConfig) -> sa.Table:
 
 def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_started: datetime):
     table = reflect(engine, tc)
-    types = arrow_types(table)
+    specs = column_specs(table)
     batch_size = cfg.batch_size(tc)
     # Without this hint dlt labels naive timestamps UTC without shifting them (prototype S5).
     hints = {name: {"timezone": False} for name in naive_timestamp_columns(table)}
@@ -52,7 +52,7 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_sta
         ),
     ):
         stmt = sa.select(table).where(cursor_col >= cursor.start_value).order_by(cursor_col)
-        for batch in read_pyarrow(engine, stmt, types, batch_size):
+        for batch in read_pyarrow(engine, stmt, specs, batch_size):
             yield with_extracted_at(batch, run_started)
 
     return rows

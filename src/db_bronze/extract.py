@@ -8,6 +8,7 @@ the same on every run and in every batch (D2).
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import datetime
 
 import pyarrow as pa
@@ -47,8 +48,16 @@ def arrow_type(col_type: sa.types.TypeEngine) -> pa.DataType | None:
     return None
 
 
-def arrow_types(table: sa.Table) -> dict[str, pa.DataType | None]:
-    return {c.name: arrow_type(c.type) for c in table.columns}
+@dataclass(frozen=True)
+class ColumnSpec:
+    """What reflection says about one column: its Arrow type (None: infer) and nullability."""
+
+    type: pa.DataType | None
+    nullable: bool
+
+
+def column_specs(table: sa.Table) -> dict[str, ColumnSpec]:
+    return {c.name: ColumnSpec(arrow_type(c.type), bool(c.nullable)) for c in table.columns}
 
 
 def naive_timestamp_columns(table: sa.Table) -> list[str]:
@@ -57,16 +66,20 @@ def naive_timestamp_columns(table: sa.Table) -> list[str]:
 
 
 def read_pyarrow(
-    engine: sa.Engine, stmt: sa.Select, types: dict[str, pa.DataType | None], batch_size: int
+    engine: sa.Engine, stmt: sa.Select, specs: dict[str, ColumnSpec], batch_size: int
 ) -> Iterator[pa.RecordBatch]:
     """Stream `stmt` and yield one RecordBatch per `batch_size` rows."""
     with engine.connect() as conn:
         result = conn.execution_options(stream_results=True, yield_per=batch_size).execute(stmt)
         names = list(result.keys())
         for rows in result.partitions():
-            columns = list(zip(*rows, strict=True))
-            arrays = [pa.array(values, type=types.get(name)) for name, values in zip(names, columns, strict=True)]
-            yield pa.RecordBatch.from_arrays(arrays, names=names)
+            arrays, fields = [], []
+            for name, values in zip(names, zip(*rows, strict=True), strict=True):
+                spec = specs[name]
+                array = pa.array(values, type=spec.type)
+                arrays.append(array)
+                fields.append(pa.field(name, array.type, nullable=spec.nullable))
+            yield pa.RecordBatch.from_arrays(arrays, schema=pa.schema(fields))
 
 
 def with_extracted_at(batch: pa.RecordBatch, extracted_at: datetime) -> pa.RecordBatch:

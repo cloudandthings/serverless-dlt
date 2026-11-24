@@ -213,3 +213,12 @@ def test_integer_cursor(db, bucket, invoke):
     db.insert((4, "2026-11-20 08:00:00", "JHB", 4))
     invoke(cursor=cursor)
     assert ids(landed(bucket)) == [2, 3, 4]
+
+
+def test_nullability_comes_from_reflection(db, bucket, invoke):
+    db.insert((1, "2026-11-20 08:00:00", None, 100))
+    invoke()
+    [f] = files(bucket)
+    schema = pq.read_schema(f)
+    assert not schema.field("TransactionId").nullable and not schema.field("UpdatedAt").nullable
+    assert schema.field("Branch Code").nullable and schema.field("amountCents").nullable
