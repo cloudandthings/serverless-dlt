@@ -378,7 +378,32 @@ def test_max_time_s_with_a_connectorx_stream_table_is_rejected_with_the_fix(wher
     assert '"strategy": "keyset"' in message
 
 
+def test_max_time_s_with_a_mysql_traditional_stream_table_is_rejected_with_the_fix():
+    # PyMySQL's streaming cursor drains the rest of the result when closed: the query runs to the end (S1).
+    message = rejected(config("mysql", backend="pyarrow") | {"max_time_s": 600})
+    assert "max_time_s" in message and "transactions" in message and "MySQL" in message
+    assert '"strategy": "keyset"' in message
+
+
 @pytest.mark.parametrize("table", [{"backend": "pyarrow"}, {"chunking": keyset()}])
 def test_max_time_s_with_a_keyset_or_traditional_stream_table_loads(table):
     cfg = SourceConfig.from_dict(config("postgres", **table) | {"max_time_s": 600})
     assert cfg.max_time_s == 600
+
+
+@pytest.mark.parametrize(
+    ("dialect", "table", "budget"),
+    [
+        ("postgres", {"backend": "pyarrow"}, 60),
+        ("postgres", {"backend": "connectorx"}, None),
+        ("mysql", {"backend": "pyarrow"}, None),
+        ("mysql", {"backend": "pyarrow", "chunking": keyset()}, 60),
+        ("mysql", {"backend": "connectorx", "chunking": keyset()}, 60),
+    ],
+)
+def test_the_lambda_budget_skips_streams_that_cannot_stop_early(dialect, table, budget):
+    from db_bronze.config import RunRequest
+    from db_bronze.pipeline import time_budget
+
+    cfg = SourceConfig.from_dict(config(dialect, **table))
+    assert time_budget(cfg, RunRequest(), cfg.tables[0], 60) == budget
