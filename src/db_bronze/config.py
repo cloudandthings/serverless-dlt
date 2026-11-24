@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field, fields
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 MODES = ("incremental",)
 BACKENDS = ("pyarrow",)
@@ -22,6 +23,26 @@ _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 
 class ConfigError(ValueError):
     pass
+
+
+def parse_iso(value: str, where: str) -> datetime:
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError as e:
+        raise ConfigError(f"{where} is not ISO-8601: {value!r}") from e
+
+
+def to_source_time(value: datetime, naive_timezone: str) -> datetime:
+    """A timestamp as the source's naive columns represent it.
+
+    A value with an offset is converted to wall-clock time in `naive_timezone`
+    and its offset dropped. A naive value is already source time. Used only at
+    the boundaries (config `initial_value`, event window bounds); data values are
+    never converted (DESIGN-db.md 7.3).
+    """
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(ZoneInfo(naive_timezone)).replace(tzinfo=None)
 
 
 def _build(cls, data: Any, where: str, **overrides):
@@ -41,8 +62,15 @@ def _build(cls, data: Any, where: str, **overrides):
 class ConnectionConfig:
     dialect: str  # only sqlite so far
     path: str | None = None  # SQLite database file
+    naive_timezone: str = "UTC"  # what naive source timestamps mean; converts cursor bounds only
 
     def __post_init__(self) -> None:
+        try:
+            ZoneInfo(self.naive_timezone)
+        except (ZoneInfoNotFoundError, ValueError) as e:
+            raise ConfigError(
+                f"connection.naive_timezone {self.naive_timezone!r} is not an IANA time zone, e.g. 'Africa/Johannesburg'"
+            ) from e
         if self.dialect != "sqlite":
             raise ConfigError(f"connection.dialect {self.dialect!r}: only 'sqlite' is supported so far")
         if not self.path:
@@ -65,16 +93,13 @@ class CursorConfig:
         if self.type == "integer" and (not isinstance(self.initial_value, int) or isinstance(self.initial_value, bool)):
             raise ConfigError(f"cursor.initial_value must be an integer for an integer cursor: {self.initial_value!r}")
         if self.type == "timestamp":
-            self.initial_timestamp  # noqa: B018 (validates)
+            parse_iso(self.initial_value, "cursor.initial_value")
 
-    @property
-    def initial_timestamp(self) -> datetime:
-        """The ISO initial value as a naive UTC timestamp (an offset, if any, is converted to UTC)."""
-        try:
-            dt = datetime.fromisoformat(str(self.initial_value))
-        except ValueError as e:
-            raise ConfigError(f"cursor.initial_value is not ISO-8601: {self.initial_value!r}") from e
-        return dt.astimezone(UTC).replace(tzinfo=None) if dt.tzinfo else dt
+    def initial_cursor_value(self, naive_timezone: str) -> datetime | int:
+        """The initial value as the source represents it: an integer, or a naive timestamp in source time."""
+        if self.type == "integer":
+            return self.initial_value
+        return to_source_time(parse_iso(self.initial_value, "cursor.initial_value"), naive_timezone)
 
 
 @dataclass(frozen=True)

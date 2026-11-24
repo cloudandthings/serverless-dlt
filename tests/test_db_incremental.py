@@ -78,18 +78,18 @@ def invoke(db: SourceDB, bucket: Path, config_dir: Path, pipelines_dir: str, bac
         "backend": backend,
     }
 
-    def write_config(**table_overrides) -> None:
+    def write_config(connection: dict | None = None, **table_overrides) -> None:
         cfg = {
             "pipeline_name": "core_banking",
             "dataset_name": "core_banking",
             "bucket_url": bucket.as_uri(),
-            "connection": {"dialect": "sqlite", "path": str(db.path)},
+            "connection": {"dialect": "sqlite", "path": str(db.path)} | (connection or {}),
             "tables": [table | table_overrides],
         }
         (config_dir / "core.json").write_text(json.dumps(cfg))
 
-    def run(**table_overrides) -> dict:
-        write_config(**table_overrides)
+    def run(connection: dict | None = None, **table_overrides) -> dict:
+        write_config(connection, **table_overrides)
         return handler({"source_id": "core"}, None)
 
     return run
@@ -331,3 +331,13 @@ def test_null_cursor_rows_are_excluded_by_default(db, bucket, invoke):
     invoke(cursor={"column": "UpdatedAt", "type": "timestamp", "initial_value": "2026-01-01T00:00:00Z",
                    "include_null_cursor": False})
     assert ids(landed(bucket)) == [1]
+
+
+
+def test_initial_value_offset_is_converted_to_naive_source_time(db, bucket, invoke):
+    db.insert((1, "2019-12-31 23:59:59", "JHB", 100), (2, "2020-01-01 00:00:00", "JHB", 200))
+    invoke(
+        cursor={"column": "UpdatedAt", "type": "timestamp", "initial_value": "2020-01-01T00:00:00+02:00"},
+        connection={"naive_timezone": "Africa/Johannesburg"},
+    )
+    assert ids(landed(bucket)) == [2]  # naive bound 2020-01-01 00:00:00 (in UTC it would be 2019-12-31 22:00)

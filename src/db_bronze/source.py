@@ -37,7 +37,7 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_sta
     batch_size = cfg.batch_size(tc)
     # Without this hint dlt labels naive timestamps UTC without shifting them (prototype S5).
     hints = {name: {"timezone": False} for name in naive_timestamp_columns(table)}
-    initial = tc.cursor.initial_value if tc.cursor.type == "integer" else tc.cursor.initial_timestamp
+    initial = tc.cursor.initial_cursor_value(cfg.connection.naive_timezone)
 
     @dlt.resource(
         name=tc.name,
