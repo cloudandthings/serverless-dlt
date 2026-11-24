@@ -53,9 +53,12 @@ printf 'FROM %s\nRUN pip install --no-cache-dir --target /opt/it %s\n' "$tag" "$
 network="$("${compose[@]}" config --format json | uv run python -c 'import json, sys; print(json.load(sys.stdin)["name"])')_default"
 
 # The handler imports from the image's task root, as on Lambda (Instant Client, thick mode, ODBC);
-# only the tests are mounted. Engines are reached by service name on the compose network.
+# only the tests are mounted. Engines are reached by service name on the compose network, and
+# the DB_BRONZE_IT_* settings (e.g. DB_BRONZE_IT_ORACLE_SERVICE) pass through.
+it_env=()
+while IFS= read -r name; do it_env+=(-e "$name"); done < <(compgen -e | grep '^DB_BRONZE_IT_' || true)
 docker run --rm --platform linux/amd64 --network "$network" \
   -v "$MISE_PROJECT_ROOT/tests:/it/tests:ro" -v "$MISE_PROJECT_ROOT/pyproject.toml:/it/pyproject.toml:ro" -w /it \
-  -e PYTHONPATH=/var/task:/opt/it -e DB_BRONZE_IT_NETWORK=compose -e DB_BRONZE_IT_ENGINES="${DB_BRONZE_IT_ENGINES:-}" \
+  ${it_env[@]+"${it_env[@]}"} -e PYTHONPATH=/var/task:/opt/it -e DB_BRONZE_IT_NETWORK=compose \
   --entrypoint python3 "$tag-pytest" \
   -m pytest -p no:cacheprovider -m integration tests/integration ${pytest_args[@]+"${pytest_args[@]}"}

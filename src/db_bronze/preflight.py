@@ -25,6 +25,8 @@ log = logging.getLogger(__name__)
 # matrix fills these in (spike S9); a server below the minimum fails the run, and the
 # backend is never switched silently. Postgres 11 and MySQL 8.0 are the oldest series
 # the whole integration suite has passed on (11.16, 8.0.46; DESIGN-db.md section 11).
+# Oracle 23 (Free 23.26) is the only series it could run on so far: older servers are
+# x86_64 only and do not start under emulation on an arm64 host (S9 stays open below 23).
 MIN_SERVER_VERSION: dict[str, tuple[int, ...] | None] = {
     "mssql": None,
     "postgres": (11,),
