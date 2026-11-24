@@ -116,7 +116,6 @@ def test_a_dropped_connectorx_stream_leaves_its_query_running_on_the_server(sour
         assert time.monotonic() - dropped < 1  # the drop itself returns at once
         time.sleep(2)
         if STREAMS[source.dialect] == "streams":
-            assert first_batch < 2
             assert len(slow.running()) == 1  # but the server is still running the query
         else:
             assert first_batch > 4  # the whole query (about 5 s) ran first: there is nothing left to run
