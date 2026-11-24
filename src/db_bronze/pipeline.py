@@ -18,7 +18,8 @@ from dlt.destinations import filesystem
 
 from .config import ConfigError, RunRequest, SourceConfig, TableConfig
 from .manifest import new_snapshot_id, write_manifest
-from .source import make_engine, make_resource
+from .preflight import preflight, raise_on_findings
+from .source import RunStats, make_engine, make_resource
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +60,7 @@ def check_run_start(cfg: SourceConfig, req: RunRequest, tables: tuple[TableConfi
             'for what adding it involves, or use {"type": "password"}'
         )
     for tc in tables:
-        if tc.cursor is None and req.mode != "full":
+        if tc.cursor is None and req.mode not in ("full", "validate"):
             raise ConfigError(
                 f'table {tc.name} has no cursor, so it is a snapshot table; run it with "mode": "full", '
                 f'give it a cursor to run in {req.mode!r} mode, or leave it out with "tables": [...]'
@@ -80,9 +81,9 @@ def time_budget(cfg: SourceConfig, req: RunRequest, tc: TableConfig, max_time_s:
         return None
     if cfg.backend(tc) == "connectorx" and tc.chunking.strategy == "stream":
         log.warning(
-            "time budget skipped %s",
             json.dumps(
                 {
+                    "event": "time budget skipped",
                     "table": tc.name,
                     "reason": "a ConnectorX stream cannot be stopped early without leaving its query running; "
                     'use "chunking": {"strategy": "keyset", ...} to split-load this table',
@@ -91,6 +92,24 @@ def time_budget(cfg: SourceConfig, req: RunRequest, tc: TableConfig, max_time_s:
         )
         return None
     return min(limits)
+
+
+def validate(cfg: SourceConfig, req: RunRequest) -> dict[str, Any]:
+    """`mode=validate`: the preflight for every table, and a report. Extracts and writes nothing."""
+    tables = cfg.tables_for(req)
+    check_run_start(cfg, req, tables)
+    engine = make_engine(cfg)
+    try:
+        server, reports = preflight(cfg, tables, engine)
+    finally:
+        engine.dispose()
+    return {
+        "pipeline_name": cfg.pipeline_name,
+        "mode": "validate",
+        "ok": not server and not any(r.findings for r in reports),
+        "server_findings": server,
+        "tables": [r.as_dict() for r in reports],
+    }
 
 
 def run_pipeline(
@@ -103,6 +122,8 @@ def run_pipeline(
     says a budget applied to at least one table: callers loop while `is_empty`
     is false.
     """
+    if req.mode == "validate":
+        return validate(cfg, req)
     tables = cfg.tables_for(req)
     check_run_start(cfg, req, tables)
     os.environ["DATA_WRITER__COMPRESSION"] = cfg.parquet_compression
@@ -116,9 +137,15 @@ def run_pipeline(
     )
     pipe = pipe.drop()  # every invocation is a cold start: state comes from bronze
     engine = make_engine(cfg)
+    stats = RunStats()
     try:
+        server, reports = preflight(cfg, tables, engine)
+        raise_on_findings(server, reports)  # before anything is extracted
         budgets = {tc.name: time_budget(cfg, req, tc, max_time_s) for tc in tables}
-        resources = [make_resource(cfg, tc, req, engine, run_started, budgets[tc.name]) for tc in tables]
+        resources = [
+            make_resource(cfg, tc, req, engine, run_started, r.table, stats, max_time_s=budgets[tc.name])
+            for tc, r in zip(tables, reports, strict=True)
+        ]
         info = pipe.run(resources, loader_file_format="parquet", schema=bronze_schema(cfg))
     finally:
         engine.dispose()
@@ -139,6 +166,8 @@ def run_pipeline(
         "snapshot_id": snapshot_id,
         "load_ids": load_ids,
         "rows": rows,
+        "backends": {tc.name: cfg.backend(tc) for tc in tables},
+        "null_cursor_rows": {tc.name: stats.null_cursor_rows.get(tc.name, 0) for tc in tables},
         "is_empty": not any(rows.values()),
         "time_limited": any(b is not None for b in budgets.values()),
         "started_at": run_started.isoformat(),

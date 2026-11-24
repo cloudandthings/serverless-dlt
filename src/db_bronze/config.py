@@ -16,9 +16,10 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import secrets
+from .errors import DbBronzeError
 from .extract import EXTRACTED_AT
 
-MODES = ("incremental", "full", "backfill")
+MODES = ("incremental", "full", "backfill", "validate")
 BACKENDS = ("connectorx", "pyarrow", "sqlalchemy")
 # Engines ConnectorX reads (section 3.1); these default to it (D3, section 5.3). Db2 is not supported.
 CONNECTORX_DIALECTS = ("mssql", "postgres", "mysql", "oracle", "sqlite")
@@ -33,7 +34,7 @@ _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _DIALECT = re.compile(r"^[a-z][a-z0-9_]*(\+[a-z0-9_]+)?$")
 
 
-class ConfigError(ValueError):
+class ConfigError(DbBronzeError, ValueError):
     pass
 
 

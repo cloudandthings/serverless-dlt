@@ -6,6 +6,7 @@ Event:
                                             writes _manifests/<name>/<snapshot_id>.json on success
     {"source_id": ..., "mode": "backfill", "window_start": ..., "window_end": ...}
                                             [start, end), ISO-8601 or integer to match the cursor
+    {"source_id": ..., "mode": "validate"}  preflight only: per-table report, nothing extracted or written
     "tables": [...]                         on any event: run only these tables
     {"config": {...}}                       inline config (tests, ad hoc)
 
@@ -34,7 +35,9 @@ import posixpath
 
 import fsspec
 
+from . import metrics
 from .config import RunRequest, SourceConfig
+from .errors import DbBronzeError
 from .pipeline import run_pipeline
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), force=True)
@@ -61,7 +64,40 @@ def handler(event: dict, context) -> dict:
     if context is not None and req.mode == "incremental":
         margin = float(os.environ.get("SAFETY_MARGIN_S", "120"))
         budget = max(MIN_BUDGET_S, context.get_remaining_time_in_millis() / 1000 - margin)
-    log.info("run start %s", json.dumps({"pipeline": cfg.pipeline_name, "mode": req.mode}))
-    result = run_pipeline(cfg, req, max_time_s=budget)
-    log.info("run done %s", json.dumps(result))
+    log.info(json.dumps({"event": "run start", "pipeline": cfg.pipeline_name, "mode": req.mode}))
+    try:
+        result = run_pipeline(cfg, req, max_time_s=budget)
+    except Exception as e:
+        # dlt wraps errors raised in a resource in PipelineStepFailed; surface ours as the Lambda errorType
+        known = _find_in_chain(e, DbBronzeError)
+        if known is None:
+            raise
+        _report(cfg, known)
+        if known is e:
+            raise
+        raise known from e
+    for table, count in result.get("rows", {}).items():
+        metrics.emit(
+            cfg.pipeline_name,
+            table,
+            RowsExtracted=count,
+            NullCursorRows=result.get("null_cursor_rows", {}).get(table, 0),
+        )
+    log.info(json.dumps({"event": "run done", **result}))
     return result
+
+
+def _report(cfg: SourceConfig, error: DbBronzeError) -> None:
+    log.error("run failed %s", json.dumps({"error": type(error).__name__, "message": str(error)}))
+    if error.metric:
+        metrics.emit(cfg.pipeline_name, error.table or "", **{error.metric: 1})
+
+
+def _find_in_chain(exc: BaseException, kind: type[BaseException]) -> BaseException | None:
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        if isinstance(exc, kind):
+            return exc
+        seen.add(id(exc))
+        exc = exc.__cause__ or exc.__context__
+    return None
