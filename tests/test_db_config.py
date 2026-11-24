@@ -129,3 +129,32 @@ def test_connectorx_on_an_engine_it_does_not_support_is_rejected(dialect, where)
     message = rejected(cfg)
     assert "ConnectorX does not support" in message
     assert 'set "backend": "pyarrow"' in message
+
+
+KERBEROS = {"type": "kerberos", "principal": "svc_ingest@CORP.EXAMPLE", "keytab": {"secret_id": "ingest/keytab"}}
+
+
+@pytest.mark.parametrize("dialect", ["postgres", "mysql", "oracle", "sqlite"])
+def test_connectorx_with_kerberos_is_rejected_except_on_mssql(dialect):
+    message = rejected(config(dialect, connection={"auth": KERBEROS}))  # resolves to connectorx
+    assert "ConnectorX supports Kerberos only on mssql" in message
+    assert 'set "backend": "pyarrow"' in message
+
+
+def test_kerberos_parses_on_mssql_connectorx_and_on_pyarrow():
+    cfg = SourceConfig.from_dict(config("mssql", connection={"auth": KERBEROS}))
+    assert cfg.connection.auth.type == "kerberos"
+    assert cfg.connection.auth.principal == "svc_ingest@CORP.EXAMPLE"
+    SourceConfig.from_dict(config("postgres", connection={"auth": KERBEROS}, backend="pyarrow"))
+
+
+@pytest.mark.parametrize(
+    "auth,match",
+    [
+        ({"type": "ntlm"}, "auth.type 'ntlm' not in"),
+        ({"type": "password", "principal": "svc@CORP"}, "only kerberos takes"),
+        ({"type": "kerberos", "keytab": "/etc/krb5.keytab"}, "keytab must be a secret reference"),
+    ],
+)
+def test_auth_is_tagged_by_type(auth, match):
+    assert match in rejected(config("mssql", connection={"auth": auth}))

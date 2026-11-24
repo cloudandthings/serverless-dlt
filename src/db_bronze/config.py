@@ -14,6 +14,8 @@ from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 from typing import Any
 
+from . import secrets
+
 MODES = ("incremental",)
 BACKENDS = ("connectorx", "pyarrow", "sqlalchemy")
 # Engines ConnectorX reads (section 3.1); these default to it (D3, section 5.3). Db2 is not supported.
@@ -61,6 +63,19 @@ class AuthConfig:
     principal: str | None = None
     keytab: dict | None = None  # a secret reference
     krb5_conf: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.type not in AUTH_TYPES:
+            raise ConfigError(f"connection.auth.type {self.type!r} not in {AUTH_TYPES}")
+        kerberos_keys = {"principal": self.principal, "keytab": self.keytab, "krb5_conf": self.krb5_conf}
+        if self.type != "kerberos" and any(v is not None for v in kerberos_keys.values()):
+            raise ConfigError(
+                f"connection.auth: only kerberos takes {sorted(kerberos_keys)}; remove them for {self.type!r}"
+            )
+        if self.keytab is not None and not secrets.is_ref(self.keytab):
+            raise ConfigError(
+                'connection.auth.keytab must be a secret reference: {"secret_id": ...} or {"env": ...}'
+            )
 
 
 @dataclass(frozen=True)
@@ -186,6 +201,11 @@ class SourceConfig:
         if dialect not in CONNECTORX_DIALECTS:
             raise ConfigError(
                 f"table {t.name}: ConnectorX does not support dialect {dialect!r} (it reads {CONNECTORX_DIALECTS}); "
+                'set "backend": "pyarrow" on the table or in defaults'
+            )
+        if self.connection.auth.type == "kerberos" and dialect != "mssql":
+            raise ConfigError(
+                f"table {t.name}: ConnectorX supports Kerberos only on mssql, not {dialect!r} (docs/KERBEROS.md); "
                 'set "backend": "pyarrow" on the table or in defaults'
             )
 
