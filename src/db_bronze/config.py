@@ -482,6 +482,8 @@ class RunRequest:
     window_end: str | int | None = None  # backfill only, exclusive
     plan: str | None = None  # mode=plan: "snapshot" (pages) or "backfill" (windows)
     page_size: int | None = None  # plan=snapshot: rows per page
+    windows: int | None = None  # plan=backfill: split [MIN, MAX] into this many windows...
+    window_size: int | float | None = None  # ...or into windows this wide (seconds, or an integer delta)
     page: Page | None = None  # mode=full: one page of a planned snapshot
     snapshot_id: str | None = None  # page and finalize: the snapshot the loads belong to (from the plan)
     partition_date: str | None = None  # page: the date in the bronze path (from the plan), YYYY-MM-DD
@@ -519,7 +521,19 @@ class RunRequest:
                 raise ConfigError(f'mode=plan needs "plan" in {PLANS}, got {plan!r}')
             if plan == "snapshot" and not _positive_int(page_size):
                 raise ConfigError(f'plan=snapshot needs "page_size", a positive number of rows: {page_size!r}')
-        _only_with(event, ("plan", "page_size"), mode == "plan", "mode=plan")
+        windows, window_size = event.get("windows"), event.get("window_size")
+        if mode == "plan" and plan == "backfill":
+            if (windows is None) == (window_size is None):
+                raise ConfigError('plan=backfill needs exactly one of "windows" (how many) or "window_size" (how wide)')
+            if windows is not None and not _positive_int(windows):
+                raise ConfigError(f'"windows" must be a positive integer: {windows!r}')
+            if window_size is not None and not (_number(window_size) and window_size > 0):
+                raise ConfigError(
+                    f'"window_size" must be a positive number (seconds, or an integer delta): {window_size!r}'
+                )
+        _only_with(event, ("plan",), mode == "plan", "mode=plan")
+        _only_with(event, ("page_size",), mode == "plan" and plan == "snapshot", "plan=snapshot")
+        _only_with(event, ("windows", "window_size"), mode == "plan" and plan == "backfill", "plan=backfill")
         page = _page(event, tables) if mode == "full" else None
         _only_with(event, ("page", "partition_date"), mode == "full", "mode=full (a page of a planned snapshot)")
         _only_with(event, ("snapshot_id",), mode in ("full", "finalize"), "mode=full (a page) or mode=finalize")
@@ -542,6 +556,8 @@ class RunRequest:
             window_end=end,
             plan=plan,
             page_size=page_size,
+            windows=windows,
+            window_size=window_size,
             page=page,
             snapshot_id=event.get("snapshot_id"),
             partition_date=event.get("partition_date"),

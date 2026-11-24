@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import UTC, datetime
+from itertools import pairwise
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -182,7 +183,10 @@ PAGE = page_event({"table": "transactions", "offset": 0, "limit": 2})
     [
         ({"mode": "plan"}, r'needs "plan" in'),
         ({"mode": "plan", "plan": "snapshot"}, r'needs "page_size"'),
-        ({"mode": "full", "page_size": 3}, r"only valid with mode=plan"),
+        ({"mode": "full", "page_size": 3}, r"only valid with plan=snapshot"),
+        ({"mode": "plan", "plan": "backfill", "windows": 2, "window_size": 60}, r"exactly one of"),
+        ({"mode": "plan", "plan": "backfill", "windows": 0}, r'"windows" must be'),
+        ({"mode": "plan", "plan": "backfill", "windows": 2}, r"table branches has no cursor.*plan=backfill"),
         ({k: v for k, v in PAGE.items() if k != "snapshot_id"}, r"missing \['snapshot_id'\]"),
         (PAGE | {"tables": ["transactions", "branches"]}, r"exactly one table"),
         (PAGE | {"page": {"offset": -1, "limit": 2}}, r"page.offset"),
@@ -200,3 +204,59 @@ def test_bad_orchestration_event_fails_with_config_error(bucket, invoke, event, 
     with pytest.raises(ConfigError, match=message):
         invoke(**event)
     assert not any(bucket.iterdir())
+
+
+def backfill_rows(bucket: Path) -> list[dict]:
+    return [r for f in files(bucket) if "/mode=backfill/" in f.as_posix() for r in pq.read_table(f).to_pylist()]
+
+
+def assert_contiguous(windows: list[dict]) -> None:
+    """Half-open windows with no gaps and no overlaps: each ends where the next starts."""
+    for before, after in pairwise(windows):
+        assert before["window_end"] == after["window_start"]
+    assert all(w["window_start"] < w["window_end"] for w in windows)
+
+
+def test_plan_backfill_splits_min_to_max_into_n_windows_in_utc(db, bucket, config, invoke):
+    config["connection"]["naive_timezone"] = "Africa/Johannesburg"
+    db.insert(
+        (1, "2026-03-01 02:00:00", "JHB", 1),  # MIN: 2026-03-01T00:00:00Z
+        (2, "2026-03-03 09:30:00", "CPT", 2),
+        (3, "2026-03-05 05:00:00", "DBN", 3),
+        (4, "2026-03-07 02:00:00", "PTA", 4),  # MAX: 2026-03-07T00:00:00Z
+    )
+    plan = invoke(mode="plan", plan="backfill", tables=["transactions"], windows=3)
+    windows = plan["windows"]
+    assert [w["table"] for w in windows] == ["transactions"] * 3
+    assert_contiguous(windows)
+    assert windows[0]["window_start"] == "2026-03-01T00:00:00+00:00"
+    assert windows[1]["window_start"] == "2026-03-03T00:00:00+00:00"
+    assert windows[2]["window_start"] == "2026-03-05T00:00:00+00:00"
+    assert windows[-1]["window_end"] == "2026-03-07T00:01:00+00:00"  # just past MAX, so MAX is covered
+    assert not any(bucket.iterdir())
+
+    for w in windows:
+        invoke(mode="backfill", tables=[w["table"]], window_start=w["window_start"], window_end=w["window_end"])
+    assert ids(backfill_rows(bucket)) == [1, 2, 3, 4]
+
+
+def test_plan_backfill_on_an_integer_cursor_splits_by_window_size(db, bucket, config, invoke):
+    config["tables"] = [TRANSACTIONS | {"cursor": {"column": "TransactionId", "type": "integer", "initial_value": 0}}]
+    db.insert(*[(i, "2026-11-20 08:00:00", "JHB", i) for i in range(3, 11)])
+    plan = invoke(mode="plan", plan="backfill", window_size=3)
+    assert [(w["window_start"], w["window_end"]) for w in plan["windows"]] == [(3, 6), (6, 9), (9, 11)]
+    for w in plan["windows"]:
+        invoke(mode="backfill", window_start=w["window_start"], window_end=w["window_end"])
+    assert ids(backfill_rows(bucket)) == list(range(3, 11))
+    by_count = invoke(mode="plan", plan="backfill", windows=3)["windows"]
+    assert [(w["window_start"], w["window_end"]) for w in by_count] == [(3, 5), (5, 7), (7, 11)]
+
+
+def test_plan_backfill_over_an_empty_table_has_no_windows(invoke):
+    assert invoke(mode="plan", plan="backfill", tables=["transactions"], window_size=3600)["windows"] == []
+
+
+def test_plan_backfill_on_an_integer_cursor_needs_an_integer_window_size(bucket, config, invoke):
+    config["tables"] = [TRANSACTIONS | {"cursor": {"column": "TransactionId", "type": "integer", "initial_value": 0}}]
+    with pytest.raises(ConfigError, match=r"integer cursor needs an integer window_size: 1.5"):
+        invoke(mode="plan", plan="backfill", window_size=1.5)
