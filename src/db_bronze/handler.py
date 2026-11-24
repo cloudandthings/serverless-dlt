@@ -62,7 +62,7 @@ def handler(event: dict, context) -> dict:
         if known is e:
             raise
         raise known from e
-    for table, count in result["rows"].items():
+    for table, count in result.get("rows", {}).items():
         metrics.emit(
             cfg.pipeline_name,
             table,
