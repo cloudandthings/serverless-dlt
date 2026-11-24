@@ -195,3 +195,21 @@ def test_type_change_on_existing_column_fails_the_run(db, bucket, invoke):
         invoke()
     assert "DataValidationError" in chain(failure.value)
     assert ids(landed(bucket)) == [1]
+
+
+def test_rows_arrive_in_batches_of_batch_size(db, bucket, invoke, monkeypatch):
+    # dlt concatenates buffered batches into one file; a one-item file limit makes each batch its own file
+    monkeypatch.setenv("DATA_WRITER__FILE_MAX_ITEMS", "1")
+    db.insert(*[(i, f"2026-11-20 08:00:{i:02}", "JHB", i) for i in range(1, 6)])
+    invoke(batch_size=2)
+    assert sorted(pq.ParquetFile(f).metadata.num_rows for f in files(bucket)) == [1, 2, 2]
+
+
+def test_integer_cursor(db, bucket, invoke):
+    cursor = {"column": "TransactionId", "type": "integer", "initial_value": 2}
+    db.insert(*[(i, "2026-11-20 08:00:00", "JHB", i) for i in range(1, 4)])
+    invoke(cursor=cursor)
+    assert ids(landed(bucket)) == [2, 3]
+    db.insert((4, "2026-11-20 08:00:00", "JHB", 4))
+    invoke(cursor=cursor)
+    assert ids(landed(bucket)) == [2, 3, 4]
