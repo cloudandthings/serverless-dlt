@@ -7,6 +7,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import mssql, oracle
 from sqlalchemy.dialects import postgresql as pg
 
+from db_bronze.extract import register_mssql_types
 from db_bronze.preflight import MIN_SERVER_VERSION, PreflightError, column_findings, server_version_finding
 
 OK = [("Id", sa.Integer()), ("Name", sa.String(20)), ("Amount", sa.Numeric(18, 2)), ("At", sa.DateTime())]
@@ -47,7 +48,9 @@ def test_decimal_rule_does_not_apply_to_pyarrow():
 
 DENIED = {
     "postgres": [pg.INTERVAL(), pg.MONEY(), sa.Time(timezone=True), pg.MACADDR(), sa.ARRAY(sa.Integer())],
-    "mssql": [mssql.SQL_VARIANT(), mssql.XML()],
+    # money: ConnectorX reads it as a double, which drops digits of its 19. datetimeoffset: ConnectorX
+    # applies the offset twice, so the instant is wrong.
+    "mssql": [mssql.XML(), mssql.MONEY(), mssql.DATETIMEOFFSET()],
     "oracle": [
         oracle.RAW(16),
         oracle.ROWID(),
@@ -65,6 +68,34 @@ DENIED = {
 def test_denied_types_are_findings_on_connectorx_only(dialect, col_type):
     assert len(column_findings(dialect, "connectorx", [("C", col_type)])) == 1
     assert column_findings(dialect, "pyarrow", [("C", col_type)]) == []
+
+
+def reflected_mssql(name: str) -> sa.types.TypeEngine:
+    """The type SQL Server reflection gives a column of `name`, with db_bronze's additions registered."""
+    dialect = mssql.dialect()
+    register_mssql_types(dialect)
+    return dialect.ischema_names[name]()
+
+
+@pytest.mark.parametrize("name", ["hierarchyid", "geography", "geometry"])
+def test_sql_server_clr_types_are_recognised_and_denied_on_connectorx(name):
+    # Unregistered, SQLAlchemy reflects them as NullType, which no deny-list entry can match.
+    col_type = reflected_mssql(name)
+    assert not isinstance(col_type, sa.types.NullType)
+    [finding] = column_findings("mssql", "connectorx", [("C", col_type)])
+    assert f"type {name} is not supported by ConnectorX" in finding
+    assert column_findings("mssql", "pyarrow", [("C", col_type)]) == []  # pyarrow lands their bytes
+
+
+def test_sql_variant_is_a_finding_on_every_backend():
+    # pyodbc reads a sql_variant only as the value's bytes, without its type: nothing lands it losslessly.
+    for backend in ("connectorx", "pyarrow"):
+        [finding] = column_findings("mssql", backend, [("C", mssql.SQL_VARIANT())])
+        assert "sql_variant" in finding and "cast it" in finding
+
+
+def test_smallmoney_fits_a_double_and_passes():
+    assert column_findings("mssql", "connectorx", [("C", mssql.SMALLMONEY())]) == []
 
 
 def test_a_type_denied_on_one_dialect_is_fine_on_another():

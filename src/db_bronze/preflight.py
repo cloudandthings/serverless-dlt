@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import sqlalchemy as sa
-from sqlalchemy.dialects import oracle
+from sqlalchemy.dialects import mssql, oracle
 from sqlalchemy.dialects import postgresql as pg
 
 from .config import SourceConfig, TableConfig
@@ -64,11 +64,15 @@ DENY_LIST: dict[str, list[tuple[str, Callable[[sa.types.TypeEngine], bool]]]] = 
         ("array", lambda t: isinstance(t, sa.ARRAY)),
         ("xml", _named("XML")),
     ],
+    # money: read as a double, too narrow for its 19 digits. datetimeoffset: ConnectorX applies the offset
+    # twice, so the instant is wrong (integration type matrix, section 10.1). sql_variant: UNREADABLE.
     "mssql": [
-        ("sql_variant", _named("SQL_VARIANT")),
         ("xml", _named("XML")),
         ("hierarchyid", _named("HIERARCHYID")),
-        ("geography", _named("GEOGRAPHY", "GEOMETRY")),
+        ("geography", _named("GEOGRAPHY")),
+        ("geometry", _named("GEOMETRY")),
+        ("money", lambda t: isinstance(t, mssql.MONEY)),
+        ("datetimeoffset", lambda t: isinstance(t, mssql.DATETIMEOFFSET)),
     ],
     "oracle": [
         ("raw", lambda t: isinstance(t, oracle.RAW)),
@@ -79,6 +83,13 @@ DENY_LIST: dict[str, list[tuple[str, Callable[[sa.types.TypeEngine], bool]]]] = 
         ("bfile", lambda t: isinstance(t, oracle.BFILE)),
         ("xmltype", _named("XMLTYPE")),
     ],
+}
+
+
+# Types no backend lands losslessly: a finding on every backend. pyodbc reads a sql_variant
+# only as the bytes of its value, without the value's type.
+UNREADABLE: dict[str, list[tuple[str, Callable[[sa.types.TypeEngine], bool]]]] = {
+    "mssql": [("sql_variant", _named("SQL_VARIANT"))],
 }
 
 
@@ -118,7 +129,16 @@ def column_findings(dialect: str, backend: str, columns: list[tuple[str, sa.type
     for name, col_type in columns:
         if name == EXTRACTED_AT:
             findings.append(f"column {name}: the name is reserved for the extraction timestamp; rename or exclude it")
-        if backend != "connectorx" or col_type is None:
+        if col_type is None:
+            continue
+        unreadable = next((label for label, matches in UNREADABLE.get(dialect, []) if matches(col_type)), None)
+        if unreadable is not None:
+            findings.append(
+                f"column {name}: type {unreadable} cannot be landed losslessly by any backend; "
+                'exclude the column, or cast it in "query"'
+            )
+            continue
+        if backend != "connectorx":
             continue
         if isinstance(col_type, sa.Numeric) and not isinstance(col_type, sa.Float):
             p, s = col_type.precision, col_type.scale
