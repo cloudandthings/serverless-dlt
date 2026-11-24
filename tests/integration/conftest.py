@@ -30,6 +30,12 @@ image, on the compose network (`DB_BRONZE_IT_NETWORK=compose`), so the handler
 and ConnectorX run in-process with Instant Client. Oracle's spike tests that call
 ConnectorX directly need it.
 
+Db2 (ticket 17) is in the compose profile `db2`; a test's "database" is a fresh
+schema in database BRONZE. Seeding and the handler both need ibm_db, which exists
+for x86_64 Linux only, so elsewhere the Db2 tests skip: run them `--inside`. A test
+that drives ConnectorX (the `connectorx` marker, or `backend` connectorx) skips on
+Db2, which ConnectorX does not read.
+
 """
 
 from __future__ import annotations

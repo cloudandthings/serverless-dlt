@@ -111,7 +111,7 @@ are upgraded as tests land.
 | Postgres | `psycopg[binary]` 3.3.x | The bundled libpq is built `--with-gssapi`. `krbsrvname` defaults to `postgres`. |
 | MySQL | `PyMySQL` | None. Kerberos needs MySQL Enterprise on the server plus mysql-connector-python with its `gssapi` extra. *Integration (S1):* closing PyMySQL's streaming (unbuffered) cursor early reads the rest of the result, so the close blocks until the query has run to the end. |
 | Oracle | `oracledb` in **thick** mode + Instant Client | Thin mode has no Kerberos. Thick mode uses `sqlnet.ora` with `SQLNET.AUTHENTICATION_SERVICES=(KERBEROS5)`. |
-| Db2 | `ibm_db` + `ibm_db_sa` | The bundled clidriver ships the IBMkrb5 plugin. **Wheels exist for x86_64 only**, with no aarch64. |
+| Db2 | `ibm_db` + `ibm_db_sa`. *Integration (Db2 Community 12.1.5 and 11.5.5, ibm_db 3.3.0, ibm_db_sa 0.4.4):* the dialect calls itself `ibm_db_sa`, not `db2`. Three of its defaults are wrong for bronze and are corrected in `prepare_engine` (section 7.2): it reflects tables without `schema` in the connecting user's schema even when `CurrentSchema` makes another schema current; it declares no native Decimal support, so SQLAlchemy sends every DECIMAL through a float both ways (a bound value and every value read lose digits past the 15th, silently); and it does not know DECFLOAT, BINARY or VARBINARY, and types DOUBLE as an unconstrained NUMERIC. It has no AUTOCOMMIT level. Its `server_version_info` is text, `('DB2/LINUXX8664', '12.01.0500')`. Closing ibm_db's cursor mid-result ends the query at once (S1). The server sends a result in blocks of about 64 KB, so a query's first rows can arrive only once a block is full. In the Lambda image the clidriver prints `lscpu: command not found` on every connect, which is harmless. | The bundled clidriver ships the IBMkrb5 plugin. **Wheels exist for x86_64 only**, with no aarch64. |
 
 ---
 
@@ -197,11 +197,11 @@ connection = one pipeline = one Lambda function.** `pipeline_name`,
 | Key | Meaning |
 |---|---|
 | `dialect` | `mssql`, `postgres`, `mysql`, `oracle`, `db2`, `sqlite`, or another SQLAlchemy dialect name (traditional backend only). |
-| `host`, `port`, `database` | Discrete fields. **Oracle** uses `service_name` instead of `database`. **SQLite** uses `path`. Oracle reads the tables of the connecting user's schema unless the table sets `schema`; a case-insensitive Oracle name (stored upper case) is written lower case in the config and lands lower case, as SQLAlchemy names it. |
+| `host`, `port`, `database` | Discrete fields. **Oracle** uses `service_name` instead of `database`. **SQLite** uses `path`. Oracle reads the tables of the connecting user's schema unless the table sets `schema`; a case-insensitive Oracle name (stored upper case) is written lower case in the config and lands lower case, as SQLAlchemy names it. **Db2** reads the tables of CURRENT SCHEMA (the connecting user's, or `CurrentSchema` in `driver_options`) unless the table sets `schema`; case-insensitive names behave as on Oracle. |
 | `username`, `password` | A literal, or a secret reference as in `api_bronze`: `{"env": ...}` or `{"secret_id": ..., "key": ...}`. Any connection field may be a reference. |
 | `auth` | Tagged. `{"type": "password"}` is implemented. `{"type": "kerberos", ...}` parses, then fails at run start (section 8). |
-| `driver_options` | Passed to the traditional driver, e.g. ODBC keywords for MSSQL. The code builds **both** the SQLAlchemy URL and the ConnectorX URL from the discrete fields, because the two formats differ (`+driver` and how query parameters are spelled). |
-| `isolation_level` | Applied to the traditional backend through SQLAlchemy. With ConnectorX, it is honoured only where the engine allows session settings; elsewhere the combination is rejected by validation (S3). *Integration:* on **Postgres** it reaches ConnectorX as `options=-c default_transaction_isolation=<level>`, joined to any libpq `options` in `driver_options`. On **SQL Server** it goes ahead of the ConnectorX query in the same batch, as `SET TRANSACTION ISOLATION LEVEL <level>; <query>` (any of the five SQL Server levels, SNAPSHOT included), but not on a `partition` read. On **MySQL** and **Oracle** ConnectorX cannot apply it, so it stays rejected (S3). On the traditional backend Oracle applies `SERIALIZABLE` (read back from `v$transaction`). |
+| `driver_options` | Passed to the traditional driver, e.g. ODBC keywords for MSSQL. *Integration (Db2):* ibm_db_sa passes on only `CurrentSchema`, `Security` and the `SSL...` keywords and drops any other silently; the CLI pads a `CurrentSchema` shorter than 8 characters with blanks, which names a different schema, so a short schema is better set per table with `schema`. The code builds **both** the SQLAlchemy URL and the ConnectorX URL from the discrete fields, because the two formats differ (`+driver` and how query parameters are spelled). |
+| `isolation_level` | Applied to the traditional backend through SQLAlchemy. With ConnectorX, it is honoured only where the engine allows session settings; elsewhere the combination is rejected by validation (S3). *Integration:* on **Postgres** it reaches ConnectorX as `options=-c default_transaction_isolation=<level>`, joined to any libpq `options` in `driver_options`. On **SQL Server** it goes ahead of the ConnectorX query in the same batch, as `SET TRANSACTION ISOLATION LEVEL <level>; <query>` (any of the five SQL Server levels, SNAPSHOT included), but not on a `partition` read. On **MySQL** and **Oracle** ConnectorX cannot apply it, so it stays rejected (S3). On the traditional backend Oracle applies `SERIALIZABLE` (read back from `v$transaction`). *Integration (Db2):* ibm_db_sa knows only Db2's names and takes `REPEATABLE READ` as Db2's RR, which is the standard's SERIALIZABLE; db_bronze translates the four standard levels (READ UNCOMMITTED → UR, READ COMMITTED → CS, REPEATABLE READ → RS, SERIALIZABLE → RR), and validation rejects SNAPSHOT and AUTOCOMMIT on db2. `SERIALIZABLE` runs at RR (read back from `MON_GET_ACTIVITY`). |
 | `naive_timezone` | Default `UTC`. Used **only** to convert cursor values and window bounds between UTC (at the API boundary) and naive source timestamps. Data values are never touched (D2). |
 
 ### 5.2 Per table
@@ -258,7 +258,7 @@ The preflight reflects each table that is about to run, using one SQLAlchemy ref
 
 Checks:
 
-- **Server version** is at or above a minimum per dialect. The minimums are set from what the integration tests prove, not guessed. A server below the minimum fails; the backend is never switched silently. Proven so far (S9): **Postgres 11**, **MySQL 8.0**, **SQL Server 2017** (14), **Oracle 23** (older series not yet run, see S9).
+- **Server version** is at or above a minimum per dialect. The minimums are set from what the integration tests prove, not guessed. A server below the minimum fails; the backend is never switched silently. Proven so far (S9): **Postgres 11**, **MySQL 8.0**, **SQL Server 2017** (14), **Oracle 23** (older series not yet run, see S9), **Db2 11.5**.
 - For tables on ConnectorX:
   - **DECIMAL/NUMERIC with scale > 10 or precision > 28**, and on Postgres and Oracle a **NUMERIC/NUMBER without precision**. This check is mandatory: it is the only thing standing between a table and silent precision loss (section 3.1). Oracle `NUMBER(p, 0)` is exempt whatever p: ConnectorX reads it as int64, and a wider value fails loudly.
   - Column types on the per-dialect deny list from section 3.1. A type SQLAlchemy does not recognise
@@ -321,8 +321,11 @@ exactly the rows the bound statement does, through ConnectorX and in a handler
 backfill window bounded to the microsecond, on both backends. A time-zone-aware
 value renders with its offset but without `TZH:TZM` in the format, which Oracle
 rejects (`ORA-01830`); that never reaches ConnectorX, because it cannot read
-TIMESTAMP WITH TIME ZONE (preflight), and the pyarrow backend binds it. db2 is
-still *to verify*.
+TIMESTAMP WITH TIME ZONE (preflight), and the pyarrow backend binds it. **Db2**
+(*integration*) never reaches ConnectorX, so its queries are always bound; inlined
+anyway, a timestamp renders as `'2026-11-20 08:00:00.123456'` and a decimal as its
+digits, and the cursor window and keyset seek select exactly what the bound
+statements do, once bound decimals stop going through a float (section 3.3).
 
 ### 7.2 Backends
 
@@ -367,6 +370,15 @@ TIME ZONE lands naive, in the session time zone (UTC on Lambda). INTERVAL DAY TO
 SECOND lands as Python's text (`1 day, 2:00:00`), INTERVAL YEAR TO MONTH as Oracle's
 (`1-2`), BFILE as its locator `<directory>/<file name>`, and 23ai JSON compactly
 with its numbers' own digits. Section 10.1 lists every type.
+
+On **Db2** (*integration*, pyarrow only): DECIMAL lands as `decimal128(p, s)` with
+every digit, once the engine reads Decimals natively. DECFLOAT lands as its exact
+text (no Arrow decimal holds DECFLOAT(34), NaN or Infinity), DOUBLE as double, and
+BINARY, VARBINARY and CHAR/VARCHAR **FOR BIT DATA** as binary: the reflection
+types FOR BIT DATA as text, so the catalog (code page 0) names those columns, and
+landed as text their bytes would fail the run unless they happened to be UTF-8.
+TIMESTAMP(12) is truncated to the microsecond. XML lands as the driver serializes
+it, with a byte-order mark and an `encoding="UTF-16"` declaration.
 
 Naive source timestamps stay naive in bronze (D2): every timestamp column the
 reflection reports as without time zone gets the resource column hint
@@ -571,6 +583,25 @@ handler and ConnectorX run in-process with Instant Client: that is what the
 spike tests calling ConnectorX directly need on Oracle. `--engines oracle` sets
 `DB_BRONZE_IT_ENGINES`.
 
+**Db2** (ticket 17) is the compose service `db2` (Db2 Community 12.1.5,
+`DB_BRONZE_IT_DB2_IMAGE` to change it), in the compose profile `db2`, privileged,
+x86_64 only. It creates database `BRONZE` on first start (about two minutes under
+Rosetta), and each test gets a fresh schema in it, made current with the
+`CurrentSchema` driver option. Everything a Db2 test does, seeding included, goes
+through ibm_db, which has x86_64 Linux wheels only, so on any other host the Db2
+tests skip with that reason, in image mode too. `mise run test:integration --inside
+--engines db2` runs them inside the image; on an x86_64 Linux host they run with
+every run. ConnectorX does not read Db2 (the config rejects the combination), so
+every test that drives ConnectorX skips on Db2 (the `connectorx` marker, or the
+`backend` parameter), and Db2 runs the rest on pyarrow. Under colima's Rosetta the
+image's setup fails to create the database: binfmt is registered there without
+preserve-argv0, so `su - db2inst1` is not a login shell and never reads the
+instance profile (`db2start: command not found`). The compose file mounts an
+`/etc/environment` with `BASH_ENV` pointing at the profile, which su applies; on an
+x86_64 host it changes nothing. The image's fenced user cannot read the instance
+directory there either (SQL1646N), so the harness drops a test's schema object by
+object rather than through `SYSPROC.ADMIN_DROP_SCHEMA`.
+
 ### 10.1 Landed types (*integration*, 24 Nov 2026)
 
 The Parquet type each source type lands as, per backend (Postgres 17.12, MySQL
@@ -669,6 +700,21 @@ and each one it allows lands on ConnectorX.
 | interval day to second, interval year to month | string | preflight |
 | bfile | string (`<directory>/<file name>`) | preflight |
 | boolean, json (23ai) | bool, string | preflight |
+
+**Db2** (Community 12.1.5 for LUW; ibm_db 3.3.0, ibm_db_sa 0.4.4). Pyarrow only: ConnectorX does not read Db2.
+
+| Source type | `pyarrow` |
+|---|---|
+| smallint, integer, bigint | int64 |
+| decimal(18,4), decimal(31,12), decimal(31,0) | decimal128(p, s), every digit |
+| decfloat(16), decfloat(34) | string (the exact value) |
+| real, double | double |
+| boolean | bool |
+| char, varchar, clob, graphic, vargraphic, dbclob, xml | string (xml with a byte-order mark and a UTF-16 declaration) |
+| char/varchar for bit data, binary, varbinary, blob | binary |
+| date | date32 |
+| time | time64[us] |
+| timestamp, timestamp(0), timestamp(12) | timestamp[us] (timestamp(12) truncated to the microsecond) |
 
 The two backends differ on most integer widths, on binary vs large_binary, and
 on every decimal, which is why a backend change fails with `BackendChanged`
