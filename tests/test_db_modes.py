@@ -6,6 +6,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pyarrow.parquet as pq
 import pytest
 from test_db_incremental import SourceDB, files, ids, landed
 
@@ -74,3 +75,19 @@ def test_full_lands_from_initial_value_to_run_start_under_mode_full(db, bucket, 
     assert result["rows"] == {"transactions": 2}
     assert ids(landed(bucket)) == [2, 3]
     assert partitions(bucket) == {today_partition("full")}
+
+
+def landed_ids(bucket: Path, mode: str) -> list[int]:
+    return ids([r for f in files(bucket) if f"/mode={mode}/" in f.as_posix() for r in pq.read_table(f).to_pylist()])
+
+
+def test_incremental_after_full_continues_from_the_previous_incremental_cursor(db, bucket, invoke):
+    db.insert((1, "2026-11-20 08:00:00", "JHB", 100), (2, "2026-11-20 09:00:00", "CPT", 200))
+    invoke()
+    db.insert((3, "2026-11-20 10:00:00", "DBN", 300))
+    invoke(mode="full")
+    db.insert((4, "2026-11-20 11:00:00", "PTA", 400))
+    result = invoke()
+    assert result["rows"] == {"transactions": 2}
+    assert landed_ids(bucket, "incremental") == [1, 2, 3, 4]
+    assert landed_ids(bucket, "full") == [1, 2, 3]
