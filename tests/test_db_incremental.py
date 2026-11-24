@@ -264,3 +264,11 @@ def test_connectorx_decimal_38_10_and_naive_timestamp_land_unchanged(db, bucket,
     [row] = landed(bucket)
     assert row["Balance"] == balance
     assert row["UpdatedAt"] == datetime(2026, 11, 20, 8, 0)
+
+
+@pytest.mark.parametrize("backend", [None])  # neither the table nor defaults name one
+def test_run_log_names_the_backend_resolved_for_each_table(db, invoke, caplog):
+    db.insert((1, "2026-11-20 08:00:00", "JHB", 100))
+    caplog.set_level(logging.INFO, logger="db_bronze")
+    invoke()  # sqlite resolves to connectorx
+    assert '{"table": "transactions", "backend": "connectorx"}' in caplog.text

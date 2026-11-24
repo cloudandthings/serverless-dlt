@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import datetime
@@ -36,6 +37,7 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_sta
     table = reflect(engine, tc)
     specs = column_specs(table)
     backend = cfg.backend(tc)
+    log.info("table %s", json.dumps({"table": tc.name, "backend": backend}))
     batch_size = cfg.batch_size(tc)
     # Without this hint dlt labels naive timestamps UTC without shifting them (prototype S5).
     hints = {name: {"timezone": False} for name in naive_timestamp_columns(table)}
