@@ -7,8 +7,11 @@ brings the compose stack up itself (idempotent) and skips everything when Docker
 is not available.
 
 `DB_BRONZE_IT_ENGINES` (comma-separated, e.g. `mssql`) limits the run to some
-engines, and `DB_BRONZE_IT_HOST` points at engines that are not on 127.0.0.1
-(for a run inside the image, on the compose network).
+engines. `mise run test:integration --image <tag>` runs this suite inside the
+built image, on the compose network (`DB_BRONZE_IT_IN_NETWORK`: engines are
+reached by service name and container port, and the task manages them), with
+every handler run going through the Lambda Runtime Interface Emulator
+(`DB_BRONZE_IT_RIE`).
 
 Each test gets a fresh database on its engine, dropped afterwards, and runs the
 handler against it into a `file://` bucket, the same seam as the SQLite suite.
@@ -33,7 +36,7 @@ import sqlalchemy as sa
 
 COMPOSE_FILE = Path(__file__).with_name("compose.yaml")
 PASSWORD = "bronze-it"
-HOST = os.environ.get("DB_BRONZE_IT_HOST", "127.0.0.1")
+IN_NETWORK = os.environ.get("DB_BRONZE_IT_IN_NETWORK") == "1"
 
 
 @dataclass(frozen=True)
@@ -42,14 +45,22 @@ class Engine:
 
     dialect: str
     service: str
-    port: int
+    port: int  # on the host
+    container_port: int
     admin_user: str
     admin_database: str
     sqlalchemy_driver: str
     password: str = PASSWORD
     driver_options: dict = field(default_factory=dict)  # the config's
     url_query: dict = field(default_factory=dict)  # the harness's own URL only (driver_options are added)
-    host: str = HOST
+
+    @property
+    def host(self) -> str:
+        return self.service if IN_NETWORK else "127.0.0.1"
+
+    @property
+    def reach_port(self) -> int:
+        return self.container_port if IN_NETWORK else self.port
 
     def url(self, database: str) -> sa.URL:
         return sa.URL.create(
@@ -57,7 +68,7 @@ class Engine:
             username=self.admin_user,
             password=self.password,
             host=self.host,
-            port=self.port,
+            port=self.reach_port,
             database=database,
             query=self.url_query | self.driver_options,
         )
@@ -67,7 +78,7 @@ class Engine:
         return {
             "dialect": self.dialect,
             "host": self.host,
-            "port": self.port,
+            "port": self.reach_port,
             "database": database,
             "username": self.admin_user,
             "password": self.password,
@@ -77,14 +88,15 @@ class Engine:
 
 ENGINES = {
     "postgres": Engine(
-        "postgres", "postgres", int(os.environ.get("DB_BRONZE_IT_PG_PORT", "55432")), "postgres", "postgres",
+        "postgres", "postgres", int(os.environ.get("DB_BRONZE_IT_PG_PORT", "55432")), 5432, "postgres", "postgres",
         "postgresql+psycopg",
     ),
     "mysql": Engine(
-        "mysql", "mysql", int(os.environ.get("DB_BRONZE_IT_MYSQL_PORT", "53306")), "root", "mysql", "mysql+pymysql",
+        "mysql", "mysql", int(os.environ.get("DB_BRONZE_IT_MYSQL_PORT", "53306")), 3306, "root", "mysql",
+        "mysql+pymysql",
     ),
     "mssql": Engine(
-        "mssql", "mssql", int(os.environ.get("DB_BRONZE_IT_MSSQL_PORT", "51433")), "sa", "master", "mssql+pyodbc",
+        "mssql", "mssql", int(os.environ.get("DB_BRONZE_IT_MSSQL_PORT", "51433")), 1433, "sa", "master", "mssql+pyodbc",
         password="Bronze-it-1",
         # The container's certificate is self-signed; ODBC Driver 18 encrypts by default.
         driver_options={"TrustServerCertificate": "yes"},
@@ -105,6 +117,8 @@ def _docker_available() -> bool:
 @pytest.fixture(scope="session")
 def compose() -> None:
     """The engines, up and healthy. Skips the integration suite when Docker is not available."""
+    if IN_NETWORK:  # inside the image: `mise run test:integration --image` brought them up
+        return
     if not _docker_available():
         pytest.skip("integration tests need Docker")
     subprocess.run(
