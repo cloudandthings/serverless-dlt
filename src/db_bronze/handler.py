@@ -31,6 +31,10 @@ Environment:
     CONFIG_URI          where source configs live (required with source_id)
     SAFETY_MARGIN_S     seconds kept free before the Lambda timeout (default 120)
     LOG_LEVEL           default INFO
+    ORACLE_CLIENT_LIB_DIR
+                        Instant Client directory (set by docker/Dockerfile.db). When set, oracledb
+                        enters thick mode at import (D10) and the import fails if it cannot load;
+                        unset (local runs, tests), oracledb stays thin.
 
 An incremental run gets a time budget from Lambda's remaining time minus the
 safety margin (never under MIN_BUDGET_S), and `max_time_s` in the config caps it
@@ -56,6 +60,12 @@ from .pipeline import run_pipeline
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), force=True)
 log = logging.getLogger("db_bronze")
+
+if lib_dir := os.environ.get("ORACLE_CLIENT_LIB_DIR"):
+    # Thick mode is process-wide and must precede any Oracle connection: do it during Lambda init
+    import oracledb
+
+    oracledb.init_oracle_client(lib_dir=lib_dir)
 
 MIN_BUDGET_S = 60.0
 

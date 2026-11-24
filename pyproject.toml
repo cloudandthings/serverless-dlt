@@ -13,10 +13,17 @@ dependencies = [
 [project.optional-dependencies]
 # Secrets Manager refs (secrets.py). The Lambda base image ships boto3, but pin it.
 aws = ["boto3>=1.40"]
-# db_bronze (DESIGN-db.md). Drivers are added as their backends land.
+# db_bronze (DESIGN-db.md section 9): every driver, for the one x86_64 image (D9).
 # ConnectorX >= 0.4.6: in 0.4.5 a failed stream ended silently, looking like a short read (section 3.1).
+# ibm_db ships x86_64 Linux wheels only (bundled clidriver), hence the marker: `uv sync` still works on a Mac.
 db = [
     "connectorx>=0.4.6",
+    "ibm-db>=3.3.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "ibm-db-sa>=0.4.4 ; platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "oracledb>=26.1.0",
+    "psycopg[binary]>=3.3.9",
+    "pymysql>=1.2.4",
+    "pyodbc>=5.5.0",
     "sqlalchemy>=2",
 ]
 
