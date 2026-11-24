@@ -33,16 +33,23 @@ def reflect(engine: sa.Engine, tc: TableConfig) -> sa.Table:
     return sa.Table(tc.table, sa.MetaData(), schema=tc.schema, autoload_with=engine)
 
 
-def window(tc: TableConfig, req: RunRequest, run_started: datetime):
+def window(tc: TableConfig, req: RunRequest, run_started: datetime, max_cursor):
     """(initial_value, end_value) for dlt's incremental, in source terms.
 
     incremental  state-driven; initial_value only applies to the very first run
-    full         [initial_value, run start): end_value makes dlt leave the cursor state alone
+    full         [initial_value, run start): end_value makes dlt leave the cursor state alone.
+                 For an integer cursor "run start" is the cursor's MAX when the run starts, plus one.
     backfill     [window_start, window_end): stateless, like full
     """
     if req.mode == "backfill":
         return tc.cursor.bound(req.window_start, "window_start"), tc.cursor.bound(req.window_end, "window_end")
-    initial = tc.cursor.initial_value if tc.cursor.type == "integer" else tc.cursor.initial_timestamp
+    if tc.cursor.type == "integer":
+        initial = tc.cursor.initial_value
+        if req.mode == "full":
+            top = max_cursor()
+            return initial, max(initial, top + 1) if top is not None else initial
+        return initial, None
+    initial = tc.cursor.initial_timestamp
     if req.mode == "full":
         return initial, run_started.astimezone(UTC).replace(tzinfo=None)
     return initial, None
@@ -83,7 +90,12 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, req: RunRequest, engine: s
         return snapshot
 
     cursor_col = table.c[tc.cursor.column]
-    initial, end = window(tc, req, run_started)
+
+    def max_cursor():
+        with engine.connect() as conn:
+            return conn.execute(sa.select(sa.func.max(cursor_col))).scalar()
+
+    initial, end = window(tc, req, run_started, max_cursor)
 
     @resource
     def rows(

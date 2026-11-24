@@ -190,3 +190,15 @@ def test_snapshot_table_in_backfill_fails_with_config_error(branches, bucket, in
     with pytest.raises(ConfigError, match=r"mode=backfill.*\['branches'\].*mode=full"):
         invoke(config_tables=[TRANSACTIONS, BRANCHES], mode="backfill", **window)
     assert files(bucket) == [] and files(bucket, "branches") == []
+
+
+def test_full_on_an_integer_cursor_lands_from_initial_value_and_leaves_the_cursor(db, bucket, invoke):
+    cursor_table = INTEGER_CURSOR | {"cursor": INTEGER_CURSOR["cursor"] | {"initial_value": 2}}
+    db.insert(*[(i, "2026-11-20 08:00:00", "JHB", i) for i in range(1, 4)])
+    invoke(config_tables=[cursor_table])
+    db.insert((4, "2026-11-20 08:00:00", "JHB", 4))
+    invoke(config_tables=[cursor_table], mode="full")
+    assert landed_ids(bucket, "full") == [2, 3, 4]
+    db.insert((5, "2026-11-20 08:00:00", "JHB", 5))
+    invoke(config_tables=[cursor_table])
+    assert landed_ids(bucket, "incremental") == [2, 3, 4, 5]
