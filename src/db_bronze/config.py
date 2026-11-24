@@ -15,7 +15,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 MODES = ("incremental",)
-BACKENDS = ("pyarrow",)
+BACKENDS = ("connectorx", "pyarrow", "sqlalchemy")
+# Engines ConnectorX reads (section 3.1); these default to it (D3, section 5.3). Db2 is not supported.
+CONNECTORX_DIALECTS = ("mssql", "postgres", "mysql", "oracle", "sqlite")
 CURSOR_TYPES = ("timestamp", "integer")
 CHUNKING_STRATEGIES = ("stream", "keyset")
 AUTH_TYPES = ("password", "kerberos")
@@ -170,13 +172,29 @@ class SourceConfig:
             raise ConfigError(f"table names must be unique: {names}")
         if self.parquet_compression not in PARQUET_CODECS:
             raise ConfigError(f"parquet_compression {self.parquet_compression!r} not in {PARQUET_CODECS}")
+        if self.defaults.backend is not None and self.defaults.backend not in BACKENDS:
+            raise ConfigError(f"defaults.backend {self.defaults.backend!r} not in {BACKENDS}")
         for t in self.tables:
-            backend = self.backend(t)
-            if backend not in BACKENDS:
-                raise ConfigError(f"table {t.name}: backend {backend!r} not in {BACKENDS}")
+            self._check_backend(t)
 
-    def backend(self, table: TableConfig) -> str | None:
-        return table.backend or self.defaults.backend
+    def _check_backend(self, t: TableConfig) -> None:
+        if t.backend is not None and t.backend not in BACKENDS:
+            raise ConfigError(f"table {t.name}: backend {t.backend!r} not in {BACKENDS}")
+        if self.backend(t) != "connectorx":
+            return
+        dialect = self.connection.dialect
+        if dialect not in CONNECTORX_DIALECTS:
+            raise ConfigError(
+                f"table {t.name}: ConnectorX does not support dialect {dialect!r} (it reads {CONNECTORX_DIALECTS}); "
+                'set "backend": "pyarrow" on the table or in defaults'
+            )
+
+    def backend(self, table: TableConfig) -> str:
+        """The table's backend, resolved from the config alone (D3, section 5.3)."""
+        explicit = table.backend or self.defaults.backend
+        if explicit:
+            return explicit
+        return "connectorx" if self.connection.dialect in CONNECTORX_DIALECTS else "pyarrow"
 
     def batch_size(self, table: TableConfig) -> int:
         return table.batch_size or self.defaults.batch_size

@@ -26,6 +26,9 @@ def reflect(engine: sa.Engine, tc: TableConfig) -> sa.Table:
 
 
 def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_started: datetime):
+    backend = cfg.backend(tc)
+    if backend != "pyarrow":  # stopgap until the connectorx and sqlalchemy backends land
+        raise NotImplementedError(f'table {tc.name}: backend {backend!r} is not implemented yet; set "backend": "pyarrow"')
     table = reflect(engine, tc)
     specs = column_specs(table)
     batch_size = cfg.batch_size(tc)

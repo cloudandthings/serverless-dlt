@@ -81,3 +81,48 @@ def test_the_section_5_example_loads():
     assert tx.chunking.page_size == 200000
     assert branches.cursor is None
     assert branches.chunking.strategy == "stream"
+
+
+CONNECTIONS = {
+    "mssql": {"dialect": "mssql", "host": "db.example", "database": "core"},
+    "postgres": {"dialect": "postgres", "host": "db.example", "database": "core"},
+    "mysql": {"dialect": "mysql", "host": "db.example", "database": "core"},
+    "oracle": {"dialect": "oracle", "host": "db.example", "service_name": "CORE"},
+    "db2": {"dialect": "db2", "host": "db.example", "database": "core"},
+    "sqlite": {"dialect": "sqlite", "path": "/data/core.sqlite"},
+    "snowflake": {"dialect": "snowflake", "host": "acct.example", "database": "core"},
+}
+CONNECTORX_DIALECTS = ["mssql", "postgres", "mysql", "oracle", "sqlite"]
+
+
+def config(dialect: str = "sqlite", connection: dict | None = None, defaults: dict | None = None, **table) -> dict:
+    """A one-table config: an incremental `transactions` table, with `table` overriding its keys."""
+    tx = {
+        "name": "transactions",
+        "table": "Transactions",
+        "primary_key": ["TransactionId"],
+        "cursor": {"column": "UpdatedAt", "type": "timestamp", "initial_value": "2026-01-01T00:00:00Z"},
+    }
+    return {
+        "pipeline_name": "core_banking",
+        "dataset_name": "core_banking",
+        "bucket_url": "s3://bronze/bronze",
+        "connection": CONNECTIONS[dialect] | (connection or {}),
+        "defaults": defaults or {},
+        "tables": [{k: v for k, v in (tx | table).items() if v is not None}],
+    }
+
+
+def rejected(cfg: dict) -> str:
+    with pytest.raises(ConfigError) as e:
+        SourceConfig.from_dict(cfg)
+    return str(e.value)
+
+
+@pytest.mark.parametrize("dialect", ["db2", "snowflake"])
+@pytest.mark.parametrize("where", ["table", "defaults"])
+def test_connectorx_on_an_engine_it_does_not_support_is_rejected(dialect, where):
+    cfg = config(dialect, backend="connectorx") if where == "table" else config(dialect, defaults={"backend": "connectorx"})
+    message = rejected(cfg)
+    assert "ConnectorX does not support" in message
+    assert 'set "backend": "pyarrow"' in message
