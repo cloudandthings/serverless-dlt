@@ -13,6 +13,7 @@ import sqlalchemy as sa
 
 from .config import ConnectionConfig, SourceConfig, TableConfig
 from .extract import column_specs, naive_timestamp_columns, read_connectorx, read_pyarrow, with_extracted_at
+from .query import cursor_select, probe_columns, query_source
 
 log = logging.getLogger(__name__)
 
@@ -29,7 +30,12 @@ def connectorx_url(conn: ConnectionConfig) -> str:
     return "sqlite://" + quote(os.path.abspath(conn.path))
 
 
-def reflect(engine: sa.Engine, tc: TableConfig) -> sa.Table:
+def reflect(engine: sa.Engine, tc: TableConfig) -> sa.FromClause:
+    """The reflected source table, or for a `query` table a subquery over its result columns."""
+    if tc.query:
+        with engine.connect() as conn:
+            columns = list(conn.execute(probe_columns(tc)).keys())
+        return query_source(tc, columns)
     return sa.Table(tc.table, sa.MetaData(), schema=tc.schema, autoload_with=engine)
 
 
@@ -41,8 +47,7 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_sta
     batch_size = cfg.batch_size(tc)
     # Without this hint dlt labels naive timestamps UTC without shifting them (prototype S5).
     hints = {name: {"timezone": False} for name in naive_timestamp_columns(table)}
-    cursor_col = table.c[tc.cursor.column]
-    initial = tc.cursor.initial_value if tc.cursor.type == "integer" else tc.cursor.initial_timestamp
+    initial = tc.cursor.initial_cursor_value(cfg.connection.naive_timezone)
 
     @dlt.resource(
         name=tc.name,
@@ -58,10 +63,12 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_sta
         cursor=dlt.sources.incremental(  # noqa: B008
             tc.cursor.column,
             initial_value=initial,
+            lag=tc.cursor.lag,  # dlt steps cursor.start_value back by this
             row_order="asc",
+            on_cursor_value_missing="include" if tc.cursor.include_null_cursor else "raise",
         ),
     ):
-        stmt = sa.select(table).where(cursor_col >= cursor.start_value).order_by(cursor_col)
+        stmt = cursor_select(table, tc, cursor.start_value, cursor.end_value)
         if backend == "connectorx":
             # ConnectorX takes SQL text, so values are inlined, as dlt's own sql_table does.
             sql = str(stmt.compile(engine, compile_kwargs={"literal_binds": True}))

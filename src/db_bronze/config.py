@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field, fields
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 MODES = ("incremental",)
 BACKENDS = ("connectorx", "pyarrow")
@@ -24,6 +25,26 @@ _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 
 class ConfigError(ValueError):
     pass
+
+
+def parse_iso(value: str, where: str) -> datetime:
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError as e:
+        raise ConfigError(f"{where} is not ISO-8601: {value!r}") from e
+
+
+def to_source_time(value: datetime, naive_timezone: str) -> datetime:
+    """A timestamp as the source's naive columns represent it.
+
+    A value with an offset is converted to wall-clock time in `naive_timezone`
+    and its offset dropped. A naive value is already source time. Used only at
+    the boundaries (config `initial_value`, event window bounds); data values are
+    never converted (DESIGN-db.md 7.3).
+    """
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(ZoneInfo(naive_timezone)).replace(tzinfo=None)
 
 
 def default_backend(dialect: str) -> str:
@@ -48,8 +69,16 @@ def _build(cls, data: Any, where: str, **overrides):
 class ConnectionConfig:
     dialect: str  # only sqlite so far
     path: str | None = None  # SQLite database file
+    naive_timezone: str = "UTC"  # what naive source timestamps mean; converts cursor bounds only
 
     def __post_init__(self) -> None:
+        try:
+            ZoneInfo(self.naive_timezone)
+        except (ZoneInfoNotFoundError, ValueError) as e:
+            raise ConfigError(
+                f"connection.naive_timezone {self.naive_timezone!r} is not an IANA time zone, "
+                "e.g. 'Africa/Johannesburg'"
+            ) from e
         if self.dialect != "sqlite":
             raise ConfigError(f"connection.dialect {self.dialect!r}: only 'sqlite' is supported so far")
         if not self.path:
@@ -61,6 +90,10 @@ class CursorConfig:
     column: str  # source column name, exactly as in the database
     type: str  # timestamp | integer
     initial_value: str | int  # ISO-8601 for timestamp cursors, an integer for integer cursors
+    # Seconds (timestamp) or an integer delta: re-read this trailing window on every run. dlt then
+    # deduplicates nothing, so the whole window lands again each run (prototype S4, DESIGN-db.md 12).
+    lag: float | int | None = None
+    include_null_cursor: bool = False  # adds `OR cursor IS NULL`: those rows land on every run
 
     def __post_init__(self) -> None:
         if self.type not in CURSOR_TYPES:
@@ -68,16 +101,13 @@ class CursorConfig:
         if self.type == "integer" and (not isinstance(self.initial_value, int) or isinstance(self.initial_value, bool)):
             raise ConfigError(f"cursor.initial_value must be an integer for an integer cursor: {self.initial_value!r}")
         if self.type == "timestamp":
-            self.initial_timestamp  # noqa: B018 (validates)
+            parse_iso(self.initial_value, "cursor.initial_value")
 
-    @property
-    def initial_timestamp(self) -> datetime:
-        """The ISO initial value as a naive UTC timestamp (an offset, if any, is converted to UTC)."""
-        try:
-            dt = datetime.fromisoformat(str(self.initial_value))
-        except ValueError as e:
-            raise ConfigError(f"cursor.initial_value is not ISO-8601: {self.initial_value!r}") from e
-        return dt.astimezone(UTC).replace(tzinfo=None) if dt.tzinfo else dt
+    def initial_cursor_value(self, naive_timezone: str) -> datetime | int:
+        """The initial value as the source represents it: an integer, or a naive timestamp in source time."""
+        if self.type == "integer":
+            return self.initial_value
+        return to_source_time(parse_iso(self.initial_value, "cursor.initial_value"), naive_timezone)
 
 
 @dataclass(frozen=True)
@@ -89,18 +119,23 @@ class Defaults:
 @dataclass(frozen=True)
 class TableConfig:
     name: str  # bronze table name (path prefix)
-    table: str  # source table name, exactly as in the database
+    table: str | None = None  # source table name, exactly as in the database
     schema: str | None = None  # source schema; None is the connection's default
     primary_key: tuple[str, ...] = ()
     cursor: CursorConfig | None = None
     backend: str | None = None  # overrides defaults.backend
     batch_size: int | None = None  # rows per Arrow batch; overrides defaults.batch_size
+    columns: tuple[str, ...] | None = None  # projection; None is every reflected column
+    where: str | None = None  # static predicate, ANDed with the cursor filter
+    query: str | None = None  # instead of schema + table: a view or join; needs a cursor
 
     def __post_init__(self) -> None:
         if not _NAME.match(self.name):
             raise ConfigError(f"table name {self.name!r} must match {_NAME.pattern}")
         if self.cursor is None:
             raise ConfigError(f"table {self.name}: a cursor is required (snapshot tables are not supported yet)")
+        if (self.table is None) == (self.query is None):
+            raise ConfigError(f"table {self.name}: set either `table` (with optional `schema`) or `query`")
         if self.batch_size is not None and (not isinstance(self.batch_size, int) or self.batch_size < 1):
             raise ConfigError(f"table {self.name}: batch_size must be a positive integer")
 
@@ -153,7 +188,9 @@ class SourceConfig:
             cur = t.get("cursor") if isinstance(t, dict) else None
             cursor = _build(CursorConfig, cur, f"{where}.cursor") if cur is not None else None
             pk = tuple(t.get("primary_key") or ()) if isinstance(t, dict) else ()
-            tables.append(_build(TableConfig, t, where, cursor=cursor, primary_key=pk))
+            columns = t.get("columns") if isinstance(t, dict) else None
+            columns = tuple(columns) if columns is not None else None
+            tables.append(_build(TableConfig, t, where, cursor=cursor, primary_key=pk, columns=columns))
         return _build(
             cls, data, "config", connection=connection, defaults=defaults, tables=tuple(tables)
         )
