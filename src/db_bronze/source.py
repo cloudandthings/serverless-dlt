@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime
+from urllib.parse import quote
 
 import dlt
 import sqlalchemy as sa
 
-from .config import SourceConfig, TableConfig
+from .config import ConnectionConfig, SourceConfig, TableConfig
 from .extract import column_specs, naive_timestamp_columns, read_pyarrow, with_extracted_at
 
 log = logging.getLogger(__name__)
@@ -19,6 +21,11 @@ SCHEMA_CONTRACT = {"tables": "evolve", "columns": "evolve", "data_type": "freeze
 
 def make_engine(cfg: SourceConfig) -> sa.Engine:
     return sa.create_engine(sa.URL.create("sqlite", database=cfg.connection.path))
+
+
+def connectorx_url(conn: ConnectionConfig) -> str:
+    """The ConnectorX URL, built from the same discrete fields as the SQLAlchemy URL (section 5.1)."""
+    return "sqlite://" + quote(os.path.abspath(conn.path))
 
 
 def reflect(engine: sa.Engine, tc: TableConfig) -> sa.Table:

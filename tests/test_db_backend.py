@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from db_bronze.config import ConfigError, SourceConfig, default_backend
+from db_bronze.config import ConfigError, ConnectionConfig, SourceConfig, default_backend
+from db_bronze.source import connectorx_url
 
 
 @pytest.mark.parametrize(
@@ -55,3 +56,8 @@ def test_table_backend_wins_over_defaults_which_win_over_the_dialect(defaults_ba
 def test_unknown_backend_is_rejected():
     with pytest.raises(ConfigError, match="backend 'duckdb'"):
         config(None, "duckdb")
+
+
+def test_sqlite_connectorx_url_is_built_from_the_path():
+    conn = ConnectionConfig(dialect="sqlite", path="/data/core banking#1.sqlite")
+    assert connectorx_url(conn) == "sqlite:///data/core%20banking%231.sqlite"
