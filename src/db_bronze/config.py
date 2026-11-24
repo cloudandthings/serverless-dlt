@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from . import secrets
+from .extract import EXTRACTED_AT
 
 MODES = ("incremental",)
 BACKENDS = ("connectorx", "pyarrow", "sqlalchemy")
@@ -186,6 +187,18 @@ class TableConfig:
         if self.batch_size is not None and not _positive_int(self.batch_size):
             raise ConfigError(f"table {self.name}: batch_size must be a positive integer")
         self._check_source()
+        named = {
+            *self.primary_key,
+            *(self.columns or ()),
+            *self.chunking.order_by,
+            *([self.cursor.column] if self.cursor else []),
+            *([self.partition.column] if self.partition else []),
+        }
+        if EXTRACTED_AT in named:
+            raise ConfigError(
+                f'table {self.name}: a source column is named "{EXTRACTED_AT}", which db_bronze adds to every row; '
+                f'leave it out of "columns", or rename it in a "query" (SELECT "{EXTRACTED_AT}" AS ...)'
+            )
         if self.cursor and self.cursor.lag and not self.primary_key:
             raise ConfigError(
                 f"table {self.name}: cursor.lag re-reads a window, and dlt needs the primary key for it; "

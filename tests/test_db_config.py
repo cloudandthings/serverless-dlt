@@ -257,3 +257,17 @@ def test_a_table_needs_a_source():
 def test_query_table_loads():
     cfg = SourceConfig.from_dict(config(table=None, query=QUERY))
     assert cfg.tables[0].query == QUERY and cfg.tables[0].table is None
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        {"columns": ["TransactionId", "_extracted_at"]},
+        {"cursor": cursor(column="_extracted_at")},
+        {"primary_key": ["_extracted_at"]},
+    ],
+)
+def test_a_source_column_named_extracted_at_is_rejected(table):
+    message = rejected(config(**table))
+    assert "_extracted_at" in message
+    assert 'rename it in a "query" (SELECT "_extracted_at" AS ...)' in message
