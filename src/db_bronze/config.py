@@ -37,6 +37,11 @@ CHUNKING_STRATEGIES = ("stream", "keyset")
 AUTH_TYPES = ("password", "kerberos")
 # What SQLAlchemy's `isolation_level` accepts across the supported dialects (SNAPSHOT: mssql).
 ISOLATION_LEVELS = ("READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE", "SNAPSHOT", "AUTOCOMMIT")
+# Engines where ConnectorX can apply `isolation_level` (spike S3), and the levels it can apply there.
+# Postgres: ConnectorX passes libpq `options` to the server, so `-c default_transaction_isolation=...`
+# becomes the session default. MySQL: its URL takes no session settings, and the level is not
+# settable through a SET_VAR hint. mssql and oracle: until their integration tickets measure it.
+CONNECTORX_ISOLATION = {"postgres": ("READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE")}
 PARQUET_CODECS = ("zstd", "snappy", "gzip", "none")
 SERVER_DIALECTS = ("mssql", "postgres", "mysql", "db2")  # host + database; oracle uses service_name
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -397,14 +402,30 @@ class SourceConfig:
             self._check_backend(t)
             self._check_max_time(t)
 
+    def unstoppable_stream(self, t: TableConfig) -> str | None:
+        """Why `t` cannot be split-loaded (its stream cannot stop early), or None when it can (section 7.4).
+
+        ConnectorX: dropping the stream leaves the query running with the connection open (S1).
+        MySQL on the traditional backend: closing PyMySQL's streaming cursor reads the rest of
+        the result, so the query runs to the end and the close blocks until it has (S1).
+        """
+        if t.chunking.strategy != "stream":
+            return None
+        if self.backend(t) == "connectorx":
+            return "stopping a ConnectorX stream early leaves its query running on the server"
+        if self.connection.dialect == "mysql":
+            return "closing a MySQL stream early blocks until its query has run to the end"
+        return None
+
     def _check_max_time(self, t: TableConfig) -> None:
-        if self.max_time_s is None or self.backend(t) != "connectorx" or t.chunking.strategy != "stream":
+        reason = self.unstoppable_stream(t) if self.max_time_s is not None else None
+        if reason is None:
             return
-        # Cutting a ConnectorX stream short leaves its query running with the connection open (prototype S1).
+        fix_backend = ', set "backend": "pyarrow"' if self.backend(t) == "connectorx" else ""
         raise ConfigError(
-            f"table {t.name}: max_time_s cannot split-load a ConnectorX stream, because stopping it early leaves "
-            'its query running on the server; set "chunking": {"strategy": "keyset", "order_by": '
-            '[<cursor column>, <primary key columns>], "page_size": N} on the table, set "backend": "pyarrow", '
+            f"table {t.name}: max_time_s cannot split-load this stream, because {reason}; "
+            'set "chunking": {"strategy": "keyset", "order_by": '
+            f'[<cursor column>, <primary key columns>], "page_size": N}} on the table{fix_backend}, '
             'or remove "max_time_s"'
         )
 
@@ -424,11 +445,11 @@ class SourceConfig:
                 f"table {t.name}: ConnectorX does not support dialect {dialect!r} (it reads {CONNECTORX_DIALECTS}); "
                 'set "backend": "pyarrow" on the table or in defaults'
             )
-        if self.connection.isolation_level is not None:
-            # Until spike S3 records which engines let ConnectorX apply session settings.
+        level = self.connection.isolation_level
+        if level is not None and level not in CONNECTORX_ISOLATION.get(dialect, ()):
             raise ConfigError(
-                f"table {t.name}: ConnectorX cannot apply connection.isolation_level "
-                f"{self.connection.isolation_level!r} (spike S3 is open for every engine); "
+                f"table {t.name}: ConnectorX cannot apply connection.isolation_level {level!r} on {dialect} "
+                f"(it can on: {CONNECTORX_ISOLATION}); "
                 'set "backend": "pyarrow" on the table or in defaults, or remove "isolation_level"'
             )
         if self.connection.auth.type == "kerberos" and dialect != "mssql":

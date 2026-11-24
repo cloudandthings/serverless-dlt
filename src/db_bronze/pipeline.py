@@ -87,21 +87,22 @@ def time_budget(cfg: SourceConfig, req: RunRequest, tc: TableConfig, max_time_s:
     """The seconds `tc` may spend extracting this run, or None for no limit (section 7.4).
 
     Incremental only. The smaller of the caller's budget and `cfg.max_time_s`
-    wins. A ConnectorX stream table is never split-loaded: dropping its stream
-    leaves the query running with the connection open (prototype S1). Validation
-    keeps `max_time_s` away from such tables, so only the caller's budget is
-    skipped here, and that is logged.
+    wins. A stream that cannot stop early is never split-loaded
+    (`SourceConfig.unstoppable_stream`: ConnectorX anywhere, MySQL on the
+    traditional backend; S1). Validation keeps `max_time_s` away from such
+    tables, so only the caller's budget is skipped here, and that is logged.
     """
     limits = [x for x in (max_time_s, cfg.max_time_s) if x is not None]
     if not limits or req.mode != "incremental":
         return None
-    if cfg.backend(tc) == "connectorx" and tc.chunking.strategy == "stream":
+    reason = cfg.unstoppable_stream(tc)
+    if reason is not None:
         log.warning(
             json.dumps(
                 {
                     "event": "time budget skipped",
                     "table": tc.name,
-                    "reason": "a ConnectorX stream cannot be stopped early without leaving its query running; "
+                    "reason": f"{reason}; "
                     'use "chunking": {"strategy": "keyset", ...} to split-load this table',
                 }
             ),

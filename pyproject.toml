@@ -42,7 +42,13 @@ packages = ["src/api_bronze", "src/db_bronze"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["spark: needs pyspark 4.1 and Java (uv sync --group silver)"]
+markers = [
+    "spark: needs pyspark 4.1 and Java (uv sync --group silver)",
+    "integration: needs Docker; real source engines from tests/integration/compose.yaml (mise run test:integration)",
+]
+# The integration suite is opt-in, so a plain run never needs Docker. A later -m on the
+# command line replaces this one (pytest -m integration).
+addopts = ["-m", "not integration"]
 filterwarnings = ["ignore::DeprecationWarning"]
 
 [tool.ruff]

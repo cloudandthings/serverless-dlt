@@ -30,8 +30,15 @@ def test_decimal_within_the_limits_passes(precision, scale):
     assert column_findings("postgres", "connectorx", [("Ok", sa.Numeric(precision, scale))]) == []
 
 
-def test_decimal_with_no_declared_precision_passes():
-    assert column_findings("postgres", "connectorx", [("Ok", sa.Numeric())]) == []
+def test_unconstrained_postgres_numeric_is_a_finding():
+    # ConnectorX reads it as decimal(38,10) and drops digits past the 10th decimal place (integration type matrix).
+    [finding] = column_findings("postgres", "connectorx", [("Any", sa.Numeric())])
+    assert "Any" in finding and "NUMERIC without precision" in finding
+
+
+@pytest.mark.parametrize("dialect", ["sqlite", "mysql"])
+def test_decimal_with_no_declared_precision_passes_elsewhere(dialect):
+    assert column_findings(dialect, "connectorx", [("Ok", sa.Numeric())]) == []
 
 
 def test_decimal_rule_does_not_apply_to_pyarrow():
