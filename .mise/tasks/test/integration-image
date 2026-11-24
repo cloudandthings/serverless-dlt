@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#MISE description="Run the db_bronze integration suite inside the built db-bronze image, on the compose network"
+#USAGE arg "[pytest_args]..." help="Passed to pytest, e.g. -- -k incremental"
+#USAGE flag "--engines <engines>" default="oracle" help="Comma-separated engines to run (DB_BRONZE_IT_ENGINES)"
+#USAGE flag "-t --tag <tag>" default="db-bronze:it" help="Image tag to build and run"
+#USAGE flag "--no-build" help="Reuse the image already tagged --tag"
+#USAGE flag "--keep" help="Leave the engines running afterwards"
+set -euo pipefail
+cd "$MISE_PROJECT_ROOT"
+
+# usage hands the variadic args over as one shell-quoted string
+eval "pytest_args=(${usage_pytest_args:-})"
+engines="${usage_engines:-oracle}"
+tag="${usage_tag:-db-bronze:it}"
+
+if [[ "${usage_no_build:-false}" != "true" ]]; then
+  mise run docker:build --db --tag "$tag"
+fi
+
+# pytest is not part of the Lambda image: a throwaway layer on top adds it, at the versions uv.lock pins.
+pins=$(uv export --frozen --no-hashes --only-group dev --no-emit-project \
+  | grep -E '^(pytest|pluggy|iniconfig|packaging|pygments)==' | tr '\n' ' ')
+printf 'FROM %s\nRUN pip install --no-cache-dir --target /opt/it %s\n' "$tag" "$pins" \
+  | docker build --platform linux/amd64 -t "$tag-pytest" -
+
+compose=(docker compose -f tests/integration/compose.yaml)
+if [[ "${usage_keep:-false}" != "true" ]]; then
+  trap '"${compose[@]}" down --volumes --remove-orphans' EXIT
+fi
+"${compose[@]}" up -d --wait ${engines//,/ }
+network="$("${compose[@]}" config --format json | uv run python -c 'import json, sys; print(json.load(sys.stdin)["name"])')_default"
+
+# The handler imports from the image's task root, as on Lambda (Instant Client, thick mode, ODBC);
+# only the tests are mounted. Engines are reached by service name on the compose network.
+docker run --rm --platform linux/amd64 --network "$network" \
+  -v "$MISE_PROJECT_ROOT/tests:/it/tests:ro" -v "$MISE_PROJECT_ROOT/pyproject.toml:/it/pyproject.toml:ro" -w /it \
+  -e PYTHONPATH=/var/task:/opt/it -e DB_BRONZE_IT_NETWORK=compose -e DB_BRONZE_IT_ENGINES="$engines" \
+  --entrypoint python3 "$tag-pytest" \
+  -m pytest -p no:cacheprovider -m integration tests/integration ${pytest_args[@]+"${pytest_args[@]}"}
