@@ -8,7 +8,8 @@ Arrow using the types from SQLAlchemy reflection, so a table's Arrow schema is
 the same on every run and in every batch (D2). Driver values Arrow cannot take
 (UUIDs, network addresses, parsed JSON, MySQL SETs, Postgres bit strings,
 intervals and time-with-time-zone) and unconstrained NUMERIC land as text, losslessly
-(DESIGN-db.md section 10.1).
+(DESIGN-db.md section 10.1). Postgres arrays land as lists of their element type,
+with the same conversions applied to each element.
 """
 
 from __future__ import annotations
@@ -39,8 +40,15 @@ def _mysql_set_text(col_type: mysql.SET) -> Callable[[Any], str]:
     return lambda members: ",".join(v for v in col_type.values if v in members)
 
 
+def _each(convert: Callable[[Any], Any]) -> Callable[[list], list]:
+    return lambda values: [None if v is None else convert(v) for v in values]
+
+
 def _converter(col_type: sa.types.TypeEngine) -> Callable[[Any], Any] | None:
     """How to turn a driver value Arrow cannot take into text, or None when Arrow takes it as it is."""
+    if isinstance(col_type, sa.ARRAY):
+        item = _converter(col_type.item_type)
+        return _each(item) if item is not None else None
     if isinstance(col_type, sa.JSON):
         return _json_text
     if isinstance(col_type, mysql.SET):
@@ -64,6 +72,9 @@ def arrow_type(col_type: sa.types.TypeEngine) -> pa.DataType | None:
     Integers map to int64, lossless for every engine's integer types except
     MySQL's BIGINT UNSIGNED, which maps to uint64.
     """
+    if isinstance(col_type, sa.ARRAY):  # typed from the element, so the type never depends on the values
+        item = arrow_type(col_type.item_type)
+        return pa.list_(item) if item is not None else None
     if _converter(col_type) not in (None, float):
         return pa.string()
     if isinstance(col_type, sa.Boolean):

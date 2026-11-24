@@ -54,15 +54,44 @@ def _is_oracle_local_tz(t: sa.types.TypeEngine) -> bool:
     return isinstance(t, oracle.TIMESTAMP) and bool(t.local_timezone)
 
 
-# Types ConnectorX cannot read (section 3.1), per dialect: (description, matcher).
+def _is_postgres_varbit(t: sa.types.TypeEngine) -> bool:
+    return isinstance(t, pg.BIT) and bool(t.varying)
+
+
+def _is_bare_string(t: sa.types.TypeEngine) -> bool:
+    # SQLAlchemy reflects Postgres "char" (and name) as a plain String with no length; every other
+    # text type reflects as a subclass (VARCHAR, CHAR, TEXT)
+    return type(t) is sa.String and t.length is None
+
+
+# Postgres array elements ConnectorX reads (integration type matrix). Arrays of any other
+# element type panic in ConnectorX; NUMERIC elements are checked by the decimal rule.
+_POSTGRES_ARRAY_ITEMS = (sa.Integer, sa.Boolean, sa.Float, sa.Numeric, sa.VARCHAR, sa.TEXT)
+
+
+def _is_unreadable_postgres_array(t: sa.types.TypeEngine) -> bool:
+    if not isinstance(t, sa.ARRAY):
+        return False
+    item = t.item_type
+    return not isinstance(item, _POSTGRES_ARRAY_ITEMS) or isinstance(item, sa.CHAR)
+
+
+# Types ConnectorX cannot read (section 3.1, settled by the integration type matrix,
+# section 10.1), per dialect: (description, matcher). Types SQLAlchemy does not
+# recognise at all (Postgres xml, geometric types, pg_lsn, composite types; MySQL
+# geometry types) are caught on every server dialect by `_UNRECOGNISED`.
 DENY_LIST: dict[str, list[tuple[str, Callable[[sa.types.TypeEngine], bool]]]] = {
     "postgres": [
         ("interval", lambda t: isinstance(t, (sa.Interval, pg.INTERVAL))),
         ("money", lambda t: isinstance(t, pg.MONEY)),
         ("timetz", _is_timetz),
-        ("macaddr", lambda t: isinstance(t, pg.MACADDR)),
-        ("array", lambda t: isinstance(t, sa.ARRAY)),
-        ("xml", _named("XML")),
+        ("macaddr", lambda t: isinstance(t, (pg.MACADDR, pg.MACADDR8))),
+        ("cidr", lambda t: isinstance(t, pg.CIDR)),
+        ("varbit", _is_postgres_varbit),
+        ("tsvector", lambda t: isinstance(t, pg.TSVECTOR)),
+        ("tsquery", lambda t: isinstance(t, pg.TSQUERY)),
+        ('"char" (or name: SQLAlchemy reflects both as String)', _is_bare_string),
+        ("array of this element type", _is_unreadable_postgres_array),
     ],
     "mssql": [
         ("sql_variant", _named("SQL_VARIANT")),
@@ -80,6 +109,8 @@ DENY_LIST: dict[str, list[tuple[str, Callable[[sa.types.TypeEngine], bool]]]] = 
         ("xmltype", _named("XMLTYPE")),
     ],
 }
+# SQLite reflects a column declared without a type as NullType, and ConnectorX reads it from its values.
+_UNRECOGNISED_EXEMPT = ("sqlite",)
 
 
 class PreflightError(Exception):
@@ -112,6 +143,40 @@ def server_version_finding(
     )
 
 
+def _decimal_finding(dialect: str, col_type: sa.types.TypeEngine) -> str | None:
+    if not isinstance(col_type, sa.Numeric) or isinstance(col_type, sa.Float):
+        return None
+    p, s = col_type.precision, col_type.scale
+    if p is None and dialect in UNCONSTRAINED_NUMERIC_DIALECTS:
+        return (
+            f"NUMERIC without precision would lose digits past the {MAX_DECIMAL_SCALE}th decimal place "
+            "silently on ConnectorX; declare a precision or cast it"
+        )
+    if (s is not None and s > MAX_DECIMAL_SCALE) or (p is not None and p > MAX_DECIMAL_PRECISION):
+        return (
+            f"DECIMAL({p},{s}) would lose digits silently on ConnectorX "
+            f"(limit: precision {MAX_DECIMAL_PRECISION}, scale {MAX_DECIMAL_SCALE})"
+        )
+    return None
+
+
+def _connectorx_finding(dialect: str, col_type: sa.types.TypeEngine) -> str | None:
+    """Why ConnectorX cannot read a column of this type exactly on `dialect`, or None when it can."""
+    if isinstance(col_type, sa.types.NullType) and dialect not in _UNRECOGNISED_EXEMPT:
+        return (
+            f"type not recognised by SQLAlchemy; ConnectorX reads none of the unrecognised {dialect} types "
+            "tested (e.g. xml, geometry)"
+        )
+    if isinstance(col_type, sa.ARRAY) and (item := _decimal_finding(dialect, col_type.item_type)):
+        return f"array element: {item}"
+    if decimal := _decimal_finding(dialect, col_type):
+        return decimal
+    for label, matches in DENY_LIST.get(dialect, []):
+        if matches(col_type):
+            return f"type {label} is not supported by ConnectorX on {dialect}"
+    return None
+
+
 def column_findings(dialect: str, backend: str, columns: list[tuple[str, sa.types.TypeEngine | None]]) -> list[str]:
     """Every offending column among `(name, reflected type)` pairs, one message each."""
     findings = []
@@ -120,24 +185,8 @@ def column_findings(dialect: str, backend: str, columns: list[tuple[str, sa.type
             findings.append(f"column {name}: the name is reserved for the extraction timestamp; rename or exclude it")
         if backend != "connectorx" or col_type is None:
             continue
-        if isinstance(col_type, sa.Numeric) and not isinstance(col_type, sa.Float):
-            p, s = col_type.precision, col_type.scale
-            if p is None and dialect in UNCONSTRAINED_NUMERIC_DIALECTS:
-                findings.append(
-                    f"column {name}: NUMERIC without precision would lose digits past the "
-                    f"{MAX_DECIMAL_SCALE}th decimal place silently on ConnectorX; declare a precision or cast it"
-                )
-                continue
-            if (s is not None and s > MAX_DECIMAL_SCALE) or (p is not None and p > MAX_DECIMAL_PRECISION):
-                findings.append(
-                    f"column {name}: DECIMAL({p},{s}) would lose digits silently on ConnectorX "
-                    f"(limit: precision {MAX_DECIMAL_PRECISION}, scale {MAX_DECIMAL_SCALE})"
-                )
-                continue
-        for label, matches in DENY_LIST.get(dialect, []):
-            if matches(col_type):
-                findings.append(f"column {name}: type {label} is not supported by ConnectorX on {dialect}")
-                break
+        if finding := _connectorx_finding(dialect, col_type):
+            findings.append(f"column {name}: {finding}")
     return findings
 
 
@@ -184,7 +233,8 @@ def preflight(
         backend = cfg.backend(tc)
         table = reflect(engine, tc)
         wanted = set(tc.columns) if tc.columns else None
-        columns = [(c.name, c.type) for c in table.columns if wanted is None or c.name in wanted]
+        # A query's result columns are not reflected: their types are unknown (None), not unrecognised.
+        columns = [(c.name, None if tc.query else c.type) for c in table.columns if wanted is None or c.name in wanted]
         report = TableReport(tc.name, backend, column_findings(dialect, backend, columns), table=table)
         report.null_cursor_count = count_null_cursor(engine, table, tc)
         log.info("preflight %s", json.dumps(report.as_dict()))

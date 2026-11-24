@@ -2,15 +2,26 @@
 #MISE description="Bring up the source engines (docker-compose) and run the db_bronze integration suite"
 #USAGE arg "[pytest_args]..." help="Passed to pytest, e.g. -- -k mysql"
 #USAGE flag "--keep" help="Leave the engines running afterwards (faster re-runs); stop them with: docker compose -f tests/integration/compose.yaml down"
+#USAGE flag "--image" help="Build the db_bronze image and run the same suite inside it, through the Lambda Runtime Interface Emulator"
+#USAGE flag "-t --tag <tag>" help="Image tag for --image (default db-bronze:test)" env="IMAGE_TAG"
+#USAGE flag "--no-build" help="With --image: use the image already tagged, without rebuilding it"
 set -euo pipefail
 cd "$MISE_PROJECT_ROOT"
 
 # usage hands the variadic args over as one shell-quoted string
 eval "pytest_args=(${usage_pytest_args:-})"
 
+# COMPOSE_PROJECT_NAME and the DB_BRONZE_IT_*_PORT variables give a second stack of its own (compose.yaml)
 compose=(docker compose -f tests/integration/compose.yaml)
 if [[ "${usage_keep:-false}" != "true" ]]; then
   trap '"${compose[@]}" down --volumes --remove-orphans' EXIT
+fi
+if [[ "${usage_image:-false}" == "true" ]]; then
+  tag="${usage_tag:-db-bronze:test}"
+  if [[ "${usage_no_build:-false}" != "true" ]]; then
+    mise run docker:build --db --tag "$tag"
+  fi
+  export DB_BRONZE_IT_IMAGE="$tag"
 fi
 "${compose[@]}" up -d --wait
 uv run pytest -m integration ${pytest_args[@]+"${pytest_args[@]}"}

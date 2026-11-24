@@ -110,7 +110,9 @@ def test_partitioned_read_hands_partition_on_to_connectorx(invoke, monkeypatch):
 
     monkeypatch.setattr(cx, "read_sql", spy)
     invoke(TRANSACTIONS | {"partition": PARTITION}, mode="full")
-    assert [(c.get("partition_on"), c.get("partition_num")) for c in calls] == [("TransactionId", 3)]
+    # quoted for the engine: ConnectorX puts the name into its range SQL as given, and Postgres
+    # folds an unquoted mixed-case name to lower case (integration)
+    assert [(c.get("partition_on"), c.get("partition_num")) for c in calls] == [('"TransactionId"', 3)]
     calls.clear()
     invoke(mode="full")
     assert [c.get("partition_on") for c in calls] == [None]
