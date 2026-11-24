@@ -181,6 +181,7 @@ PAGE = page_event({"table": "transactions", "offset": 0, "limit": 2})
 @pytest.mark.parametrize(
     ("event", "message"),
     [
+        ({"mode": "full", "pagesize": 3}, r"unknown event keys \['pagesize'\]"),
         ({"mode": "plan"}, r'needs "plan" in'),
         ({"mode": "plan", "plan": "snapshot"}, r'needs "page_size"'),
         ({"mode": "full", "page_size": 3}, r"only valid with plan=snapshot"),

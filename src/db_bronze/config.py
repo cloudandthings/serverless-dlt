@@ -20,6 +20,14 @@ from .extract import EXTRACTED_AT
 
 MODES = ("incremental", "full", "backfill", "plan", "finalize")
 PLANS = ("snapshot", "backfill")
+# Every key a Lambda event may carry; any other key is a typo, so it fails instead of being ignored.
+EVENT_KEYS = frozenset({
+    "source_id", "config", "mode", "tables",  # every event
+    "window_start", "window_end",  # backfill
+    "plan", "page_size", "windows", "window_size",  # plan
+    "page", "snapshot_id", "partition_date",  # a page of a planned snapshot (mode=full)
+    "table", "load_ids",  # finalize
+})
 BACKENDS = ("connectorx", "pyarrow", "sqlalchemy")
 # Engines ConnectorX reads (section 3.1); these default to it (D3, section 5.3). Db2 is not supported.
 CONNECTORX_DIALECTS = ("mssql", "postgres", "mysql", "oracle", "sqlite")
@@ -502,6 +510,9 @@ class RunRequest:
 
     @classmethod
     def from_event(cls, event: dict) -> RunRequest:
+        unknown = sorted(set(event) - EVENT_KEYS)
+        if unknown:
+            raise ConfigError(f"unknown event keys {unknown}; allowed {sorted(EVENT_KEYS)}")
         mode = event.get("mode", "incremental")
         if mode not in MODES:
             raise ConfigError(f"mode {mode!r} not in {MODES}")
