@@ -6,6 +6,10 @@ test:integration` (or `pytest -m integration`) selects them. The session fixture
 brings the compose stack up itself (idempotent) and skips everything when Docker
 is not available.
 
+`DB_BRONZE_IT_ENGINES` (comma-separated, e.g. `mssql`) limits the run to some
+engines, and `DB_BRONZE_IT_HOST` points at engines that are not on 127.0.0.1
+(for a run inside the image, on the compose network).
+
 Each test gets a fresh database on its engine, dropped afterwards, and runs the
 handler against it into a `file://` bucket, the same seam as the SQLite suite.
 Later engines join by adding a service to compose.yaml and an `Engine` below.
@@ -13,12 +17,14 @@ Later engines join by adding a service to compose.yaml and an `Engine` below.
 
 from __future__ import annotations
 
+import builtins
 import json
 import os
 import subprocess
+import urllib.request
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -27,6 +33,7 @@ import sqlalchemy as sa
 
 COMPOSE_FILE = Path(__file__).with_name("compose.yaml")
 PASSWORD = "bronze-it"
+HOST = os.environ.get("DB_BRONZE_IT_HOST", "127.0.0.1")
 
 
 @dataclass(frozen=True)
@@ -39,26 +46,32 @@ class Engine:
     admin_user: str
     admin_database: str
     sqlalchemy_driver: str
+    password: str = PASSWORD
+    driver_options: dict = field(default_factory=dict)  # the config's
+    url_query: dict = field(default_factory=dict)  # the harness's own URL only (driver_options are added)
+    host: str = HOST
 
     def url(self, database: str) -> sa.URL:
         return sa.URL.create(
             self.sqlalchemy_driver,
             username=self.admin_user,
-            password=PASSWORD,
-            host="127.0.0.1",
+            password=self.password,
+            host=self.host,
             port=self.port,
             database=database,
+            query=self.url_query | self.driver_options,
         )
 
     def connection(self, database: str) -> dict:
         """The config's `connection` block for `database`."""
         return {
             "dialect": self.dialect,
-            "host": "127.0.0.1",
+            "host": self.host,
             "port": self.port,
             "database": database,
             "username": self.admin_user,
-            "password": PASSWORD,
+            "password": self.password,
+            **({"driver_options": dict(self.driver_options)} if self.driver_options else {}),
         }
 
 
@@ -70,7 +83,16 @@ ENGINES = {
     "mysql": Engine(
         "mysql", "mysql", int(os.environ.get("DB_BRONZE_IT_MYSQL_PORT", "53306")), "root", "mysql", "mysql+pymysql",
     ),
+    "mssql": Engine(
+        "mssql", "mssql", int(os.environ.get("DB_BRONZE_IT_MSSQL_PORT", "51433")), "sa", "master", "mssql+pyodbc",
+        password="Bronze-it-1",
+        # The container's certificate is self-signed; ODBC Driver 18 encrypts by default.
+        driver_options={"TrustServerCertificate": "yes"},
+        url_query={"driver": "ODBC Driver 18 for SQL Server"},
+    ),
 }
+if os.environ.get("DB_BRONZE_IT_ENGINES"):
+    ENGINES = {name: ENGINES[name] for name in os.environ["DB_BRONZE_IT_ENGINES"].split(",")}
 
 
 def _docker_available() -> bool:
@@ -89,7 +111,7 @@ def compose() -> None:
         ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "--wait", *(e.service for e in ENGINES.values())],
         check=True,
         capture_output=True,
-        timeout=600,
+        timeout=1800,  # SQL Server under x86_64 emulation starts slowly
     )
 
 
@@ -151,6 +173,8 @@ def source(request, compose, bucket: Path):
                     "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
                     f"WHERE datname = '{database}' AND pid <> pg_backend_pid()"
                 )
+            if engine.dialect == "mssql":  # the same, for SQL Server
+                conn.exec_driver_sql(f"ALTER DATABASE {database} SET SINGLE_USER WITH ROLLBACK IMMEDIATE")
             conn.exec_driver_sql(f"DROP DATABASE {database}")
         admin.dispose()
 
@@ -159,6 +183,34 @@ def source(request, compose, bucket: Path):
 def backend(request) -> str:
     """Every handler-level scenario runs on both backends."""
     return request.param
+
+
+# Set by `mise run test:integration --image`: the suite runs inside the built image, and every
+# handler run goes through the Lambda Runtime Interface Emulator at this URL, as Lambda would invoke it.
+RIE_URL = os.environ.get("DB_BRONZE_IT_RIE")
+in_image_only_in_process = pytest.mark.skipif(
+    RIE_URL is not None, reason="patches the handler's process, which the emulator runs separately"
+)
+
+
+def invoke_rie(event: dict) -> dict:
+    """POST `event` to the emulator; a function error is raised again as the db_bronze type it names."""
+    from db_bronze import config, errors, preflight
+
+    request = urllib.request.Request(
+        f"{RIE_URL}/2015-03-31/functions/function/invocations", data=json.dumps(event).encode(), method="POST"
+    )
+    with urllib.request.urlopen(request, timeout=1800) as response:
+        result = json.loads(response.read() or b"null")
+    if isinstance(result, dict) and "errorType" in result:
+        name = result["errorType"]
+        kind = next((getattr(m, name) for m in (errors, config, preflight, builtins) if hasattr(m, name)), None)
+        if not (isinstance(kind, type) and issubclass(kind, Exception)):
+            raise AssertionError(f"function error: {result}")
+        error = kind.__new__(kind)
+        error.args = (result.get("errorMessage", ""),)
+        raise error
+    return result
 
 
 @pytest.fixture
@@ -180,6 +232,8 @@ def run(source: SourceDB, bucket: Path, tmp_path: Path, pipelines_dir: str, monk
             "tables": list(tables),
             **settings,
         }
+        if RIE_URL is not None:  # the emulator's process has its own environment: the config goes inline
+            return invoke_rie({k: v for k, v in event.items() if k != "source_id"} | {"config": cfg})
         (config_dir / f"{event['source_id']}.json").write_text(json.dumps(cfg))
         return handler(event, None)
 
