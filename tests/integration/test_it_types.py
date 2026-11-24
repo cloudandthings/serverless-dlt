@@ -18,6 +18,8 @@ import connectorx as cx
 import pyarrow.parquet as pq
 import pytest
 
+from db_bronze import preflight
+
 from .conftest import connectorx_skip_reason
 
 pytestmark = pytest.mark.integration
@@ -453,7 +455,7 @@ SINCE = {"oracle": {"c_boolean": (23,), "c_json": (23,)}}
 
 def server_version(source) -> tuple[int, ...]:
     with source.sa.connect():
-        return source.sa.dialect.server_version_info
+        return preflight.server_version(source.sa.dialect)
 
 
 def seed_matrix(source) -> dict[str, tuple[str, str, bool]]:

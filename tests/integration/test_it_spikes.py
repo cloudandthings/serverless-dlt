@@ -18,7 +18,7 @@ import sqlalchemy as sa
 
 from db_bronze.config import ChunkingConfig, CursorConfig, SourceConfig, TableConfig
 from db_bronze.extract import ColumnSpec, read_pyarrow
-from db_bronze.preflight import MIN_SERVER_VERSION
+from db_bronze.preflight import MIN_SERVER_VERSION, server_version
 from db_bronze.query import cursor_select, keyset_select, literal_sql
 from db_bronze.urls import connectorx_url
 
@@ -452,7 +452,7 @@ def test_the_server_meets_the_recorded_minimum(source, run):
     minimum = MIN_SERVER_VERSION[source.dialect]
     assert minimum is not None
     with source.sa.connect():
-        assert source.sa.dialect.server_version_info >= minimum
-    source.execute("CREATE TABLE v (id integer PRIMARY KEY)")
+        assert server_version(source.sa.dialect) >= minimum
+    source.execute("CREATE TABLE v (id integer NOT NULL PRIMARY KEY)")  # Db2: a key is NOT NULL
     report = run({"source_id": "v", "mode": "validate"}, {"name": "v", "table": "v"})
     assert report["ok"] and report["server_findings"] == []

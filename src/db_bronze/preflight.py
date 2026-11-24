@@ -16,7 +16,7 @@ from sqlalchemy.dialects import mssql, oracle
 from sqlalchemy.dialects import postgresql as pg
 
 from .config import SourceConfig, TableConfig
-from .extract import EXTRACTED_AT
+from .extract import DB2_DIALECT, EXTRACTED_AT
 from .source import reflect
 
 log = logging.getLogger(__name__)
@@ -28,13 +28,14 @@ log = logging.getLogger(__name__)
 # DESIGN-db.md section 11). SQL Server on Linux starts at 2017, so nothing older was run.
 # Oracle 23 (Free 23.26) is the only series it could run on so far: older servers are
 # x86_64 only and do not start under emulation on an arm64 host (S9 stays open below 23).
+# Db2 11.5: the whole suite passes on 11.5 and 12.1 (Community images; nothing older is published).
 MIN_SERVER_VERSION: dict[str, tuple[int, ...] | None] = {
     "mssql": (14,),
     "postgres": (11,),
     "mysql": (8, 0),
     "oracle": (23,),
     "sqlite": None,
-    "db2": None,
+    "db2": (11, 5),
 }
 
 # ConnectorX produces Decimal128(38, 10) and holds about 28 significant digits (section 3.1).
@@ -151,6 +152,18 @@ class PreflightError(Exception):
         super().__init__("\n".join(lines))
 
 
+def server_version(dialect: sa.Dialect) -> tuple[int, ...] | None:
+    """The server version the dialect learned on connect, as numbers.
+
+    ibm_db_sa reports the product and its level as text, ('DB2/LINUXX8664',
+    '12.01.0500') (integration, Db2), which would not compare with a minimum.
+    """
+    version = dialect.server_version_info
+    if dialect.name == DB2_DIALECT and version:
+        return tuple(int(part) for part in version[-1].split("."))
+    return version
+
+
 def server_version_finding(
     dialect: str, version: tuple[int, ...] | None, minimums: dict[str, tuple[int, ...] | None] | None = None
 ) -> str | None:
@@ -261,7 +274,7 @@ def preflight(
     """Reflect each table and apply the rules. Returns (server findings, one report per table). Never extracts."""
     dialect = cfg.connection.dialect
     with engine.connect():  # the dialect learns the server version on first connect
-        version = engine.dialect.server_version_info
+        version = server_version(engine.dialect)
     server = server_version_finding(dialect, version)
     reports = []
     for tc in tables:
