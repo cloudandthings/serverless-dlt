@@ -52,6 +52,14 @@ def _names(value: Any, where: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _check_name(what: str, name: Any) -> None:
+    if not isinstance(name, str) or not _NAME.match(name):
+        raise ConfigError(
+            f"{what} {name!r} must match {_NAME.pattern}: use lowercase letters, digits and underscores, "
+            "starting with a letter"
+        )
+
+
 def _number(value: Any) -> bool:
     return isinstance(value, int | float) and not isinstance(value, bool)
 
@@ -182,8 +190,7 @@ class TableConfig:
     partition: PartitionConfig | None = None
 
     def __post_init__(self) -> None:
-        if not _NAME.match(self.name):
-            raise ConfigError(f"table name {self.name!r} must match {_NAME.pattern}")
+        _check_name("table name", self.name)
         if self.batch_size is not None and not _positive_int(self.batch_size):
             raise ConfigError(f"table {self.name}: batch_size must be a positive integer")
         self._check_source()
@@ -253,14 +260,17 @@ class SourceConfig:
     max_time_s: float | None = None  # its rules belong to the time-budget work (section 7.4)
 
     def __post_init__(self) -> None:
-        for n in (self.pipeline_name, self.dataset_name):
-            if not _NAME.match(n):
-                raise ConfigError(f"name {n!r} must match {_NAME.pattern}")
+        _check_name("pipeline_name", self.pipeline_name)
+        _check_name("dataset_name", self.dataset_name)
         if not self.tables:
             raise ConfigError("tables: at least one is required")
-        names = [t.name for t in self.tables]
-        if len(set(names)) != len(names):
-            raise ConfigError(f"table names must be unique: {names}")
+        seen: set[str] = set()
+        for t in self.tables:
+            if t.name in seen:
+                raise ConfigError(
+                    f"duplicate table name {t.name!r}: each is a bronze path prefix; give each table its own name"
+                )
+            seen.add(t.name)
         if self.parquet_compression not in PARQUET_CODECS:
             raise ConfigError(f"parquet_compression {self.parquet_compression!r} not in {PARQUET_CODECS}")
         if self.defaults.backend is not None and self.defaults.backend not in BACKENDS:

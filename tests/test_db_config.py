@@ -271,3 +271,24 @@ def test_a_source_column_named_extracted_at_is_rejected(table):
     message = rejected(config(**table))
     assert "_extracted_at" in message
     assert 'rename it in a "query" (SELECT "_extracted_at" AS ...)' in message
+
+
+NAME_FIX = "use lowercase letters, digits and underscores, starting with a letter"
+
+
+@pytest.mark.parametrize("key", ["pipeline_name", "dataset_name"])
+@pytest.mark.parametrize("name", ["CoreBanking", "core-banking", "1core", ""])
+def test_pipeline_and_dataset_names_are_lowercase_identifiers(key, name):
+    message = rejected(config() | {key: name})
+    assert key in message and NAME_FIX in message
+
+
+def test_table_names_are_lowercase_identifiers():
+    assert NAME_FIX in rejected(config(name="Transactions"))
+
+
+def test_duplicate_table_names_are_rejected():
+    cfg = config()
+    cfg["tables"].append(dict(cfg["tables"][0]))
+    message = rejected(cfg)
+    assert "duplicate table name 'transactions'" in message and "give each table its own name" in message
