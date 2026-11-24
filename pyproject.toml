@@ -13,9 +13,12 @@ dependencies = [
 [project.optional-dependencies]
 # Secrets Manager refs (secrets.py). The Lambda base image ships boto3, but pin it.
 aws = ["boto3>=1.40"]
+# db_bronze (DESIGN-db.md). Drivers and ConnectorX are added as their backends land.
+db = ["sqlalchemy>=2"]
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.8"]
+# The tests cover both packages, so dev pulls in the db extra.
+dev = ["api-bronze[db]", "pytest>=8", "ruff>=0.8"]
 # Runs the silver reference transform test locally (needs Java 17+).
 silver = ["pyspark==4.1.1"]
 
@@ -24,7 +27,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/api_bronze"]
+packages = ["src/api_bronze", "src/db_bronze"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -38,3 +41,6 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
 ignore = ["RUF001", "RUF002", "RUF003"]  # deliberate non-ASCII in docs and test data
+
+[tool.uv.sources]
+api-bronze = { workspace = true }
