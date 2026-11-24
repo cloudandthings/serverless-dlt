@@ -149,8 +149,14 @@ class ChunkingConfig:
 
 @dataclass(frozen=True)
 class PartitionConfig:
-    column: str  # ConnectorX partition_on
+    column: str  # ConnectorX partition_on; the preflight checks it is an integer column
     num: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.column, str) or not self.column:
+            raise ConfigError(f"partition.column must be a column name: {self.column!r}")
+        if not _positive_int(self.num):
+            raise ConfigError(f"partition.num must be a positive integer: {self.num!r}")
 
 
 @dataclass(frozen=True)
@@ -186,6 +192,11 @@ class TableConfig:
             )
         if self.chunking.strategy == "keyset":
             self._check_keyset()
+        if self.partition and self.chunking.strategy != "stream":
+            raise ConfigError(
+                f'table {self.name}: partition reads cannot be chunked; use "chunking": {{"strategy": "stream"}}, '
+                'or remove "partition"'
+            )
 
     def _check_keyset(self) -> None:
         where = f"table {self.name}: keyset chunking"
@@ -233,6 +244,11 @@ class SourceConfig:
     def _check_backend(self, t: TableConfig) -> None:
         if t.backend is not None and t.backend not in BACKENDS:
             raise ConfigError(f"table {t.name}: backend {t.backend!r} not in {BACKENDS}")
+        if t.partition and self.backend(t) != "connectorx":
+            raise ConfigError(
+                f"table {t.name}: partition is a ConnectorX read (partition_on), but the table resolves to "
+                f'{self.backend(t)!r}; set "backend": "connectorx", or remove "partition"'
+            )
         if self.backend(t) != "connectorx":
             return
         dialect = self.connection.dialect

@@ -209,3 +209,28 @@ def test_zero_lag_needs_no_primary_key():
 )
 def test_cursor_value_rules(changes, match):
     assert match in rejected(config(cursor=cursor(**changes)))
+
+
+PARTITION = {"column": "TransactionId", "num": 4}
+
+
+@pytest.mark.parametrize("backend", ["pyarrow", "sqlalchemy"])
+def test_partition_needs_connectorx(backend):
+    message = rejected(config("postgres", backend=backend, partition=PARTITION))
+    assert "partition is a ConnectorX read" in message and 'set "backend": "connectorx"' in message
+
+
+def test_partition_needs_stream_chunking():
+    message = rejected(config("postgres", partition=PARTITION, chunking=keyset()))
+    assert "partition" in message and 'use "chunking": {"strategy": "stream"}' in message
+
+
+@pytest.mark.parametrize("num", [0, -2, "4", 2.5])
+def test_partition_num_is_a_positive_integer(num):
+    message = rejected(config("postgres", partition=PARTITION | {"num": num}))
+    assert "partition.num must be a positive integer" in message
+
+
+def test_partition_on_connectorx_stream_loads():
+    cfg = SourceConfig.from_dict(config("postgres", partition=PARTITION))
+    assert cfg.tables[0].partition.num == 4
