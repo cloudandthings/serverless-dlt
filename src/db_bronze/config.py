@@ -357,7 +357,7 @@ class SourceConfig:
     tables: tuple[TableConfig, ...]
     defaults: Defaults = field(default_factory=Defaults)
     parquet_compression: str = "zstd"
-    max_time_s: float | None = None  # its rules belong to the time-budget work (section 7.4)
+    max_time_s: float | None = None  # cap per incremental run, for split loading (section 7.4)
 
     def __post_init__(self) -> None:
         _check_name("pipeline_name", self.pipeline_name)
@@ -379,6 +379,18 @@ class SourceConfig:
             raise ConfigError(f"defaults.backend {self.defaults.backend!r} not in {BACKENDS}")
         for t in self.tables:
             self._check_backend(t)
+            self._check_max_time(t)
+
+    def _check_max_time(self, t: TableConfig) -> None:
+        if self.max_time_s is None or self.backend(t) != "connectorx" or t.chunking.strategy != "stream":
+            return
+        # Cutting a ConnectorX stream short leaves its query running with the connection open (prototype S1).
+        raise ConfigError(
+            f"table {t.name}: max_time_s cannot split-load a ConnectorX stream, because stopping it early leaves "
+            'its query running on the server; set "chunking": {"strategy": "keyset", "order_by": '
+            '[<cursor column>, <primary key columns>], "page_size": N} on the table, set "backend": "pyarrow", '
+            'or remove "max_time_s"'
+        )
 
     def _check_backend(self, t: TableConfig) -> None:
         if t.backend is not None and t.backend not in BACKENDS:
