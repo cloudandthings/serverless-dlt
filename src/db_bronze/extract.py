@@ -18,6 +18,8 @@ import connectorx as cx
 import pyarrow as pa
 import sqlalchemy as sa
 
+from .errors import ConnectorXFailed
+
 EXTRACTED_AT = "_extracted_at"
 
 
@@ -87,8 +89,26 @@ def read_pyarrow(
             yield pa.RecordBatch.from_arrays(arrays, schema=pa.schema(fields))
 
 
+def _is_connectorx_failure(exc: BaseException) -> bool:
+    # pyo3_runtime.PanicException derives from BaseException and is not importable by name.
+    return isinstance(exc, RuntimeError) or type(exc).__name__ == "PanicException"
+
+
+def _guarded(url: str, sql: str, batch_size: int, table: str) -> Iterator[pa.RecordBatch]:
+    """ConnectorX's call and its iteration, and nothing else, with its failures as ConnectorXFailed.
+
+    The consumer's own errors never pass through here: a generator only sees its own exceptions.
+    """
+    try:
+        yield from cx.read_sql(url, sql, return_type="arrow_stream", batch_size=batch_size)
+    except BaseException as e:
+        if _is_connectorx_failure(e):
+            raise ConnectorXFailed(table, f"{type(e).__name__}: {e}") from e
+        raise
+
+
 def read_connectorx(
-    url: str, sql: str, specs: dict[str, ColumnSpec], batch_size: int
+    url: str, sql: str, specs: dict[str, ColumnSpec], batch_size: int, table: str = "?"
 ) -> Iterator[pa.RecordBatch]:
     """Stream `sql` through ConnectorX and yield its record batches, typed as ConnectorX returns them.
 
@@ -99,7 +119,7 @@ def read_connectorx(
     ConnectorX's producer thread detaches and runs the query to the end with the
     connection open (prototype S1, section 7.4).
     """
-    for batch in cx.read_sql(url, sql, return_type="arrow_stream", batch_size=batch_size):
+    for batch in _guarded(url, sql, batch_size, table):
         schema = pa.schema(f.with_nullable(specs[f.name].nullable) for f in batch.schema)
         yield pa.RecordBatch.from_arrays(batch.columns, schema=schema)
 
