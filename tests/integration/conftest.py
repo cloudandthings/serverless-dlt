@@ -145,8 +145,9 @@ def source(request, compose, bucket: Path):
         yield db
     finally:
         db.sa.dispose()
+        force = " WITH (FORCE)" if engine.dialect == "postgres" else ""  # ConnectorX may still hold a session
         with admin.connect() as conn:
-            conn.exec_driver_sql(f"DROP DATABASE {database}" + (" WITH (FORCE)" if engine.dialect == "postgres" else ""))
+            conn.exec_driver_sql(f"DROP DATABASE {database}{force}")
         admin.dispose()
 
 
