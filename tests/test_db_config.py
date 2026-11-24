@@ -310,3 +310,43 @@ def test_isolation_level_on_the_traditional_backend_loads(dialect):
 def test_isolation_level_must_be_one_sqlalchemy_knows():
     message = rejected(config(connection={"isolation_level": "read committed"}, backend="pyarrow"))
     assert "isolation_level 'read committed' not in" in message
+
+
+@pytest.mark.parametrize(
+    "dialect,connection,fix",
+    [
+        ("sqlite", {"path": None}, 'set "path" to the database file'),
+        ("sqlite", {"host": "db.example"}, 'sqlite takes only "path"; remove "host"'),
+        ("oracle", {"database": "CORE"}, 'oracle takes "service_name", not "database"'),
+        ("oracle", {"service_name": None}, 'set "service_name"'),
+        ("mssql", {"host": None}, 'set "host"'),
+        ("postgres", {"database": None}, 'set "database"'),
+        ("mysql", {"service_name": "x"}, 'only oracle takes "service_name"'),
+        ("db2", {"path": "/x"}, 'only sqlite takes "path"'),
+        ("postgres", {"port": "5432"}, "connection.port must be an integer or a secret reference"),
+        ("postgres", {"port": 70000}, "connection.port must be an integer or a secret reference"),
+        ("postgres", {"password": {"secret": "x"}}, "connection.password must be a string or a secret reference"),
+        ("postgres", {"username": 7}, "connection.username must be a string or a secret reference"),
+        ("postgres", {"naive_timezone": "Mars/Olympus_Mons"}, "not an IANA time zone"),
+        ("postgres", {"dialect": "Postgres SQL"}, "connection.dialect 'Postgres SQL' is not a SQLAlchemy dialect"),
+        ("mssql", {"driver_options": {"Encrypt": ["yes"]}}, "driver_options['Encrypt'] must be a string"),
+        ("mssql", {"driver_options": ["Encrypt=yes"]}, "connection.driver_options must be an object"),
+    ],
+)
+def test_connection_fields(dialect, connection, fix):
+    cfg = config(dialect, backend="pyarrow")
+    cfg["connection"] = {k: v for k, v in (cfg["connection"] | connection).items() if v is not None}
+    assert fix in rejected(cfg)
+
+
+def test_every_connection_field_may_be_a_secret_reference():
+    refs = {
+        "host": {"env": "DB_HOST"},
+        "port": {"env": "DB_PORT"},
+        "database": {"secret_id": "ingest/core", "key": "database"},
+        "username": {"secret_id": "ingest/core", "key": "username"},
+        "password": {"secret_id": "ingest/core"},
+        "driver_options": {"Encrypt": "yes", "PWD": {"env": "X"}},
+    }
+    cfg = SourceConfig.from_dict(config("mssql", connection=refs, backend="pyarrow"))
+    assert cfg.connection.port == {"env": "DB_PORT"}  # resolved at run time, never at load

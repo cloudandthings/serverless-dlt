@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import secrets
 from .extract import EXTRACTED_AT
@@ -27,7 +28,9 @@ AUTH_TYPES = ("password", "kerberos")
 # What SQLAlchemy's `isolation_level` accepts across the supported dialects (SNAPSHOT: mssql).
 ISOLATION_LEVELS = ("READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE", "SNAPSHOT", "AUTOCOMMIT")
 PARQUET_CODECS = ("zstd", "snappy", "gzip", "none")
+SERVER_DIALECTS = ("mssql", "postgres", "mysql", "db2")  # host + database; oracle uses service_name
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
+_DIALECT = re.compile(r"^[a-z][a-z0-9_]*(\+[a-z0-9_]+)?$")
 
 
 class ConfigError(ValueError):
@@ -109,10 +112,59 @@ class ConnectionConfig:
     naive_timezone: str = "UTC"
 
     def __post_init__(self) -> None:
+        if not isinstance(self.dialect, str) or not _DIALECT.match(self.dialect):
+            raise ConfigError(
+                f"connection.dialect {self.dialect!r} is not a SQLAlchemy dialect name; use one of "
+                f"{('mssql', 'postgres', 'mysql', 'oracle', 'db2', 'sqlite')} or another dialect's name"
+            )
+        for name in ("host", "database", "service_name", "path", "username", "password"):
+            value = getattr(self, name)
+            if value is not None and not (isinstance(value, str) and value) and not secrets.is_ref(value):
+                raise ConfigError(f"connection.{name} must be a string or a secret reference: {value!r}")
+        port = self.port
+        if port is not None and not secrets.is_ref(port) and not (_positive_int(port) and port <= 65535):
+            raise ConfigError(f"connection.port must be an integer or a secret reference: {port!r}")
+        if not isinstance(self.driver_options, dict):
+            raise ConfigError(f"connection.driver_options must be an object: {self.driver_options!r}")
+        for key, value in self.driver_options.items():
+            if not (isinstance(value, str) or _number(value) or secrets.is_ref(value)):
+                raise ConfigError(
+                    f"connection.driver_options[{key!r}] must be a string, a number or a secret reference: {value!r}"
+                )
+        self._check_fields_for_dialect()
         if self.isolation_level is not None and self.isolation_level not in ISOLATION_LEVELS:
             raise ConfigError(f"connection.isolation_level {self.isolation_level!r} not in {ISOLATION_LEVELS}")
-        if self.dialect == "sqlite" and not self.path:
-            raise ConfigError("connection.path is required for sqlite")
+        try:
+            ZoneInfo(self.naive_timezone)
+        except (ZoneInfoNotFoundError, ValueError, TypeError):
+            raise ConfigError(
+                f"connection.naive_timezone {self.naive_timezone!r} is not an IANA time zone; "
+                'use a name such as "UTC" or "Africa/Johannesburg"'
+            ) from None
+
+    def _check_fields_for_dialect(self) -> None:
+        d = self.dialect
+        if d == "sqlite":
+            if not self.path:
+                raise ConfigError('connection: set "path" to the database file for sqlite')
+            server_keys = ("host", "port", "database", "service_name", "username", "password")
+            given = [k for k in server_keys if getattr(self, k) is not None]
+            if given:
+                raise ConfigError(f'connection: sqlite takes only "path"; remove "{given[0]}"')
+            return
+        if self.path is not None:
+            raise ConfigError(f'connection: only sqlite takes "path"; for {d!r} set "host" and "database"')
+        if d == "oracle":
+            if self.database is not None:
+                raise ConfigError('connection: oracle takes "service_name", not "database"; rename the key')
+            required = ("host", "service_name")
+        else:
+            if self.service_name is not None:
+                raise ConfigError(f'connection: only oracle takes "service_name"; for {d!r} use "database"')
+            required = ("host", "database") if d in SERVER_DIALECTS else ()
+        for key in required:
+            if getattr(self, key) is None:
+                raise ConfigError(f'connection: {d} needs a server address; set "{key}"')
 
 
 @dataclass(frozen=True)
