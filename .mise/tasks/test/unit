@@ -3,4 +3,4 @@
 set -euo pipefail
 cd "$MISE_PROJECT_ROOT"
 
-uv run pytest -m "not spark" "$@"
+uv run pytest -m "not spark and not integration" "$@"

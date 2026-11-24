@@ -1,0 +1,31 @@
+# Source engines for the db_bronze integration suite (DESIGN-db.md section 10).
+# `mise run test:integration` brings this up; the tests also bring it up themselves
+# (idempotent) when run with `pytest -m integration`. Later engines join as services here.
+#
+# Host ports and images are overridable, so the suite can run beside other stacks
+# and against older server versions (spike S9): e.g. DB_BRONZE_IT_PG_IMAGE=postgres:13.
+name: db-bronze-it
+
+services:
+  postgres:
+    image: ${DB_BRONZE_IT_PG_IMAGE:-postgres:17}
+    environment:
+      POSTGRES_PASSWORD: bronze-it
+    ports: ["127.0.0.1:${DB_BRONZE_IT_PG_PORT:-55432}:5432"]
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 1s
+      retries: 60
+
+  mysql:
+    image: ${DB_BRONZE_IT_MYSQL_IMAGE:-mysql:8.4}
+    environment:
+      MYSQL_ROOT_PASSWORD: bronze-it
+    ports: ["127.0.0.1:${DB_BRONZE_IT_MYSQL_PORT:-53306}:3306"]
+    tmpfs: [/var/lib/mysql]
+    healthcheck:
+      # mysqladmin ping answers during the init phase too; a real query waits for the final server
+      test: ["CMD-SHELL", "mysql -uroot -pbronze-it -h127.0.0.1 -e 'SELECT 1'"]
+      interval: 1s
+      retries: 120

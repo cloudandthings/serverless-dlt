@@ -84,9 +84,13 @@ def _connectorx_options(conn: ConnectionConfig) -> dict[str, str]:
         if trust is not None and trust[1].lower() in _TRUE:
             options["trust_server_certificate"] = "true"
         used = {pair[0] for pair in (lower.get("encrypt"), trust) if pair}
-    elif conn.dialect == "postgres" and "sslmode" in given:
-        options["sslmode"] = given["sslmode"]
-        used = {"sslmode"}
+    elif conn.dialect == "postgres":
+        # ConnectorX hands sslmode and libpq `options` to the server, as libpq does (spike S3).
+        used = {k for k in ("sslmode", "options") if k in given}
+        options = {k: given[k] for k in ("sslmode", "options") if k in given}
+        if conn.isolation_level is not None:
+            setting = "-c default_transaction_isolation=" + conn.isolation_level.lower().replace(" ", "\\ ")
+            options["options"] = f"{options['options']} {setting}" if "options" in options else setting
     dropped = sorted(set(given) - used)
     if dropped:
         log.warning("driver_options %s have no ConnectorX equivalent and are not passed to it", dropped)
@@ -104,7 +108,7 @@ def connectorx_url(conn: ConnectionConfig) -> str:
     port = _port(conn)
     host = _resolved(conn, "host") + (f":{port}" if port is not None else "")
     database = _resolved(conn, "service_name" if conn.dialect == "oracle" else "database")
-    query = urlencode(_connectorx_options(conn))
+    query = urlencode(_connectorx_options(conn), quote_via=quote)  # ConnectorX reads "+" literally
     return f"{CONNECTORX_SCHEMES[conn.dialect]}://{userinfo}{host}/{quote(database, safe='')}" + (
         f"?{query}" if query else ""
     )
