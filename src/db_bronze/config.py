@@ -16,6 +16,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import secrets
+from .errors import DbBronzeError
 from .extract import EXTRACTED_AT
 
 MODES = ("incremental", "full", "backfill")
@@ -33,7 +34,7 @@ _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _DIALECT = re.compile(r"^[a-z][a-z0-9_]*(\+[a-z0-9_]+)?$")
 
 
-class ConfigError(ValueError):
+class ConfigError(DbBronzeError, ValueError):
     pass
 
 
