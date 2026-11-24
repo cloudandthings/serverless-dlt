@@ -10,6 +10,7 @@ import sqlalchemy as sa
 
 from .config import SourceConfig, TableConfig
 from .extract import column_specs, naive_timestamp_columns, read_pyarrow, with_extracted_at
+from .query import cursor_select
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +32,6 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_sta
     batch_size = cfg.batch_size(tc)
     # Without this hint dlt labels naive timestamps UTC without shifting them (prototype S5).
     hints = {name: {"timezone": False} for name in naive_timestamp_columns(table)}
-    cursor_col = table.c[tc.cursor.column]
     initial = tc.cursor.initial_value if tc.cursor.type == "integer" else tc.cursor.initial_timestamp
 
     @dlt.resource(
@@ -51,7 +51,7 @@ def make_resource(cfg: SourceConfig, tc: TableConfig, engine: sa.Engine, run_sta
             row_order="asc",
         ),
     ):
-        stmt = sa.select(table).where(cursor_col >= cursor.start_value).order_by(cursor_col)
+        stmt = cursor_select(table, tc, cursor.start_value)
         for batch in read_pyarrow(engine, stmt, specs, batch_size):
             yield with_extracted_at(batch, run_started)
 

@@ -58,8 +58,16 @@ def config_dir(tmp_path: Path, monkeypatch) -> Path:
     return path
 
 
+BACKENDS = ["pyarrow"]
+
+
+@pytest.fixture(params=BACKENDS)
+def backend(request) -> str:
+    return request.param
+
+
 @pytest.fixture
-def invoke(db: SourceDB, bucket: Path, config_dir: Path, pipelines_dir: str, monkeypatch):
+def invoke(db: SourceDB, bucket: Path, config_dir: Path, pipelines_dir: str, backend: str, monkeypatch):
     """Write the config for `source_id` "core" and return a function that invokes the handler."""
     monkeypatch.setenv("DLT_DATA_DIR", pipelines_dir)
     table = {
@@ -67,7 +75,7 @@ def invoke(db: SourceDB, bucket: Path, config_dir: Path, pipelines_dir: str, mon
         "table": "Transactions",
         "primary_key": ["TransactionId"],
         "cursor": {"column": "UpdatedAt", "type": "timestamp", "initial_value": "2026-01-01T00:00:00Z"},
-        "backend": "pyarrow",
+        "backend": backend,
     }
 
     def write_config(**table_overrides) -> None:
@@ -222,3 +230,12 @@ def test_nullability_comes_from_reflection(db, bucket, invoke):
     schema = pq.read_schema(f)
     assert not schema.field("TransactionId").nullable and not schema.field("UpdatedAt").nullable
     assert schema.field("Branch Code").nullable and schema.field("amountCents").nullable
+
+
+def test_without_lag_a_new_row_tying_the_boundary_lands_and_a_landed_one_does_not(db, bucket, invoke):
+    db.insert((1, "2026-11-20 08:00:00", "JHB", 100), (2, "2026-11-20 09:00:00", "CPT", 200))
+    invoke()
+    db.insert((3, "2026-11-20 09:00:00", "DBN", 300))  # ties the last cursor value
+    r2 = invoke()
+    assert r2["rows"] == {"transactions": 1}
+    assert ids(landed(bucket)) == [1, 2, 3]
