@@ -30,12 +30,25 @@ SLOW = {
     "postgres": "SELECT g AS id, (pg_sleep(0.002) IS NULL)::int AS {marker} FROM generate_series(1, {rows}) g",
     "mysql": "SELECT /*+ SET_VAR(cte_max_recursion_depth=100000) */ seq AS id, SLEEP(0.002) AS {marker} "
     "FROM (WITH RECURSIVE r(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM r WHERE seq < {rows}) SELECT seq FROM r) x",
+    # DBMS_SESSION.SLEEP barely sleeps below 10 ms, so Oracle sleeps 10 ms a row, over a fifth of the rows
+    "oracle": "SELECT level AS id, it_sleep(level) AS {marker} FROM dual CONNECT BY level <= {rows} / 5",
+}
+# Oracle has no sleep usable in a query; a function of the test's own schema wraps one.
+SLOW_SETUP = {
+    "oracle": "CREATE OR REPLACE FUNCTION it_sleep(n NUMBER) RETURN NUMBER IS "
+    "BEGIN DBMS_SESSION.SLEEP(0.01); RETURN 0; END;",
 }
 RUNNING = {
     "postgres": "SELECT pid FROM pg_stat_activity WHERE state = 'active' AND query LIKE :q AND pid <> pg_backend_pid()",
     "mysql": "SELECT id FROM information_schema.processlist WHERE info LIKE :q AND id <> connection_id()",
+    "oracle": "SELECT DISTINCT s.sid || ',' || s.serial# FROM v$session s JOIN v$sql q ON q.sql_id = s.sql_id "
+    "WHERE s.status = 'ACTIVE' AND q.sql_text LIKE :q AND s.sid <> SYS_CONTEXT('USERENV', 'SID')",
 }
-CANCEL = {"postgres": "SELECT pg_cancel_backend({id})", "mysql": "KILL QUERY {id}"}
+CANCEL = {
+    "postgres": "SELECT pg_cancel_backend({id})",
+    "mysql": "KILL QUERY {id}",
+    "oracle": "ALTER SYSTEM CANCEL SQL '{id}'",
+}
 
 
 class SlowQuery:
@@ -45,6 +58,8 @@ class SlowQuery:
         self.source = source
         self.marker = f"slow_{uuid.uuid4().hex[:10]}"
         self.sql = SLOW[source.dialect].format(marker=self.marker, rows=ROWS)
+        if setup := SLOW_SETUP.get(source.dialect):
+            source.execute(setup)
 
     def running(self) -> list:
         with self.source.sa.connect() as conn:
@@ -72,17 +87,32 @@ def cx_url(source, **connection) -> str:
 # S1 (server side) ----------------------------------------------------------------------------------------------
 
 
+# What a ConnectorX stream does on each engine (S1, S7).
+STREAMS = {
+    "postgres": "streams",  # batches arrive while the query runs; a dropped stream's query runs on
+    "mysql": "streams",
+    "oracle": "buffers",  # the first batch arrives only once the whole query has run (ConnectorX 0.4.6)
+}
+
+
 def test_a_dropped_connectorx_stream_leaves_its_query_running_on_the_server(source):
     slow = SlowQuery(source)
+    started = time.monotonic()
     reader = cx.read_sql(cx_url(source), slow.sql, return_type="arrow_stream", batch_size=50)
     try:
         assert reader.read_next_batch().num_rows > 0
-        started = time.monotonic()
+        first_batch = time.monotonic() - started
+        dropped = time.monotonic()
         reader.close()
         del reader
-        assert time.monotonic() - started < 1  # the drop itself returns at once
+        assert time.monotonic() - dropped < 1  # the drop itself returns at once
         time.sleep(2)
-        assert len(slow.running()) == 1  # but the server is still running the query
+        if STREAMS[source.dialect] == "streams":
+            assert first_batch < 2
+            assert len(slow.running()) == 1  # but the server is still running the query
+        else:
+            assert first_batch > 4  # the whole query (about 5 s) ran first: there is nothing left to run
+            assert slow.running() == []
     finally:
         slow.cancel()
 
@@ -91,12 +121,13 @@ def test_a_dropped_connectorx_stream_leaves_its_query_running_on_the_server(sour
 CLOSE = {
     "postgres": "ends",  # psycopg closes the server-side cursor: the query stops at once
     "mysql": "drains",  # PyMySQL reads the rest of an unbuffered result: the close waits for the whole query
+    "oracle": "ends",  # oracledb closes the cursor: the query stops at once
 }
 
 
 def test_closing_a_traditional_stream_early(source):
     slow = SlowQuery(source)
-    stmt = sa.select(sa.text("*")).select_from(sa.text(f"({slow.sql}) AS q"))
+    stmt = sa.select(sa.text("*")).select_from(sa.text(f"({slow.sql}) q"))  # Oracle takes no AS here
     specs = {"id": ColumnSpec(None, True), slow.marker: ColumnSpec(None, True)}
     batches = read_pyarrow(source.sa, stmt, specs, batch_size=50)
     try:
@@ -119,7 +150,12 @@ def literals(metadata: sa.MetaData) -> sa.Table:
         "literals",
         metadata,
         sa.Column("id", sa.Integer, primary_key=True, autoincrement=False),
-        sa.Column("at", sa.DateTime().with_variant(sa.dialects.mysql.DATETIME(fsp=6), "mysql")),
+        sa.Column(
+            "at",
+            sa.DateTime()
+            .with_variant(sa.dialects.mysql.DATETIME(fsp=6), "mysql")
+            .with_variant(sa.dialects.oracle.TIMESTAMP(), "oracle"),  # Oracle DATE has no fractional seconds
+        ),
         sa.Column("amount", sa.Numeric(28, 10)),
         sa.Column("day", sa.Date),
     )
@@ -151,7 +187,7 @@ def test_datetime_and_decimal_literals_round_trip_through_connectorx(source):
     with source.sa.connect() as conn:
         bound = list(conn.execute(stmt).scalars())
     sql = literal_sql(stmt, source.sa.dialect)
-    inlined = cx.read_sql(cx_url(source), sql, return_type="arrow").column("id").to_pylist()
+    inlined = cx.read_sql(cx_url(source), sql, return_type="arrow").column(0).to_pylist()  # Oracle says ID
     assert bound == [2, 5]
     assert inlined == bound
 
@@ -183,12 +219,24 @@ def test_connectorx_drops_digits_of_an_unconstrained_postgres_numeric(source):
 ISOLATION_QUERY = {
     "postgres": "SELECT 1 AS id, current_setting('transaction_isolation') AS iso",
     "mysql": "SELECT 1 AS id, @@transaction_isolation AS iso",
+    "oracle": "SELECT 1 AS id, it_isolation() AS iso FROM dual",
 }
-APPLIED = {"postgres": "repeatable read", "mysql": "READ-COMMITTED"}
-LEVEL = {"postgres": "REPEATABLE READ", "mysql": "READ COMMITTED"}  # never the engine's default
+# Oracle shows a session's isolation only on its open transaction (v$transaction), so a function of
+# the test's schema opens one and reads it back, as SQLAlchemy's own get_isolation_level does.
+ISOLATION_SETUP = {
+    "oracle": "CREATE OR REPLACE FUNCTION it_isolation RETURN VARCHAR2 IS "
+    "tx VARCHAR2(100) := DBMS_TRANSACTION.LOCAL_TRANSACTION_ID(TRUE); lvl VARCHAR2(20); "
+    "BEGIN SELECT CASE BITAND(t.flag, POWER(2, 28)) WHEN 0 THEN 'READ COMMITTED' ELSE 'SERIALIZABLE' END "
+    "INTO lvl FROM v$transaction t WHERE t.xidusn || '.' || t.xidslot || '.' || t.xidsqn = tx; "
+    "RETURN lvl; END;",
+}
+APPLIED = {"postgres": "repeatable read", "mysql": "READ-COMMITTED", "oracle": "SERIALIZABLE"}
+LEVEL = {"postgres": "REPEATABLE READ", "mysql": "READ COMMITTED", "oracle": "SERIALIZABLE"}  # never the default
 
 
 def isolation_run(source, run, backend):
+    if setup := ISOLATION_SETUP.get(source.dialect):
+        source.execute(setup)
     table = {"name": "iso", "query": ISOLATION_QUERY[source.dialect], "backend": backend}
     return run(
         {"source_id": "iso", "mode": "full"}, table, connection={"isolation_level": LEVEL[source.dialect]}
@@ -201,8 +249,8 @@ def test_isolation_level_applies_on_the_traditional_backend(source, run):
 
 
 def test_isolation_level_with_connectorx(source, run):
-    """Postgres: ConnectorX honours libpq `options`, so the level is applied. MySQL: no way in, so rejected."""
-    if source.dialect == "mysql":
+    """Postgres: ConnectorX honours libpq `options`, so the level is applied. MySQL, Oracle: no way in, so rejected."""
+    if source.dialect in ("mysql", "oracle"):
         with pytest.raises(ConfigError, match="isolation_level"):
             isolation_run(source, run, "connectorx")
         return

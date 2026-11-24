@@ -29,7 +29,7 @@ MIN_SERVER_VERSION: dict[str, tuple[int, ...] | None] = {
     "mssql": None,
     "postgres": (11,),
     "mysql": (8, 0),
-    "oracle": None,
+    "oracle": (23,),
     "sqlite": None,
     "db2": None,
 }
@@ -39,7 +39,7 @@ MAX_DECIMAL_SCALE = 10
 MAX_DECIMAL_PRECISION = 28
 # Where a NUMERIC with no declared precision holds any scale, and ConnectorX silently
 # drops digits past the 10th decimal place (integration type matrix, section 10.1).
-UNCONSTRAINED_NUMERIC_DIALECTS = ("postgres",)
+UNCONSTRAINED_NUMERIC_DIALECTS = ("postgres", "oracle")
 
 
 def _named(*names: str) -> Callable[[sa.types.TypeEngine], bool]:
@@ -52,6 +52,10 @@ def _is_timetz(t: sa.types.TypeEngine) -> bool:
 
 def _is_oracle_local_tz(t: sa.types.TypeEngine) -> bool:
     return isinstance(t, oracle.TIMESTAMP) and bool(t.local_timezone)
+
+
+def _is_oracle_tz(t: sa.types.TypeEngine) -> bool:
+    return isinstance(t, oracle.TIMESTAMP) and bool(t.timezone)
 
 
 # Types ConnectorX cannot read (section 3.1), per dialect: (description, matcher).
@@ -78,6 +82,10 @@ DENY_LIST: dict[str, list[tuple[str, Callable[[sa.types.TypeEngine], bool]]]] = 
         ("nclob", lambda t: isinstance(t, oracle.NCLOB)),
         ("bfile", lambda t: isinstance(t, oracle.BFILE)),
         ("xmltype", _named("XMLTYPE")),
+        # integration (Oracle Free 23.26, ConnectorX 0.4.6): also not readable
+        ("timestamp with time zone", _is_oracle_tz),
+        ("boolean", lambda t: isinstance(t, sa.Boolean)),
+        ("json", lambda t: isinstance(t, sa.JSON)),
     ],
 }
 
@@ -120,7 +128,15 @@ def column_findings(dialect: str, backend: str, columns: list[tuple[str, sa.type
             findings.append(f"column {name}: the name is reserved for the extraction timestamp; rename or exclude it")
         if backend != "connectorx" or col_type is None:
             continue
-        if isinstance(col_type, sa.Numeric) and not isinstance(col_type, sa.Float):
+        if isinstance(col_type, sa.types.NullType):
+            # Postgres xml and geometric types, MySQL geometry, Oracle XMLTYPE and INTERVAL YEAR TO MONTH:
+            # SQLAlchemy does not know them, and neither does ConnectorX (integration type matrices).
+            findings.append(f"column {name}: type not recognised by SQLAlchemy; ConnectorX cannot read it reliably")
+            continue
+        # ConnectorX reads an Oracle NUMBER(p, 0) as int64, whatever p: no decimal, so no silent loss. A
+        # value wider than int64 fails the read loudly (integration type matrix, Oracle).
+        oracle_integer = isinstance(col_type, oracle.NUMBER) and col_type.scale == 0
+        if isinstance(col_type, sa.Numeric) and not isinstance(col_type, sa.Float) and not oracle_integer:
             p, s = col_type.precision, col_type.scale
             if p is None and dialect in UNCONSTRAINED_NUMERIC_DIALECTS:
                 findings.append(
@@ -184,7 +200,8 @@ def preflight(
         backend = cfg.backend(tc)
         table = reflect(engine, tc)
         wanted = set(tc.columns) if tc.columns else None
-        columns = [(c.name, c.type) for c in table.columns if wanted is None or c.name in wanted]
+        # A query's columns carry no reflected types (only the cursor's declared one): nothing to check.
+        columns = [(c.name, None if tc.query else c.type) for c in table.columns if wanted is None or c.name in wanted]
         report = TableReport(tc.name, backend, column_findings(dialect, backend, columns), table=table)
         report.null_cursor_count = count_null_cursor(engine, table, tc)
         log.info("preflight %s", json.dumps(report.as_dict()))

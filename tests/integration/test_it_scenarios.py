@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import random
 from datetime import UTC, datetime
+from decimal import Decimal
 from itertools import pairwise
 
 import pytest
@@ -174,12 +175,15 @@ def wide(metadata: sa.MetaData) -> sa.Table:
     )
 
 
+AMOUNT = Decimal("12345678901234567890.123456789012")
+
+
 def test_a_wide_decimal_fails_preflight_on_connectorx_lands_on_pyarrow_and_validate_reports_it(source, run):
     table = source.create(wide)
     source.insert(
         table,
         [
-            {"TransactionId": 1, "UpdatedAt": datetime(2026, 11, 20, 8), "Amount": "12345678901234567890.123456789012"},
+            {"TransactionId": 1, "UpdatedAt": datetime(2026, 11, 20, 8), "Amount": AMOUNT},
             {"TransactionId": 2, "UpdatedAt": None, "Amount": None},
         ],
     )
@@ -196,7 +200,7 @@ def test_a_wide_decimal_fails_preflight_on_connectorx_lands_on_pyarrow_and_valid
 
     assert run({"source_id": "core"}, config | {"backend": "pyarrow", "name": "wide_pa"})["rows"] == {"wide_pa": 1}
     [row] = source.landed("wide_pa")
-    assert str(row["Amount"]) == "12345678901234567890.123456789012"
+    assert row["Amount"] == AMOUNT
 
 
 # A query whose result has a type ConnectorX cannot read: preflight sees no types for a query's columns.
@@ -271,15 +275,43 @@ def test_plan_backfill_windows_cover_min_to_max_and_land_every_row_once(source, 
     assert ids(landed_in(source, "backfill")) == [1, 2, 3, 4]
 
 
-def test_a_partitioned_read_lands_the_same_rows_as_an_unpartitioned_one(source, run, transactions):
+def ledger(metadata: sa.MetaData) -> sa.Table:
+    """Case-insensitive names: on Oracle the server stores them upper case, and they land lower case."""
+    return sa.Table(
+        "ledger",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True, autoincrement=False),
+        sa.Column("updated_at", sa.DateTime, nullable=False),
+    )
+
+
+def test_a_partitioned_read_lands_the_same_rows_as_an_unpartitioned_one(source, run):
+    table = source.create(ledger)
+    source.insert(table, [{"id": i, "updated_at": datetime(2026, 3, i, 12)} for i in range(1, 21)])
+    window = {"source_id": "core", "mode": "backfill"}
+    window |= {"window_start": "2026-03-05T00:00:00Z", "window_end": "2026-03-15T00:00:00Z"}
+    cursor = {"column": "updated_at", "type": "timestamp", "initial_value": "2026-01-01T00:00:00Z"}
+    plain = {"name": "ledger", "table": "ledger", "primary_key": ["id"], "cursor": cursor, "backend": "connectorx"}
+    run(window, plain)
+    partitioned = plain | {"name": "partitioned", "partition": {"column": "id", "num": 3}}
+    assert run(window, partitioned)["rows"] == {"partitioned": 10}
+    landed = sorted(r["id"] for r in source.landed("partitioned"))
+    assert landed == sorted(r["id"] for r in source.landed("ledger")) == list(range(5, 15))
+
+
+def test_a_partitioned_read_by_a_mixed_case_column(source, run, transactions):
+    """Quoted for the dialect it works, except on Oracle, where ConnectorX upper-cases it: preflight says so."""
     transactions(*[(i, f"2026-03-{i:02d} 12:00:00") for i in range(1, 21)])
     window = {"source_id": "core", "mode": "backfill"}
     window |= {"window_start": "2026-03-05T00:00:00Z", "window_end": "2026-03-15T00:00:00Z"}
-    plain = TRANSACTIONS | {"backend": "connectorx"}
-    run(window, plain)
-    partitioned = plain | {"name": "partitioned", "partition": {"column": "TransactionId", "num": 3}}
-    assert run(window, partitioned)["rows"] == {"partitioned": 10}
-    assert ids(source.landed("partitioned")) == ids(source.landed("transactions")) == list(range(5, 15))
+    table = TRANSACTIONS | {"backend": "connectorx", "partition": {"column": "TransactionId", "num": 3}}
+    if source.dialect == "oracle":
+        with pytest.raises(Exception) as failure:
+            run(window, table)
+        assert type(failure.value).__name__ == "PreflightError" and "case-insensitive" in str(failure.value)
+        return
+    assert run(window, table)["rows"] == {"transactions": 10}
+    assert ids(source.landed("transactions")) == list(range(5, 15))
 
 
 def test_the_run_date_partitions_are_today(source, run, transactions):

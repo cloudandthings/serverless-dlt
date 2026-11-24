@@ -7,8 +7,8 @@ come, with the types ConnectorX produces (D2).
 Arrow using the types from SQLAlchemy reflection, so a table's Arrow schema is
 the same on every run and in every batch (D2). Driver values Arrow cannot take
 (UUIDs, network addresses, parsed JSON, MySQL SETs, Postgres bit strings,
-intervals and time-with-time-zone) and unconstrained NUMERIC land as text, losslessly
-(DESIGN-db.md section 10.1).
+intervals, time-with-time-zone, Oracle BFILE locators) and unconstrained NUMERIC
+land as text, losslessly (DESIGN-db.md section 10.1).
 """
 
 from __future__ import annotations
@@ -17,12 +17,13 @@ import json
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 import connectorx as cx
 import pyarrow as pa
 import sqlalchemy as sa
-from sqlalchemy.dialects import mysql
+from sqlalchemy.dialects import mysql, oracle
 from sqlalchemy.dialects import postgresql as pg
 
 from .errors import ConnectorXFailed
@@ -31,7 +32,26 @@ EXTRACTED_AT = "_extracted_at"
 
 
 def _json_text(value: Any) -> str:
+    """Compact JSON text. Decimals (Oracle's JSON numbers) are written exactly, as their own digits."""
+    if isinstance(value, dict):
+        return "{" + ",".join(f"{_json_text(str(k))}:{_json_text(v)}" for k, v in value.items()) + "}"
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(_json_text(v) for v in value) + "]"
+    if isinstance(value, Decimal):
+        return str(value)
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
+def _bfile_text(lob: Any) -> str:
+    """An Oracle BFILE is a locator of a file on the server: it lands as `<directory>/<file name>`."""
+    return "/".join(lob.getfilename())
+
+
+def _untyped(value: Any) -> Any:
+    """A value of a column reflection could not type: Oracle's INTERVAL YEAR TO MONTH lands as its own text."""
+    if type(value).__name__ == "IntervalYM":
+        return f"{value.years}-{value.months}"
+    return value
 
 
 def _mysql_set_text(col_type: mysql.SET) -> Callable[[Any], str]:
@@ -47,8 +67,12 @@ def _converter(col_type: sa.types.TypeEngine) -> Callable[[Any], Any] | None:
         return _mysql_set_text(col_type)
     if isinstance(col_type, (sa.Uuid, pg.INET, pg.CIDR, pg.BIT)):
         return str
-    if isinstance(col_type, (sa.Interval, pg.INTERVAL)):
+    if isinstance(col_type, (sa.Interval, pg.INTERVAL, oracle.INTERVAL)):
         return str  # dlt 1.32 does not take Arrow durations
+    if isinstance(col_type, oracle.BFILE):
+        return _bfile_text
+    if isinstance(col_type, sa.types.NullType):
+        return _untyped
     if isinstance(col_type, sa.Time) and col_type.timezone:
         return lambda t: t.isoformat()  # time64 has no offset; text keeps it
     if isinstance(col_type, sa.Numeric) and not isinstance(col_type, sa.Float) and col_type.precision is None:
@@ -62,14 +86,21 @@ def arrow_type(col_type: sa.types.TypeEngine) -> pa.DataType | None:
     """Arrow type for a reflected column type, or None to let pyarrow infer it from the values.
 
     Integers map to int64, lossless for every engine's integer types except
-    MySQL's BIGINT UNSIGNED, which maps to uint64.
+    MySQL's BIGINT UNSIGNED, which maps to uint64, and Oracle's NUMBER(19..38),
+    which maps to decimal128(p, 0).
     """
+    if isinstance(col_type, sa.types.NullType):
+        return None
     if _converter(col_type) not in (None, float):
         return pa.string()
     if isinstance(col_type, sa.Boolean):
         return pa.bool_()
     if isinstance(col_type, sa.BigInteger) and getattr(col_type, "unsigned", False):
         return pa.uint64()
+    if isinstance(col_type, oracle.NUMBER) and col_type.scale == 0 and (col_type.precision or 0) > 18:
+        return pa.decimal128(col_type.precision, 0)  # Oracle NUMBER(19..38): wider than int64
+    if isinstance(col_type, oracle.NUMBER) and (col_type.scale or 0) > 0:
+        return pa.decimal128(col_type.precision, col_type.scale)  # oracle.NUMBER is an Integer as well
     if isinstance(col_type, sa.Integer):
         return pa.int64()
     if isinstance(col_type, sa.Float):
@@ -162,11 +193,17 @@ def read_connectorx(
     batch_size: int,
     table: str = "?",
     partition: tuple[str, int] | None = None,
+    names: list[str] | None = None,
 ) -> Iterator[pa.RecordBatch]:
     """Stream `sql` through ConnectorX and yield its record batches, typed as ConnectorX returns them.
 
     ConnectorX marks every column nullable, so nullability is taken from the
     reflection, as on the pyarrow backend. Only the flag changes, never a type.
+
+    `names` are the statement's column names as SQLAlchemy reports them, applied
+    by position. ConnectorX reports the names the server gives, and Oracle gives
+    a case-insensitive name in upper case (`ID`) where SQLAlchemy and the config
+    say `id` (integration, Oracle), so both backends land the same names.
 
     Callers read the stream to the end. Dropping it early returns at once, but
     ConnectorX's producer thread detaches and runs the query to the end with the
@@ -177,7 +214,8 @@ def read_connectorx(
     arrive in cursor order (section 3.1).
     """
     for batch in _guarded(url, sql, batch_size, table, partition):
-        schema = pa.schema(f.with_nullable(specs[f.name].nullable) for f in batch.schema)
+        fields = [f.with_name(n) for f, n in zip(batch.schema, names, strict=True)] if names else batch.schema
+        schema = pa.schema(f.with_nullable(specs[f.name].nullable) for f in fields)
         yield pa.RecordBatch.from_arrays(batch.columns, schema=schema)
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 import sqlalchemy as sa
+from sqlalchemy.dialects import oracle
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.sql.functions import FunctionElement
 
@@ -59,7 +60,20 @@ def probe_columns(tc: TableConfig) -> sa.Select:
 
 
 def _projection(source: sa.FromClause, tc: TableConfig) -> list:
-    return [source.c[c] for c in tc.columns] if tc.columns else list(source.c)
+    columns = [source.c[c] for c in tc.columns] if tc.columns else list(source.c)
+    return [_selected(c) for c in columns]
+
+
+def _selected(column: sa.ColumnElement) -> sa.ColumnElement:
+    """A column as it is read. Oracle TIMESTAMP WITH TIME ZONE is read as its UTC instant.
+
+    The driver hands it over as a naive wall time with the offset dropped, so
+    `08:00 +02:00` would land as 08:00 UTC; SYS_EXTRACT_UTC gives 06:00
+    (integration type matrix, Oracle).
+    """
+    if isinstance(column.type, oracle.TIMESTAMP) and column.type.timezone:
+        return sa.func.sys_extract_utc(column, type_=column.type).label(column.name)
+    return column
 
 
 def snapshot_select(source: sa.FromClause, tc: TableConfig) -> sa.Select:
