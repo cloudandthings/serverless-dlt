@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -122,3 +123,19 @@ def test_incremental_runs_land_only_new_rows(db, bucket, invoke):
     r3 = invoke()
     assert r3["is_empty"]
     assert ids(landed(bucket)) == [1, 2, 3, 4, 5]
+
+
+def test_column_names_land_exactly_as_in_the_source(db, bucket, invoke, caplog):
+    from dlt.destinations import path_utils
+
+    path_utils._log_unsafe_prefix_separators.cache_clear()  # dlt logs it once per process
+    dlt_logger = logging.getLogger("dlt")  # does not propagate, so caplog needs its own handler
+    dlt_logger.addHandler(caplog.handler)
+    db.insert((1, "2026-11-20 08:00:00", "JHB", 100))
+    try:
+        invoke()
+    finally:
+        dlt_logger.removeHandler(caplog.handler)
+    [f] = files(bucket)
+    assert pq.read_schema(f).names == ["TransactionId", "UpdatedAt", "Branch Code", "amountCents", "_extracted_at"]
+    assert "warn_unsafe_layout_separators" not in caplog.text
