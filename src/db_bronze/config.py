@@ -575,7 +575,9 @@ def _page(event: dict, tables: tuple[str, ...] | None) -> Page | None:
         return None
     if len(given) < len(keys):
         missing = [k for k in keys if k not in given]
-        raise ConfigError(f"a page of a planned snapshot needs {list(keys)}; missing {missing} (copy them from the plan)")
+        raise ConfigError(
+            f"a page of a planned snapshot needs {list(keys)}; missing {missing} (copy them from the plan)"
+        )
     if tables is None or len(tables) != 1:
         raise ConfigError(f'a page event names exactly one table in "tables" (the page\'s "table"): {tables!r}')
     raw = event["page"]

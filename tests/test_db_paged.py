@@ -98,7 +98,8 @@ def page_event(page: dict, snapshot_id: str = "20261124T093000Z-0123abcd", parti
 
 def load_rows(bucket: Path, load_ids: list[str], table: str = "transactions") -> list[dict]:
     """The rows the given loads landed."""
-    return [r for f in files(bucket, table) if f.name.rsplit(".", 2)[0] in load_ids for r in pq.read_table(f).to_pylist()]
+    landed_by = [f for f in files(bucket, table) if f.name.rsplit(".", 2)[0] in load_ids]
+    return [r for f in landed_by for r in pq.read_table(f).to_pylist()]
 
 
 def test_page_lands_its_slice_in_key_order_under_the_partition_date(db, bucket, invoke):
