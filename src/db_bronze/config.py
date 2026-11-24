@@ -44,6 +44,8 @@ ISOLATION_LEVELS = ("READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SE
 # ahead of the query; not on a partitioned read, which ConnectorX parses as a single SELECT.
 # MySQL: its URL takes no session settings, and the level is not settable through a SET_VAR hint.
 # oracle: until its integration ticket measures it.
+# The standard levels Db2 has (as UR, CS, RS and RR); no SNAPSHOT, and ibm_db_sa takes no AUTOCOMMIT.
+DB2_ISOLATION_LEVELS = ("READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE")
 CONNECTORX_ISOLATION = {
     "postgres": ("READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE"),
     "mssql": ("READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SNAPSHOT", "SERIALIZABLE"),
@@ -186,6 +188,11 @@ class ConnectionConfig:
         self._check_fields_for_dialect()
         if self.isolation_level is not None and self.isolation_level not in ISOLATION_LEVELS:
             raise ConfigError(f"connection.isolation_level {self.isolation_level!r} not in {ISOLATION_LEVELS}")
+        if self.dialect == "db2" and self.isolation_level not in (None, *DB2_ISOLATION_LEVELS):
+            raise ConfigError(
+                f"connection.isolation_level {self.isolation_level!r} has no Db2 equivalent; "
+                f"on db2 use one of {DB2_ISOLATION_LEVELS}"
+            )
         try:
             ZoneInfo(self.naive_timezone)
         except (ZoneInfoNotFoundError, ValueError, TypeError):

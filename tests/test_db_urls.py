@@ -15,7 +15,7 @@ from sqlalchemy.dialects.mssql.pyodbc import MSDialect_pyodbc
 
 from db_bronze import secrets as db_secrets
 from db_bronze.config import ConfigError, ConnectionConfig, SourceConfig
-from db_bronze.urls import connectorx_sql, connectorx_url, sqlalchemy_url
+from db_bronze.urls import connectorx_sql, connectorx_url, engine_isolation_level, sqlalchemy_url
 
 USER = {"username": "ingest", "password": "s3cret"}
 
@@ -261,3 +261,18 @@ def test_the_traditional_engine_applies_the_isolation_level(tmp_path, level):
             assert c.get_isolation_level() == (level or "SERIALIZABLE")  # SERIALIZABLE: SQLite's default
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("level", "db2"),
+    [("READ UNCOMMITTED", "UR"), ("READ COMMITTED", "CS"), ("REPEATABLE READ", "RS"), ("SERIALIZABLE", "RR")],
+)
+def test_db2_gets_the_standard_isolation_level_by_its_own_name(level, db2):
+    """Db2's Repeatable Read (RR) is the standard's SERIALIZABLE; the standard's REPEATABLE READ is its RS."""
+    assert engine_isolation_level(conn(**SERVER["db2"], isolation_level=level)) == db2
+
+
+@pytest.mark.parametrize("dialect", ["postgres", "mssql", "mysql"])
+def test_other_engines_get_the_isolation_level_as_configured(dialect):
+    assert engine_isolation_level(conn(**SERVER[dialect], isolation_level="REPEATABLE READ")) == "REPEATABLE READ"
+    assert engine_isolation_level(conn(**SERVER[dialect])) is None

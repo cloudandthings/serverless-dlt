@@ -33,7 +33,7 @@ from .query import (
     query_source,
     snapshot_select,
 )
-from .urls import connectorx_sql, connectorx_url, sqlalchemy_url
+from .urls import connectorx_sql, connectorx_url, engine_isolation_level, sqlalchemy_url
 
 log = logging.getLogger(__name__)
 
@@ -50,7 +50,8 @@ class RunStats:
 
 def make_engine(cfg: SourceConfig) -> sa.Engine:
     """The SQLAlchemy engine: reflection, and extraction on the traditional backends."""
-    options = {"isolation_level": cfg.connection.isolation_level} if cfg.connection.isolation_level else {}
+    level = engine_isolation_level(cfg.connection)
+    options = {"isolation_level": level} if level else {}
     return prepare_engine(sa.create_engine(sqlalchemy_url(cfg.connection), **options))
 
 
