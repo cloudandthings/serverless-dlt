@@ -334,8 +334,8 @@ def _table(t: Any, where: str) -> TableConfig:
     if t.get("chunking") is not None:
         chunking = t["chunking"]
         order_by = chunking.get("order_by") if isinstance(chunking, dict) else None
-        extra = {"order_by": _names(order_by, f"{where}.chunking.order_by")} if order_by is not None else {}
-        nested["chunking"] = _build(ChunkingConfig, chunking, f"{where}.chunking", **extra)
+        order_by = _names(order_by, f"{where}.chunking.order_by") if order_by is not None else ()
+        nested["chunking"] = _build(ChunkingConfig, chunking, f"{where}.chunking", order_by=order_by)
     if t.get("partition") is not None:
         nested["partition"] = _build(PartitionConfig, t["partition"], f"{where}.partition")
     if t.get("primary_key") is not None:
