@@ -6,8 +6,22 @@ Event:
                                             writes _manifests/<name>/<snapshot_id>.json on success
     {"source_id": ..., "mode": "backfill", "window_start": ..., "window_end": ...}
                                             [start, end), ISO-8601 or integer to match the cursor
+    {"source_id": ..., "mode": "plan", "plan": "snapshot", "page_size": N}
+                                            no extract: pages [{table, offset, limit}] per table (the last
+                                            open-ended), plus a fresh snapshot_id and partition_date
+    {"source_id": ..., "mode": "full", "tables": [t], "page": {"offset": ..., "limit": ...},
+     "snapshot_id": ..., "partition_date": "YYYY-MM-DD"}
+                                            one page of a planned snapshot, ordered by the primary key
+                                            (or keyset order_by), under mode=full/<partition_date>; no manifest
+    {"source_id": ..., "mode": "plan", "plan": "backfill", "windows": N | "window_size": S}
+                                            no extract: the cursor's [MIN, MAX] as half-open windows
+                                            [{table, window_start, window_end}], timestamps in UTC
+    {"source_id": ..., "mode": "finalize", "table": t, "snapshot_id": ..., "load_ids": [...]}
+                                            writes _manifests/<t>/<snapshot_id>.json (examples/db_snapshot.asl.json)
     "tables": [...]                         on any event: run only these tables
     {"config": {...}}                       inline config (tests, ad hoc)
+Unknown event keys fail with ConfigError. Paged and parallel runs use their own
+config with a pipeline_name of their own, never the incremental's.
 
 Config lookup when `source_id` is given: `${CONFIG_URI}/${source_id}.json`, where
 CONFIG_URI is any fsspec URL (`s3://config-bucket/sources`, `file:///opt/config`).
