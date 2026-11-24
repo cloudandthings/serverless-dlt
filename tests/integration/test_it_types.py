@@ -11,7 +11,7 @@ run leaves them out with `columns`, the pyarrow run lands them.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import UTC, datetime, time
 from decimal import Decimal
 
 import connectorx as cx
@@ -116,6 +116,47 @@ MATRIX = {
         "c_multipolygon": ("multipolygon", "ST_GeomFromText('MULTIPOLYGON(((0 0, 1 0, 1 1, 0 0)))')", False),
         "c_geometrycollection": ("geometrycollection", "ST_GeomFromText('GEOMETRYCOLLECTION(POINT(1 2))')", False),
     },
+    "mssql": {
+        "c_tinyint": ("tinyint", "1", True),
+        "c_smallint": ("smallint", "2", True),
+        "c_int": ("int", "3", True),
+        "c_bigint": ("bigint", "4", True),
+        "c_bit": ("bit", "1", True),
+        "c_decimal_18_4": ("decimal(18,4)", "12345678901234.5678", True),
+        "c_decimal_28_10": ("decimal(28,10)", "123456789012345678.0123456789", True),
+        "c_decimal_38_12": ("decimal(38,12)", "12345678901234567890123456.123456789012", False),
+        "c_decimal_38_0": ("decimal(38,0)", "12345678901234567890123456789012345678", False),
+        "c_money": ("money", "922337203685477.5807", False),  # ConnectorX: a double, 19 digits do not fit
+        "c_smallmoney": ("smallmoney", "214748.3647", True),
+        "c_float": ("float", "2.5", True),
+        "c_real": ("real", "1.5", True),
+        "c_char": ("char(5)", "'c'", True),
+        "c_varchar": ("varchar(20)", "'v'", True),
+        "c_varchar_max": ("varchar(max)", "'vm'", True),
+        "c_nchar": ("nchar(5)", "N'n'", True),
+        "c_nvarchar": ("nvarchar(20)", "N'ünï'", True),
+        "c_nvarchar_max": ("nvarchar(max)", "N'nm'", True),
+        "c_text": ("text", "'t'", True),
+        "c_ntext": ("ntext", "N'nt'", True),
+        "c_date": ("date", "'2026-11-20'", True),
+        "c_datetime": ("datetime", "'2026-11-20T08:00:00.123'", True),
+        "c_datetime2": ("datetime2", "'2026-11-20T08:00:00.1234567'", True),
+        "c_datetime2_6": ("datetime2(6)", "'2026-11-20T08:00:00.123456'", True),
+        "c_smalldatetime": ("smalldatetime", "'2026-11-20T08:00:00'", True),
+        # ConnectorX: the wrong instant (it applies the offset twice)
+        "c_datetimeoffset": ("datetimeoffset", "'2026-11-20T08:00:00.123456+02:00'", False),
+        "c_time": ("time", "'08:00:00.1234567'", True),
+        "c_binary": ("binary(4)", "0x01020304", True),
+        "c_varbinary": ("varbinary(8)", "0x0102", True),
+        "c_varbinary_max": ("varbinary(max)", "0x0102", True),
+        "c_image": ("image", "0x0102", True),
+        "c_uniqueidentifier": ("uniqueidentifier", "'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'", True),
+        "c_sql_variant": ("sql_variant", "CAST(42 AS int)", False),  # neither backend: see UNREADABLE
+        "c_xml": ("xml", "'<a/>'", False),
+        "c_hierarchyid": ("hierarchyid", "'/1/'", False),
+        "c_geography": ("geography", "geography::Point(1, 2, 4326)", False),
+        "c_geometry": ("geometry", "geometry::Point(1, 2, 0)", False),
+    },
 }
 
 # Statements a matrix needs before its table: the types its columns use.
@@ -179,6 +220,32 @@ LANDED = {
         "c_timestamp": "timestamp[us]", "c_time": "time64[us]", "c_year": "int16",
         "c_binary": "large_binary", "c_varbinary": "large_binary", "c_blob": "large_binary", "c_json": "string",
     },
+    ("mssql", "pyarrow"): {
+        "c_tinyint": "int64", "c_smallint": "int64", "c_int": "int64", "c_bigint": "int64", "c_bit": "bool",
+        "c_decimal_18_4": "decimal128(18, 4)", "c_decimal_28_10": "decimal128(28, 10)",
+        "c_decimal_38_12": "decimal128(38, 12)", "c_decimal_38_0": "decimal128(38, 0)",
+        "c_money": "decimal128(19, 4)", "c_smallmoney": "decimal128(10, 4)", "c_float": "double", "c_real": "double",
+        "c_char": "string", "c_varchar": "string", "c_varchar_max": "string", "c_nchar": "string",
+        "c_nvarchar": "string", "c_nvarchar_max": "string", "c_text": "string", "c_ntext": "string",
+        "c_date": "date32[day]", "c_datetime": "timestamp[us]", "c_datetime2": "timestamp[us]",
+        "c_datetime2_6": "timestamp[us]", "c_smalldatetime": "timestamp[us]",
+        "c_datetimeoffset": "timestamp[us, tz=UTC]", "c_time": "time64[us]",
+        "c_binary": "binary", "c_varbinary": "binary", "c_varbinary_max": "binary", "c_image": "binary",
+        "c_uniqueidentifier": "string", "c_xml": "string",
+        "c_hierarchyid": "binary", "c_geography": "binary", "c_geometry": "binary",
+    },
+    ("mssql", "connectorx"): {
+        # ConnectorX widens tinyint, smallint and int to int64 and real to double on SQL Server too
+        "c_tinyint": "int64", "c_smallint": "int64", "c_int": "int64", "c_bigint": "int64", "c_bit": "bool",
+        "c_decimal_18_4": "decimal128(38, 10)", "c_decimal_28_10": "decimal128(38, 10)",
+        "c_smallmoney": "double", "c_float": "double", "c_real": "double",
+        "c_char": "string", "c_varchar": "string", "c_varchar_max": "string", "c_nchar": "string",
+        "c_nvarchar": "string", "c_nvarchar_max": "string", "c_text": "string", "c_ntext": "string",
+        "c_date": "date32[day]", "c_datetime": "timestamp[us]", "c_datetime2": "timestamp[us]",
+        "c_datetime2_6": "timestamp[us]", "c_smalldatetime": "timestamp[us]", "c_time": "time64[us]",
+        "c_binary": "large_binary", "c_varbinary": "large_binary", "c_varbinary_max": "large_binary",
+        "c_image": "large_binary", "c_uniqueidentifier": "string",
+    },
 }
 
 # Values that must survive exactly: the wide decimals, and what the pyarrow backend turns into text.
@@ -200,6 +267,14 @@ EXACT = {
         "c_datetime6": datetime(2026, 11, 20, 8, 0, 0, 123456),
         "c_set": "x,y",
         "c_json": '{"a":1}',
+    },
+    "mssql": {
+        "c_decimal_28_10": Decimal("123456789012345678.0123456789"),
+        "c_datetime2": datetime(2026, 11, 20, 8, 0, 0, 123456),  # 100 ns truncated to the microsecond
+        "c_datetime2_6": datetime(2026, 11, 20, 8, 0, 0, 123456),
+        "c_time": time(8, 0, 0, 123456),
+        "c_nvarchar": "\u00fcn\u00ef",
+        "c_uniqueidentifier": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
     },
 }
 EXACT_PYARROW = {
@@ -225,7 +300,19 @@ EXACT_PYARROW = {
         "c_decimal_65_30": Decimal("1.123456789012345678901234567890"),
         "c_double": 2.5,
     },
+    "mssql": {
+        "c_decimal_38_12": Decimal("12345678901234567890123456.123456789012"),
+        "c_money": Decimal("922337203685477.5807"),
+        "c_datetime": datetime(2026, 11, 20, 8, 0, 0, 123000),  # ConnectorX: .123333, the 1/300 s DATETIME holds
+        "c_datetimeoffset": datetime(2026, 11, 20, 6, 0, 0, 123456, tzinfo=UTC),  # the instant, in UTC
+        "c_xml": "<a/>",
+        "c_hierarchyid": b"X",  # SQL Server's serialization of /1/, as CAST(... AS varbinary) gives it
+    },
 }
+
+# Columns no backend lands losslessly: preflight fails them on pyarrow as well. pyodbc reads a
+# sql_variant only as the value's bytes, without its type.
+UNREADABLE = {"mssql": {"c_sql_variant"}}
 
 
 def seed_matrix(source) -> dict[str, tuple[str, str, bool]]:
@@ -243,7 +330,11 @@ def seed_matrix(source) -> dict[str, tuple[str, str, bool]]:
 
 def test_landed_types_per_engine_and_backend(source, run, backend):
     matrix = seed_matrix(source)
-    readable = [name for name, (_, _, cx_reads) in matrix.items() if backend == "pyarrow" or cx_reads]
+    unreadable = UNREADABLE.get(source.dialect, set())
+    readable = [
+        name for name, (_, _, cx_reads) in matrix.items()
+        if (backend == "pyarrow" or cx_reads) and name not in unreadable
+    ]
     table = {"name": "type_matrix", "table": "type_matrix", "columns": ["id", *readable], "backend": backend}
     result = run({"source_id": "types", "mode": "full"}, table)
     assert result["rows"] == {"type_matrix": 2}
@@ -254,6 +345,19 @@ def test_landed_types_per_engine_and_backend(source, run, backend):
     exact = EXACT[source.dialect] | (EXACT_PYARROW[source.dialect] if backend == "pyarrow" else {})
     assert {name: row[name] for name in exact} == exact
     assert {name for name, value in empty.items() if value is not None} == {"id", "_extracted_at"}
+
+
+def test_the_preflight_fails_exactly_the_columns_a_backend_cannot_land(source, run, backend):
+    """Every deny-listed type and high-scale decimal on ConnectorX; on pyarrow only what no backend reads."""
+    matrix = seed_matrix(source)
+    table = {"name": "type_matrix", "table": "type_matrix", "backend": backend}
+    report = run({"source_id": "types", "mode": "validate"}, table)
+    [checked] = report["tables"]
+    failed = {finding.split(":")[0].removeprefix("column ") for finding in checked["findings"]}
+    unreadable = UNREADABLE.get(source.dialect, set())
+    cannot = {name for name, (_, _, cx_reads) in matrix.items() if not cx_reads} if backend == "connectorx" else set()
+    assert failed == cannot | unreadable
+    assert source.files("type_matrix") == []
 
 
 def denied(matrix: dict[str, tuple[str, str, bool]]) -> set[str]:
@@ -277,14 +381,14 @@ def test_every_denied_column_really_fails_or_loses_data_on_connectorx(source):
     wrong = {}
     for name in sorted(denied(matrix)):
         sql = f"SELECT {name} FROM type_matrix WHERE id = 1"
-        with source.sa.connect() as conn:
-            exact = conn.exec_driver_sql(sql).scalar_one()
         try:
             [read] = cx.read_sql(url, sql, return_type="arrow_stream", batch_size=10).read_all().column(0).to_pylist()
         except BaseException as e:  # PanicException derives from BaseException
             if not (isinstance(e, RuntimeError) or type(e).__name__ == "PanicException"):
                 raise
             continue
+        with source.sa.connect() as conn:  # only now: some denied types (sql_variant) pyodbc cannot read either
+            exact = conn.exec_driver_sql(sql).scalar_one()
         if read == exact:
             wrong[name] = read
     assert wrong == {}, "ConnectorX reads these exactly, so the preflight should not deny them"

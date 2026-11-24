@@ -203,3 +203,27 @@ def test_db2_page_query_compiles_offline():
     tc = table_config(primary_key=("TransactionId",))
     stmt = page_select(transactions(), paged_rows(transactions(), tc, START), tc, 400, 100)
     assert "ORDER BY" in str(stmt.compile(dialect=db2_dialect()))
+
+
+def test_mssql_inlines_timestamps_as_datetime2_so_microseconds_compare_with_any_column_type():
+    """SQL Server converts a text literal to the column's type: to DATETIME it allows 3 decimals (spike S2)."""
+    at = datetime(2026, 11, 20, 8, 0, 0, 123456)
+    sql = " ".join(literal_sql(cursor_select(transactions(), table_config(), at, END), DIALECTS["mssql"]).split())
+    assert (
+        "WHERE dbo.[Transactions].[UpdatedAt] >= CAST('2026-11-20 08:00:00.123456' AS DATETIME2) "
+        "AND dbo.[Transactions].[UpdatedAt] < CAST('2026-11-21 00:00:00' AS DATETIME2) "
+    ) in sql
+
+
+def test_mssql_inlines_an_offset_timestamp_as_datetimeoffset():
+    from datetime import UTC
+
+    at = datetime(2026, 11, 20, 6, 0, 0, 123456, tzinfo=UTC)
+    sql = " ".join(literal_sql(cursor_select(transactions(), table_config(), at), DIALECTS["mssql"]).split())
+    assert ">= CAST('2026-11-20 06:00:00.123456+00:00' AS DATETIMEOFFSET) " in sql
+
+
+def test_mssql_keyset_seed_is_inlined_as_datetime2_too():
+    sql = " ".join(literal_sql(keyset_select(transactions(), keyset_config(), START, END, AFTER),
+                               DIALECTS["mssql"]).split())
+    assert "[UpdatedAt] > CAST('2026-11-20 09:30:00' AS DATETIME2) OR" in sql

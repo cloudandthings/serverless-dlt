@@ -39,9 +39,17 @@ AUTH_TYPES = ("password", "kerberos")
 ISOLATION_LEVELS = ("READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE", "SNAPSHOT", "AUTOCOMMIT")
 # Engines where ConnectorX can apply `isolation_level` (spike S3), and the levels it can apply there.
 # Postgres: ConnectorX passes libpq `options` to the server, so `-c default_transaction_isolation=...`
-# becomes the session default. MySQL: its URL takes no session settings, and the level is not
-# settable through a SET_VAR hint. mssql and oracle: until their integration tickets measure it.
-CONNECTORX_ISOLATION = {"postgres": ("READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE")}
+# becomes the session default. SQL Server: its URL takes no session settings either (unknown
+# parameters are ignored), but ConnectorX runs a batch, so a SET TRANSACTION ISOLATION LEVEL goes
+# ahead of the query; not on a partitioned read, which ConnectorX parses as a single SELECT.
+# MySQL: its URL takes no session settings, and the level is not settable through a SET_VAR hint.
+# oracle: until its integration ticket measures it.
+CONNECTORX_ISOLATION = {
+    "postgres": ("READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE"),
+    "mssql": ("READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SNAPSHOT", "SERIALIZABLE"),
+}
+# Where the level goes into the SQL batch rather than the URL, so a partitioned read cannot carry it.
+CONNECTORX_ISOLATION_IN_BATCH = ("mssql",)
 PARQUET_CODECS = ("zstd", "snappy", "gzip", "none")
 SERVER_DIALECTS = ("mssql", "postgres", "mysql", "db2")  # host + database; oracle uses service_name
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -451,6 +459,12 @@ class SourceConfig:
                 f"table {t.name}: ConnectorX cannot apply connection.isolation_level {level!r} on {dialect} "
                 f"(it can on: {CONNECTORX_ISOLATION}); "
                 'set "backend": "pyarrow" on the table or in defaults, or remove "isolation_level"'
+            )
+        if level is not None and t.partition and dialect in CONNECTORX_ISOLATION_IN_BATCH:
+            raise ConfigError(
+                f"table {t.name}: on {dialect} ConnectorX applies connection.isolation_level with a SET statement "
+                "ahead of the query, which a partitioned read does not allow; "
+                'remove "partition", or set "backend": "pyarrow" on the table, or remove "isolation_level"'
             )
         if self.connection.auth.type == "kerberos" and dialect != "mssql":
             raise ConfigError(

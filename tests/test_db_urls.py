@@ -15,7 +15,7 @@ from sqlalchemy.dialects.mssql.pyodbc import MSDialect_pyodbc
 
 from db_bronze import secrets as db_secrets
 from db_bronze.config import ConfigError, ConnectionConfig, SourceConfig
-from db_bronze.urls import connectorx_url, sqlalchemy_url
+from db_bronze.urls import connectorx_sql, connectorx_url, sqlalchemy_url
 
 USER = {"username": "ingest", "password": "s3cret"}
 
@@ -150,6 +150,21 @@ def test_postgres_isolation_level_joins_libpq_options_from_driver_options():
         "sslmode": ["require"],
         "options": ["-c statement_timeout=60000 -c default_transaction_isolation=serializable"],
     }
+
+
+def test_mssql_isolation_level_goes_ahead_of_the_connectorx_query_in_the_same_batch():
+    # ConnectorX's SQL Server URL takes no session settings, but it runs a batch (S3).
+    sql = connectorx_sql(conn(**SERVER["mssql"], isolation_level="SNAPSHOT"), "SELECT 1 AS x")
+    assert sql == "SET TRANSACTION ISOLATION LEVEL SNAPSHOT; SELECT 1 AS x"
+
+
+@pytest.mark.parametrize("dialect", ["mssql", "postgres"])
+def test_without_isolation_level_the_connectorx_query_is_unchanged(dialect):
+    assert connectorx_sql(conn(**SERVER[dialect]), "SELECT 1 AS x") == "SELECT 1 AS x"
+
+
+def test_postgres_isolation_level_is_not_put_in_the_query():  # it is in the URL
+    assert connectorx_sql(conn(**SERVER["postgres"], isolation_level="SERIALIZABLE"), "SELECT 1") == "SELECT 1"
 
 
 @pytest.mark.parametrize(

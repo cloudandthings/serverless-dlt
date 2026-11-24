@@ -13,6 +13,8 @@ eval "pytest_args=(${usage_pytest_args:-})"
 
 # COMPOSE_PROJECT_NAME and the DB_BRONZE_IT_*_PORT variables give a second stack of its own (compose.yaml)
 compose=(docker compose -f tests/integration/compose.yaml)
+# DB_BRONZE_IT_ENGINES (e.g. "mssql") limits the run, and the services brought up, to some engines
+IFS=, read -r -a services <<< "${DB_BRONZE_IT_ENGINES:-}"
 if [[ "${usage_keep:-false}" != "true" ]]; then
   trap '"${compose[@]}" down --volumes --remove-orphans' EXIT
 fi
@@ -23,5 +25,5 @@ if [[ "${usage_image:-false}" == "true" ]]; then
   fi
   export DB_BRONZE_IT_IMAGE="$tag"
 fi
-"${compose[@]}" up -d --wait
+"${compose[@]}" up -d --wait ${services[@]+"${services[@]}"}
 uv run pytest -m integration ${pytest_args[@]+"${pytest_args[@]}"}

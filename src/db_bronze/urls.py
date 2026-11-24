@@ -97,6 +97,18 @@ def _connectorx_options(conn: ConnectionConfig) -> dict[str, str]:
     return options
 
 
+def connectorx_sql(conn: ConnectionConfig, sql: str) -> str:
+    """The SQL ConnectorX runs: on SQL Server, `isolation_level` goes ahead of the query in the same batch.
+
+    ConnectorX's SQL Server URL takes no session settings, but a batch's SET
+    applies to the statement after it (spike S3). Elsewhere the level is in the
+    URL (Postgres) or rejected by validation.
+    """
+    if conn.dialect == "mssql" and conn.isolation_level is not None:
+        return f"SET TRANSACTION ISOLATION LEVEL {conn.isolation_level}; {sql}"
+    return sql
+
+
 def connectorx_url(conn: ConnectionConfig) -> str:
     if conn.dialect not in CONNECTORX_DIALECTS:
         raise ConfigError(f'ConnectorX does not support dialect {conn.dialect!r}; set "backend": "pyarrow"')

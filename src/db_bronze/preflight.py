@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import sqlalchemy as sa
-from sqlalchemy.dialects import oracle
+from sqlalchemy.dialects import mssql, oracle
 from sqlalchemy.dialects import postgresql as pg
 
 from .config import SourceConfig, TableConfig
@@ -23,10 +23,11 @@ log = logging.getLogger(__name__)
 
 # Minimum server version per dialect, as a tuple; None: not set yet. The integration
 # matrix fills these in (spike S9); a server below the minimum fails the run, and the
-# backend is never switched silently. Postgres 11 and MySQL 8.0 are the oldest series
-# the whole integration suite has passed on (11.16, 8.0.46; DESIGN-db.md section 11).
+# backend is never switched silently. Postgres 11, MySQL 8.0 and SQL Server 2017 (14) are
+# the oldest series the whole integration suite has passed on (11.16, 8.0.46, 14.0.3570;
+# DESIGN-db.md section 11). SQL Server on Linux starts at 2017, so nothing older was run.
 MIN_SERVER_VERSION: dict[str, tuple[int, ...] | None] = {
-    "mssql": None,
+    "mssql": (14,),
     "postgres": (11,),
     "mysql": (8, 0),
     "oracle": None,
@@ -93,11 +94,15 @@ DENY_LIST: dict[str, list[tuple[str, Callable[[sa.types.TypeEngine], bool]]]] = 
         ('"char" (or name: SQLAlchemy reflects both as String)', _is_bare_string),
         ("array of this element type", _is_unreadable_postgres_array),
     ],
+    # money: read as a double, too narrow for its 19 digits. datetimeoffset: ConnectorX applies the offset
+    # twice, so the instant is wrong (integration type matrix, section 10.1). sql_variant: UNREADABLE.
     "mssql": [
-        ("sql_variant", _named("SQL_VARIANT")),
         ("xml", _named("XML")),
         ("hierarchyid", _named("HIERARCHYID")),
-        ("geography", _named("GEOGRAPHY", "GEOMETRY")),
+        ("geography", _named("GEOGRAPHY")),
+        ("geometry", _named("GEOMETRY")),
+        ("money", lambda t: isinstance(t, mssql.MONEY)),
+        ("datetimeoffset", lambda t: isinstance(t, mssql.DATETIMEOFFSET)),
     ],
     "oracle": [
         ("raw", lambda t: isinstance(t, oracle.RAW)),
@@ -111,6 +116,13 @@ DENY_LIST: dict[str, list[tuple[str, Callable[[sa.types.TypeEngine], bool]]]] = 
 }
 # SQLite reflects a column declared without a type as NullType, and ConnectorX reads it from its values.
 _UNRECOGNISED_EXEMPT = ("sqlite",)
+
+
+# Types no backend lands losslessly: a finding on every backend. pyodbc reads a sql_variant
+# only as the bytes of its value, without the value's type.
+UNREADABLE: dict[str, list[tuple[str, Callable[[sa.types.TypeEngine], bool]]]] = {
+    "mssql": [("sql_variant", _named("SQL_VARIANT"))],
+}
 
 
 class PreflightError(Exception):
@@ -183,7 +195,16 @@ def column_findings(dialect: str, backend: str, columns: list[tuple[str, sa.type
     for name, col_type in columns:
         if name == EXTRACTED_AT:
             findings.append(f"column {name}: the name is reserved for the extraction timestamp; rename or exclude it")
-        if backend != "connectorx" or col_type is None:
+        if col_type is None:
+            continue
+        unreadable = next((label for label, matches in UNREADABLE.get(dialect, []) if matches(col_type)), None)
+        if unreadable is not None:
+            findings.append(
+                f"column {name}: type {unreadable} cannot be landed losslessly by any backend; "
+                'exclude the column, or cast it in "query"'
+            )
+            continue
+        if backend != "connectorx":
             continue
         if finding := _connectorx_finding(dialect, col_type):
             findings.append(f"column {name}: {finding}")
