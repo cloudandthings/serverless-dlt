@@ -20,7 +20,7 @@ from dlt.destinations import filesystem
 from .config import ConfigError, RunRequest, SourceConfig, TableConfig
 from .manifest import finalize, new_snapshot_id, write_manifest
 from .plan import make_plan
-from .preflight import preflight, raise_on_findings
+from .preflight import TableReport, preflight, raise_on_findings
 from .query import page_order
 from .source import RunStats, make_engine, make_resource
 
@@ -111,6 +111,19 @@ def time_budget(cfg: SourceConfig, req: RunRequest, tc: TableConfig, max_time_s:
     return min(limits)
 
 
+def null_cursor_rows(tables: tuple[TableConfig, ...], reports: list[TableReport], stats: RunStats) -> dict[str, int]:
+    """NULL-cursor rows per table (metric `NullCursorRows`).
+
+    With `include_null_cursor` false they are the gap the cursor filter never
+    reads, so the count is the preflight's; with it true they land, and the
+    count is what this run extracted.
+    """
+    return {
+        tc.name: r.null_cursor_count if r.null_cursor_count is not None else stats.null_cursor_rows.get(tc.name, 0)
+        for tc, r in zip(tables, reports, strict=True)
+    }
+
+
 def validate(cfg: SourceConfig, req: RunRequest) -> dict[str, Any]:
     """`mode=validate`: the preflight for every table, and a report. Extracts and writes nothing."""
     tables = cfg.tables_for(req)
@@ -189,7 +202,7 @@ def run_pipeline(
         "load_ids": load_ids,
         "rows": rows,
         "backends": {tc.name: cfg.backend(tc) for tc in tables},
-        "null_cursor_rows": {tc.name: stats.null_cursor_rows.get(tc.name, 0) for tc in tables},
+        "null_cursor_rows": null_cursor_rows(tables, reports, stats),
         "is_empty": not any(rows.values()),
         "time_limited": any(b is not None for b in budgets.values()),
         "started_at": run_started.isoformat(),

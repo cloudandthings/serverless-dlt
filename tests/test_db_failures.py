@@ -191,3 +191,14 @@ def test_emf_metrics_for_a_successful_run(invoke, source, capsys):
     assert cw["Dimensions"] == [["pipeline", "table"]]
     assert {"Name": "RowsExtracted", "Unit": "Count"} in cw["Metrics"]
     assert metric(records, "NullCursorRows")["NullCursorRows"] == 2
+
+
+def test_null_cursor_rows_the_run_never_reads_are_counted_in_the_metric(invoke, source, capsys):
+    """include_null_cursor false (the default): the NULL-cursor rows are the gap, so the metric shows them."""
+    with sqlite3.connect(source) as con:
+        con.execute('INSERT INTO "Transactions" VALUES (2, NULL), (3, NULL)')
+    capsys.readouterr()
+    result = invoke()
+    assert result["rows"] == {"transactions": 1}
+    assert result["null_cursor_rows"] == {"transactions": 2}
+    assert metric(emf(capsys.readouterr().out), "NullCursorRows")["NullCursorRows"] == 2
