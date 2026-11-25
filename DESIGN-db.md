@@ -646,7 +646,11 @@ instance profile (`db2start: command not found`). The compose file mounts an
 `/etc/environment` with `BASH_ENV` pointing at the profile, which su applies; on an
 x86_64 host it changes nothing. The image's fenced user cannot read the instance
 directory there either (SQL1646N), so the harness drops a test's schema object by
-object rather than through `SYSPROC.ADMIN_DROP_SCHEMA`.
+object rather than through `SYSPROC.ADMIN_DROP_SCHEMA`. The 12.1.5 setup's own `CREATE DATABASE` can
+also segfault under Rosetta (seen once at review, 25 Nov 2026) while the log still says
+"Setup has completed"; the healthcheck then never passes. Running
+`su - db2inst1 -c '. ~/sqllib/db2profile; db2 create db BRONZE'` in the container
+creates it, and the waiting run carries on.
 
 ### 10.1 Landed types (*integration*, 24 Nov 2026)
 
