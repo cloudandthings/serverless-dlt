@@ -29,7 +29,9 @@ EVENT_KEYS = frozenset({
     "page", "snapshot_id", "partition_date",  # a page of a planned snapshot (mode=full)
     "table", "load_ids",  # finalize
 })
-BACKENDS = ("connectorx", "pyarrow", "sqlalchemy")
+BACKENDS = ("connectorx", "pyarrow")
+# Designed (DESIGN-db.md 7.2) but not built: rejected when the config loads rather than failing mid-run.
+UNBUILT_BACKENDS = ("sqlalchemy",)
 # Engines ConnectorX reads (section 3.1); these default to it (D3, section 5.3). Db2 is not supported.
 CONNECTORX_DIALECTS = ("mssql", "postgres", "mysql", "oracle", "sqlite")
 CURSOR_TYPES = ("timestamp", "integer")
@@ -98,6 +100,13 @@ def _build(cls, data: Any, where: str, **overrides):
         return cls(**{**data, **overrides})
     except TypeError as e:
         raise ConfigError(f"{where}: {e}") from e
+
+
+def _check_backend_name(what: str, backend: str | None) -> None:
+    if backend in UNBUILT_BACKENDS:
+        raise ConfigError(f'{what} "{backend}" is not implemented yet; set "backend": "pyarrow"')
+    if backend is not None and backend not in BACKENDS:
+        raise ConfigError(f"{what} {backend!r} not in {BACKENDS}")
 
 
 def _names(value: Any, where: str) -> tuple[str, ...]:
@@ -411,8 +420,7 @@ class SourceConfig:
             raise ConfigError(f"max_time_s must be a number of seconds > 0, or null: {self.max_time_s!r}")
         if self.parquet_compression not in PARQUET_CODECS:
             raise ConfigError(f"parquet_compression {self.parquet_compression!r} not in {PARQUET_CODECS}")
-        if self.defaults.backend is not None and self.defaults.backend not in BACKENDS:
-            raise ConfigError(f"defaults.backend {self.defaults.backend!r} not in {BACKENDS}")
+        _check_backend_name("defaults.backend", self.defaults.backend)
         for t in self.tables:
             self._check_backend(t)
             self._check_max_time(t)
@@ -445,8 +453,7 @@ class SourceConfig:
         )
 
     def _check_backend(self, t: TableConfig) -> None:
-        if t.backend is not None and t.backend not in BACKENDS:
-            raise ConfigError(f"table {t.name}: backend {t.backend!r} not in {BACKENDS}")
+        _check_backend_name(f"table {t.name}: backend", t.backend)
         if t.partition and self.backend(t) != "connectorx":
             raise ConfigError(
                 f"table {t.name}: partition is a ConnectorX read (partition_on), but the table resolves to "

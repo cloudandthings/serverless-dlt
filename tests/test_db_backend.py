@@ -58,6 +58,12 @@ def test_unknown_backend_is_rejected():
         config(None, "duckdb")
 
 
+@pytest.mark.parametrize("where", ["table", "defaults"])
+def test_the_sqlalchemy_backend_is_rejected_until_it_is_built(where):
+    with pytest.raises(ConfigError, match=r'backend "sqlalchemy" is not implemented.*"backend": "pyarrow"'):
+        config("sqlalchemy", None) if where == "defaults" else config(None, "sqlalchemy")
+
+
 def test_sqlite_connectorx_url_is_built_from_the_path():
     conn = ConnectionConfig(dialect="sqlite", path="/data/core banking#1.sqlite")
     assert connectorx_url(conn) == "sqlite:///data/core%20banking%231.sqlite"
