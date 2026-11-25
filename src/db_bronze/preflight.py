@@ -16,6 +16,7 @@ from sqlalchemy.dialects import mssql, oracle
 from sqlalchemy.dialects import postgresql as pg
 
 from .config import SourceConfig, TableConfig
+from .errors import PreflightError
 from .extract import DB2_DIALECT, EXTRACTED_AT
 from .source import reflect
 
@@ -134,22 +135,6 @@ _UNRECOGNISED_EXEMPT = ("sqlite",)
 UNREADABLE: dict[str, list[tuple[str, Callable[[sa.types.TypeEngine], bool]]]] = {
     "mssql": [("sql_variant", _named("SQL_VARIANT"))],
 }
-
-
-class PreflightError(Exception):
-    """One or more tables cannot run. `findings` maps table name to what is wrong with it."""
-
-    def __init__(self, findings: dict[str, list[str]]):
-        self.findings = findings
-        lines = [f"preflight failed for {len(findings)} table(s); nothing was extracted:"]
-        for name, items in findings.items():
-            lines.append(f"  table {name}:")
-            lines.extend(f"    - {item}" for item in items)
-        lines.append(
-            'Fix each table by setting "backend": "pyarrow" on it, or by excluding the offending column '
-            'with "columns" (or casting it in "query").'
-        )
-        super().__init__("\n".join(lines))
 
 
 def server_version(dialect: sa.Dialect) -> tuple[int, ...] | None:

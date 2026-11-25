@@ -58,7 +58,7 @@ def test_every_enumerated_value_is_documented():
 def test_every_error_type_is_documented_with_a_fix():
     ours = [c for c in vars(errors).values() if isinstance(c, type) and issubclass(c, errors.DbBronzeError)]
     names = {c.__name__ for c in ours if c is not errors.DbBronzeError}
-    names |= {config.ConfigError.__name__, preflight.PreflightError.__name__}
+    names |= {config.ConfigError.__name__}
     names |= {"NotImplementedError", "PipelineStepFailed"}
     section = README.split("## Errors", 1)[1]
     assert not [n for n in sorted(names) if f"`{n}`" not in section]

@@ -9,10 +9,10 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import mssql, oracle
 from sqlalchemy.dialects import postgresql as pg
 
+from db_bronze.errors import PreflightError
 from db_bronze.extract import register_mssql_types
 from db_bronze.preflight import (
     MIN_SERVER_VERSION,
-    PreflightError,
     column_findings,
     server_version,
     server_version_finding,
