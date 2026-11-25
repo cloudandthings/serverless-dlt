@@ -11,6 +11,9 @@ silver columns later.
 Why it is built this way, what else was considered, and the evidence behind each
 decision are in [DESIGN-api.md](DESIGN-api.md). Read it before changing the design.
 
+The relational-database counterpart (`db_bronze`: typed Parquet from SQL Server,
+Postgres, MySQL, Oracle and Db2) is specified in [README-db.md](README-db.md).
+
 ## Status
 
 | Part | State |
