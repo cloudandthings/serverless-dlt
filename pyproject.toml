@@ -13,9 +13,23 @@ dependencies = [
 [project.optional-dependencies]
 # Secrets Manager refs (secrets.py). The Lambda base image ships boto3, but pin it.
 aws = ["boto3>=1.40"]
+# db_bronze (DESIGN-db.md section 9): every driver, for the one x86_64 image (D9).
+# ConnectorX >= 0.4.6: in 0.4.5 a failed stream ended silently, looking like a short read (section 3.1).
+# ibm_db ships x86_64 Linux wheels only (bundled clidriver), hence the marker: `uv sync` still works on a Mac.
+db = [
+    "connectorx>=0.4.6",
+    "ibm-db>=3.3.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "ibm-db-sa>=0.4.4 ; platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "oracledb>=26.1.0",
+    "psycopg[binary]>=3.3.9",
+    "pymysql>=1.2.4",
+    "pyodbc>=5.5.0",
+    "sqlalchemy>=2",
+]
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.8"]
+# The tests cover both packages, so dev pulls in the db extra.
+dev = ["api-bronze[db]", "pytest>=8", "ruff>=0.8"]
 # Runs the silver reference transform test locally (needs Java 17+).
 silver = ["pyspark==4.1.1"]
 
@@ -24,11 +38,18 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/api_bronze"]
+packages = ["src/api_bronze", "src/bronze_common", "src/db_bronze"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["spark: needs pyspark 4.1 and Java (uv sync --group silver)"]
+markers = [
+    "spark: needs pyspark 4.1 and Java (uv sync --group silver)",
+    "integration: needs Docker; real source engines from tests/integration/compose.yaml (mise run test:integration)",
+    "connectorx: drives ConnectorX itself; skipped on engines ConnectorX does not read (Db2)",
+]
+# The integration suite is opt-in, so a plain run never needs Docker. A later -m on the
+# command line replaces this one (pytest -m integration).
+addopts = ["-m", "not integration"]
 filterwarnings = ["ignore::DeprecationWarning"]
 
 [tool.ruff]
@@ -38,3 +59,6 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
 ignore = ["RUF001", "RUF002", "RUF003"]  # deliberate non-ASCII in docs and test data
+
+[tool.uv.sources]
+api-bronze = { workspace = true }

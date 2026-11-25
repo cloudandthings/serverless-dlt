@@ -1,0 +1,97 @@
+# Source engines for the db_bronze integration suite (DESIGN-db.md section 10).
+# `mise run test:integration` brings this up; the tests also bring it up themselves
+# (idempotent) when run with `pytest -m integration`. Later engines join as services here.
+#
+# Host ports and images are overridable, so the suite can run beside other stacks
+# and against older server versions (spike S9): e.g. DB_BRONZE_IT_PG_IMAGE=postgres:13.
+name: db-bronze-it
+
+services:
+  postgres:
+    image: ${DB_BRONZE_IT_PG_IMAGE:-postgres:17}
+    environment:
+      POSTGRES_PASSWORD: bronze-it
+    ports: ["127.0.0.1:${DB_BRONZE_IT_PG_PORT:-55432}:5432"]
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 1s
+      retries: 60
+
+  mysql:
+    image: ${DB_BRONZE_IT_MYSQL_IMAGE:-mysql:8.4}
+    environment:
+      MYSQL_ROOT_PASSWORD: bronze-it
+    ports: ["127.0.0.1:${DB_BRONZE_IT_MYSQL_PORT:-53306}:3306"]
+    tmpfs: [/var/lib/mysql]
+    healthcheck:
+      # mysqladmin ping answers during the init phase too; a real query waits for the final server
+      test: ["CMD-SHELL", "mysql -uroot -pbronze-it -h127.0.0.1 -e 'SELECT 1'"]
+      interval: 1s
+      retries: 120
+
+  # x86_64 only. On an arm64 host it needs Rosetta (Docker Desktop, colima --vz-rosetta) or an
+  # x86_64 VM (colima --arch x86_64): under QEMU user-mode emulation sqlservr refuses to start
+  # ("Invalid mapping of address ... in reserved address space"). No tmpfs: SQL Server needs O_DIRECT.
+  mssql:
+    image: ${DB_BRONZE_IT_MSSQL_IMAGE:-mcr.microsoft.com/mssql/server:2022-latest}
+    platform: linux/amd64
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: Bronze-it-1  # SQL Server's password policy rejects the other engines' password
+      MSSQL_PID: Developer
+    ports: ["127.0.0.1:${DB_BRONZE_IT_MSSQL_PORT:-51433}:1433"]
+    healthcheck:
+      # 2022 ships the tools under mssql-tools18 (-C: trust the self-signed certificate); 2017/2019 under mssql-tools
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Bronze-it-1 -Q 'SELECT 1' || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P Bronze-it-1 -Q 'SELECT 1'"]
+      interval: 2s
+      retries: 300
+
+  # Oracle AI Database Free (23.26, "26ai"), multi-arch: native on arm64 hosts. Reached by
+  # service_name FREEPDB1; each test gets a fresh user (schema) rather than a fresh database.
+  # The full image, not -lite: lite has no XDB (XMLTYPE) and no USERS tablespace. Its handler
+  # runs only with Instant Client, so it is a profile of its own, started by `--image` and
+  # `--inside` runs (and by the tests when they target it).
+  oracle:
+    profiles: [oracle]
+    image: ${DB_BRONZE_IT_ORACLE_IMAGE:-container-registry.oracle.com/database/free:23.26.0.0}
+    environment:
+      ORACLE_PWD: bronze-it  # Oracle's images
+      ORACLE_PASSWORD: bronze-it  # gvenzl/oracle-xe, for older servers (spike S9; DB_BRONZE_IT_ORACLE_SERVICE=XEPDB1)
+    ports: ["127.0.0.1:${DB_BRONZE_IT_ORACLE_PORT:-51521}:1521"]
+    healthcheck:
+      test: ["CMD-SHELL", "\"$$ORACLE_BASE/$$CHECK_DB_FILE\" >/dev/null 2>&1 || healthcheck.sh"]
+      interval: 5s
+      start_period: 30s
+      retries: 120
+
+  # Db2 Community (LUW), x86_64 only, as is ibm_db: on an arm64 host it needs Rosetta (colima
+  # --vz-rosetta, Docker Desktop), and its tests run only where ibm_db imports (`--inside`, or an
+  # x86_64 Linux host). The image creates database BRONZE on first start, which takes minutes;
+  # each test gets a fresh schema in it. Db2 needs a privileged container. A profile of its own,
+  # like Oracle, so host runs on a Mac do not start it.
+  db2:
+    profiles: [db2]
+    image: ${DB_BRONZE_IT_DB2_IMAGE:-icr.io/db2_community/db2:12.1.5.0}
+    platform: linux/amd64
+    privileged: true
+    environment:
+      LICENSE: accept
+      DB2INSTANCE: db2inst1
+      DB2INST1_PASSWORD: bronze-it
+      DBNAME: BRONZE
+      ARCHIVE_LOGS: "false"
+      AUTOCONFIG: "false"
+    ports: ["127.0.0.1:${DB_BRONZE_IT_DB2_PORT:-55000}:50000"]
+    # The image's setup runs `su - db2inst1 -c "db2start"` and so on, relying on a login shell to read
+    # the instance profile. Under Rosetta without binfmt's preserve-argv0 flag (colima --vz-rosetta)
+    # su's "-bash" loses its dash: no login shell, no profile, "db2start: command not found", and no
+    # database. su reads /etc/environment (pam_env), so BASH_ENV makes every such shell read the profile.
+    # Not on the 11.5 images (RHEL 7, whose su skips pam_env for root): there, under Rosetta, start
+    # it by hand once the setup has finished (DESIGN-db.md S9).
+    volumes: ["./db2-environment:/etc/environment:ro"]
+    healthcheck:
+      test: ["CMD-SHELL", "su - db2inst1 -c '. ~/sqllib/db2profile && db2 connect to BRONZE' >/dev/null 2>&1"]
+      interval: 10s
+      start_period: 60s
+      retries: 180

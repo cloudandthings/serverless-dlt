@@ -8,46 +8,26 @@ literal, so config documents never hold credentials:
     {"secret_id": "vendor/api", "key": "token"}          one key of a JSON SecretString
     {"secret_id": "...", "key": "token", "format": "Bearer {}"}   wrap the value
 
-AWS Secrets Manager values are cached for the container's lifetime. Rotation is
-picked up on the next cold start, or call `clear_cache()`.
+The lookup and its Secrets Manager cache are `bronze_common.secrets`, shared with
+`db_bronze`. Values are cached for the container's lifetime. Rotation is picked up
+on the next cold start, or call `clear_cache()`.
 """
 
 from __future__ import annotations
 
-import json
-import os
-from functools import cache
 from typing import Any
 
-_REF_KEYS = ({"env"}, {"secret_id"}, {"secret_id", "key"})
+from bronze_common.secrets import REF_KEYS, clear_cache, lookup
+
+__all__ = ["clear_cache", "resolve"]
 
 
 def _is_ref(value: Any) -> bool:
-    return isinstance(value, dict) and set(value) - {"format"} in _REF_KEYS
-
-
-@cache
-def _secret_string(secret_id: str) -> str:
-    import boto3  # lazy: only needed when a config actually uses Secrets Manager
-
-    return boto3.client("secretsmanager").get_secret_value(SecretId=secret_id)["SecretString"]
-
-
-def clear_cache() -> None:
-    _secret_string.cache_clear()
+    return isinstance(value, dict) and set(value) - {"format"} in REF_KEYS
 
 
 def _resolve_ref(ref: dict) -> str:
-    if "env" in ref:
-        try:
-            value = os.environ[ref["env"]]
-        except KeyError:
-            raise KeyError(f"secret ref: environment variable {ref['env']!r} is not set") from None
-    else:
-        value = _secret_string(ref["secret_id"])
-        if "key" in ref:
-            value = json.loads(value)[ref["key"]]
-    return ref.get("format", "{}").format(value)
+    return ref.get("format", "{}").format(lookup(ref))
 
 
 def resolve(value: Any) -> Any:

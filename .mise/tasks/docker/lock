@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-#MISE description="Export the pinned, hashed requirements the Lambda image installs"
-#MISE sources=["pyproject.toml", "uv.lock"]
-#MISE outputs=["docker/requirements.lock"]
+#MISE description="Export the pinned, hashed requirements a Lambda image installs"
+#USAGE flag "--db" help="Export docker/requirements-db.lock (db_bronze image) instead of docker/requirements.lock"
 set -euo pipefail
 cd "$MISE_PROJECT_ROOT"
 
-uv export --no-dev --no-emit-project --extra aws --format requirements-txt -o docker/requirements.lock
+# No sources/outputs caching: the output depends on --db, and uv export takes under a second.
+if [[ "${usage_db:-false}" == "true" ]]; then
+  # The db image also carries the API's aws extra (Secrets Manager refs)
+  uv export --no-dev --no-emit-project --extra aws --extra db --format requirements-txt -o docker/requirements-db.lock
+else
+  uv export --no-dev --no-emit-project --extra aws --format requirements-txt -o docker/requirements.lock
+fi

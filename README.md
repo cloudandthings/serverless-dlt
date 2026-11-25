@@ -11,6 +11,9 @@ silver columns later.
 Why it is built this way, what else was considered, and the evidence behind each
 decision are in [DESIGN-api.md](DESIGN-api.md). Read it before changing the design.
 
+The relational-database counterpart (`db_bronze`: typed Parquet from SQL Server,
+Postgres, MySQL, Oracle and Db2) is specified in [README-db.md](README-db.md).
+
 ## Status
 
 | Part | State |
@@ -32,6 +35,7 @@ src/api_bronze/
   source.py       dlt resources per endpoint and run mode
   pipeline.py     run_pipeline(config, request): the portable core
   handler.py      Lambda entry point (thin wrapper)
+src/bronze_common/  code shared with db_bronze (strict config building, secrets, handler helpers)
 silver/silver_transform.py   bronze -> silver reference (Spark 4.1 / Glue 6.0)
 tests/            pytest suite, fake API in conftest.py
 docker/           Lambda image + pinned, hashed requirements.lock
