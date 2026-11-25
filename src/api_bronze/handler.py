@@ -27,9 +27,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-import posixpath
 
-import fsspec
+from bronze_common.handler import find_in_chain, lambda_budget, load_config
 
 # module scope: imported during the init phase, not on every invocation
 from .config import RunRequest, SourceConfig
@@ -39,27 +38,10 @@ from .pipeline import run_pipeline
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), force=True)
 log = logging.getLogger("api_bronze")
 
-MIN_BUDGET_S = 60.0
-
-
-def load_config(event: dict) -> SourceConfig:
-    if "config" in event:
-        return SourceConfig.from_dict(event["config"])
-    source_id = event.get("source_id")
-    if not source_id or "/" in source_id or source_id.startswith("."):
-        raise ValueError(f"event needs a plain source_id or an inline config, got {source_id!r}")
-    uri = posixpath.join(os.environ["CONFIG_URI"].rstrip("/"), f"{source_id}.json")
-    with fsspec.open(uri, "rb") as f:
-        return SourceConfig.from_json(f.read())
-
-
 def handler(event: dict, context) -> dict:
-    cfg = load_config(event)
+    cfg = load_config(event, SourceConfig)
     req = RunRequest.from_event(event)
-    budget = None
-    if context is not None and req.mode == "incremental":
-        margin = float(os.environ.get("SAFETY_MARGIN_S", "120"))
-        budget = max(MIN_BUDGET_S, context.get_remaining_time_in_millis() / 1000 - margin)
+    budget = lambda_budget(context) if req.mode == "incremental" else None
     log.info(
         "run start %s",
         json.dumps(
@@ -74,7 +56,7 @@ def handler(event: dict, context) -> dict:
     try:
         result = run_pipeline(cfg, req, max_time_s=budget)
     except Exception as e:
-        broken = _find_in_chain(e, BrokenPageError)
+        broken = find_in_chain(e, BrokenPageError)
         if broken is not None:
             # surface it as the Lambda errorType (dlt wraps it in PipelineStepFailed),
             # so alarms and log filters can tell "vendor sent garbage" from other failures
@@ -83,13 +65,3 @@ def handler(event: dict, context) -> dict:
         raise
     log.info("run done %s", json.dumps(result))
     return result
-
-
-def _find_in_chain(exc: BaseException, kind: type[BaseException]) -> BaseException | None:
-    seen: set[int] = set()
-    while exc is not None and id(exc) not in seen:
-        if isinstance(exc, kind):
-            return exc
-        seen.add(id(exc))
-        exc = exc.__cause__ or exc.__context__
-    return None
