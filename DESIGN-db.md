@@ -1,6 +1,6 @@
 # Design: relational database bronze with dlt on Lambda (`db_bronze`)
 
-**Status:** agreed design, not yet implemented (24 November 2026). Spikes S1, S4
+**Status:** implemented and tested (25 November 2026); operator spec in `README-db.md`. Spikes S1, S4
 and S5 answered by prototype on 24 November 2026 (branch
 `prototype/db-bronze-spikes`, `src/db_bronze/PROTOTYPE_spikes/FINDINGS.md`) and
 folded in below. S1 (server side), S2, S3 and S9 answered for Postgres and MySQL
@@ -10,7 +10,14 @@ image, settled their deny lists and took a first peak-memory reading (S7).
 Ticket 15 ran it on SQL Server 2022, settled the SQL Server deny list and answered
 S1 (server side), S2, S3 and S9 for SQL Server (2017, 2019 and 2022), on 24 November 2026.
 Ticket 16 did the same for Oracle (Free 23.26, inside the image), settled its deny list
-and answered S2, S3, S6 and S9 for it.
+and answered S2, S3, S6 and S9 for it. Ticket 17 did the same for Db2 (11.5 and 12.1).
+
+*Verified:* the unit suite (SQLite, both backends) and the integration suite on Postgres
+11/12/17, MySQL 8.0/8.4, SQL Server 2017/2019/2022, Oracle Free 23.26 and Db2 11.5/12.1,
+on the host and through the Lambda emulator in the image. *Not verified:* Oracle 19c/21c
+and Db2 11.1/10.5 (their preflight minimums are floors from evidence, S9); SQL Server and
+Oracle integration were not rerun after the last shared harness edits; peak memory on a
+real large table (S7); real S3, real Lambda in a VPC, Glue 6.0; Kerberos (placeholder).
 
 This is the database counterpart of `api_bronze` (see `DESIGN-api.md`). It records
 the requirement, the facts that constrain the design, every decision taken and

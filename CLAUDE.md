@@ -8,6 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 README.md is the operator-facing spec (bronze contract, config reference, run modes, deployment). DESIGN-api.md explains every design decision and the evidence behind it. Read DESIGN-api.md before changing behaviour. `dlt-lambda-ingestion-assessment.md` is the earlier feasibility study (background only).
 
+`db_bronze` is the sibling package for relational sources: typed Parquet with source column names, same bronze layout. Its operator spec is README-db.md and its design record is DESIGN-db.md; read DESIGN-db.md before changing db_bronze behaviour. `tests/test_db_readme.py` fails when a config key, event key, mode, errorType or metric is missing from README-db.md, so update README-db.md in the same change.
+
 ## Commands
 
 Tooling (Python 3.12, uv, Temurin 21 for Spark) is pinned in `mise.toml`. Tasks are bash scripts in `.mise/tasks/`; the path is the task name (`.mise/tasks/docker/build` → `docker:build`, `test/_default` → `test`). Add new tasks there as executable bash files with `#MISE description=...` headers (and `#USAGE` for flags). Don't add inline `[tasks]` to `mise.toml`.
@@ -21,15 +23,21 @@ mise run test:unit                         # no Spark/Java
 mise run test:spark                        # installs silver group, runs Spark tests
 mise run test tests/test_modes.py::test_name   # extra args go to pytest (also test:unit / test:spark)
 mise run check                             # lint + test
-mise run docker:lock                       # regenerate docker/requirements.lock from uv.lock
-mise run docker:build                      # lock + image (-t tag, -p linux/arm64|linux/amd64)
-mise run docker:smoke                      # build + invoke via Lambda Runtime Interface Emulator
+mise run docker:lock                       # regenerate docker/requirements.lock from uv.lock (--db: requirements-db.lock)
+mise run docker:build                      # lock + image (-t tag, -p linux/arm64|linux/amd64; --db: db_bronze image, amd64 only)
+mise run docker:smoke                      # build + invoke via Lambda Runtime Interface Emulator (--db: db_bronze image)
+mise run test:integration                  # db_bronze against docker-compose engines (-m integration; plain `test` skips them)
+mise run test:integration --image          # same suite through the emulator in the db image (adds Oracle)
+mise run test:integration --inside         # pytest inside the image on the compose network (Oracle ConnectorX spikes, Db2 off x86_64)
+mise run test:integration --engines mssql  # limit engines; --keep leaves them up; --no-build reuses the image; -t tag
 mise run bench                             # split benchmark
 ```
 
-`docker/requirements.lock` must be regenerated whenever dependencies change; the image installs with `--require-hashes` (`docker:build` does it automatically).
+`docker/requirements.lock` and `docker/requirements-db.lock` must be regenerated whenever dependencies change; the image installs with `--require-hashes` (`docker:build` does it automatically).
 
 Tests need no network or AWS: `tests/conftest.py` runs an in-process fake REST API (`EventsAPI`, routable bytes overrides, 500s, auth checks) and uses a local directory as the bucket (`file://`). `tests/test_silver.py` imports `silver_transform` by inserting `silver/` on `sys.path`.
+
+db_bronze unit tests (`tests/test_db_*.py`) run end to end on SQLite (a file in `tmp_path`) on both backends. `tests/integration/` needs Docker; SQL Server needs Rosetta on arm64, Db2 and its tests are x86_64 only (see DESIGN-db.md section 10).
 
 ## Architecture
 
@@ -53,9 +61,32 @@ Request flow: `handler.handler` → `config.SourceConfig` / `RunRequest` → `pi
 - Parquet compression is set via env `DATA_WRITER__COMPRESSION` (dlt default is snappy; we default to zstd).
 - Silver completeness: a data file counts only if its `load_id` has a `status = 0` entry in `_dlt_loads`.
 
+## db_bronze architecture
+
+Request flow: `handler.handler` → `config.SourceConfig` / `RunRequest` → `pipeline.run_pipeline` → `preflight.preflight` → `source.make_resource` (one dlt resource per table) → `extract.read_connectorx` / `read_pyarrow` → Arrow batches with `_extracted_at` appended. `validate`, `plan` and `finalize` modes return before any extraction.
+
+- **`config.py`** — strict dataclasses; `EVENT_KEYS` lists every event key, anything else is rejected. Default backend comes from the dialect alone (`default_backend`), never from runtime.
+- **`query.py`** — SQLAlchemy Core statements: cursor window, keyset page, offset page, snapshot, count. **`urls.py`** builds both the SQLAlchemy and ConnectorX URLs from the discrete connection fields.
+- **`extract.py`** — the two backends. pyarrow converts rows to Arrow from reflected types; ConnectorX batches are yielded as they come, and `RuntimeError`/`PanicException` (a `BaseException`) around the ConnectorX call become `ConnectorXFailed`.
+- **`preflight.py`** — rule tables over reflected types (decimal limits, per-dialect deny list, `MIN_SERVER_VERSION`). **`source.py`** holds the schema contract and the backend-change guard (`BackendChanged`).
+- **`plan.py`, `manifest.py`** — `plan` and `finalize` events for Step Function orchestration; manifests list the loads of a full snapshot.
+- **`errors.py`** — every handler-visible error derives from `DbBronzeError`; the handler finds it in dlt's `PipelineStepFailed` chain and its class name becomes the Lambda `errorType`. Add new types there, with a `metric`.
+
+## db_bronze invariants (don't break these)
+
+- `dlt.sources.incremental(...)` **must be the resource argument's default value** in `source.make_resource` (hence `# noqa: B008`), as in api_bronze.
+- Bronze is **append only**: `write_disposition="append"`, never `replace`.
+- **Freeze contract**: `SCHEMA_CONTRACT` is `data_type: freeze`, so a type change on an existing column fails the run. This is why the backend is stored in resource state and a change fails first with `BackendChanged`: the backends produce different Arrow types. Switching backend means a new table `name`.
+- Every naive timestamp column gets the resource hint `{"timezone": False}`. Without it dlt labels naive values UTC without shifting them. `naive_timezone` converts cursor bounds only, never data.
+- **Never cut a ConnectorX stream short** (nor a MySQL traditional stream): the query keeps running on the server with the connection open. Split loading is keyset only for those; `time_budget` skips them and validation rejects `max_time_s` beside them.
+- `lag` re-lands its whole window every run (dlt deduplicates nothing under `lag`); silver deduplicates on (`primary_key`, cursor) by latest `_extracted_at`.
+- A `full` load counts only if a manifest lists it; the manifest is written after every load succeeded.
+- Paged snapshots and parallel backfills use their own `pipeline_name`, never the incremental's.
+- Rules that depend on a type or engine need integration evidence: DESIGN-db.md labels each finding *researched*, *prototyped* or *integration*. Keep the label honest.
+
 ## Status
 
-Unit/integration tested locally and image smoke-tested via the emulator. Not yet validated: real S3, real Lambda, Glue 6.0. `silver_transform.merge_into_iceberg` and `main` are untested sketches. See README "Open items".
+Unit/integration tested locally and image smoke-tested via the emulator. Not yet validated: real S3, real Lambda, Glue 6.0. db_bronze additionally passed its integration suite on Postgres, MySQL, SQL Server, Oracle and Db2, with the unverified items listed in README-db.md "Open items". `silver_transform.merge_into_iceberg` and `main` are untested sketches. See README "Open items".
 
 ## Agent skills
 
