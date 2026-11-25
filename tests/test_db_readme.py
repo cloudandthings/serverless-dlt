@@ -50,13 +50,16 @@ def test_every_mode_and_plan_is_documented():
 
 def test_every_enumerated_value_is_documented():
     values = (*config.BACKENDS, *config.CURSOR_TYPES, *config.CHUNKING_STRATEGIES, *config.AUTH_TYPES)
-    values += (*config.ISOLATION_LEVELS, *config.PARQUET_CODECS, "mssql", "postgres", "mysql", "oracle", "db2", "sqlite")
+    values += (*config.ISOLATION_LEVELS, *config.PARQUET_CODECS)
+    values += ("mssql", "postgres", "mysql", "oracle", "db2", "sqlite")
     assert not [v for v in values if v not in README]
 
 
 def test_every_error_type_is_documented_with_a_fix():
-    names = {c.__name__ for c in vars(errors).values() if isinstance(c, type) and issubclass(c, errors.DbBronzeError) and c is not errors.DbBronzeError}
-    names |= {config.ConfigError.__name__, preflight.PreflightError.__name__, "NotImplementedError", "PipelineStepFailed"}
+    ours = [c for c in vars(errors).values() if isinstance(c, type) and issubclass(c, errors.DbBronzeError)]
+    names = {c.__name__ for c in ours if c is not errors.DbBronzeError}
+    names |= {config.ConfigError.__name__, preflight.PreflightError.__name__}
+    names |= {"NotImplementedError", "PipelineStepFailed"}
     section = README.split("## Errors", 1)[1]
     assert not [n for n in sorted(names) if f"`{n}`" not in section]
 
