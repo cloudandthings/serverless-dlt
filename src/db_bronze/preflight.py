@@ -223,6 +223,27 @@ def column_findings(dialect: str, backend: str, columns: list[tuple[str, sa.type
     return findings
 
 
+def partition_findings(tc: TableConfig, table: sa.FromClause, dialect: sa.Dialect) -> list[str]:
+    """What stops ConnectorX `partition_on` reading the table's partition column; empty when it can."""
+    if tc.partition is None:
+        return []
+    column = tc.partition.column
+    if column not in table.c:
+        return [f"partition column {column!r} is not a column of the table"]
+    if not isinstance(table.c[column].type, sa.Integer):
+        return [
+            f"partition column {column!r} is not an integer ({table.c[column].type}). "
+            'Fix: partition on an integer column, or remove "partition"'
+        ]
+    if dialect.name == "oracle" and dialect.identifier_preparer.quote(column) != column:
+        # ConnectorX upper-cases the column in its range query, quotes or not (integration, Oracle)
+        return [
+            f"ConnectorX cannot partition on Oracle by the case-sensitive column {column!r}. "
+            'Fix: partition on a column with a case-insensitive name, or remove "partition"'
+        ]
+    return []
+
+
 @dataclass
 class TableReport:
     """What preflight learned about one table."""
@@ -268,7 +289,8 @@ def preflight(
         wanted = set(tc.columns) if tc.columns else None
         # A query's result columns are not reflected: their types are unknown (None), not unrecognised.
         columns = [(c.name, None if tc.query else c.type) for c in table.columns if wanted is None or c.name in wanted]
-        report = TableReport(tc.name, backend, column_findings(dialect, backend, columns), table=table)
+        findings = column_findings(dialect, backend, columns) + partition_findings(tc, table, engine.dialect)
+        report = TableReport(tc.name, backend, findings, table=table)
         report.null_cursor_count = count_null_cursor(engine, table, tc)
         log.info("preflight %s", json.dumps(report.as_dict()))
         reports.append(report)

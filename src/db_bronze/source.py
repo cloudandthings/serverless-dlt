@@ -13,7 +13,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import oracle
 
 from .config import RunRequest, SourceConfig, TableConfig, to_source_time
-from .errors import BackendChanged, PreflightError
+from .errors import BackendChanged
 from .extract import (
     DB2_DIALECT,
     column_specs,
@@ -99,24 +99,6 @@ def _exact_numbers(inspector, table, column_info: dict) -> None:
         column_info["type"] = oracle.NUMBER(asdecimal=True)
 
 
-def _check_partition_column(tc: TableConfig, table: sa.FromClause, dialect: sa.Dialect) -> None:
-    """ConnectorX `partition_on` needs an integer column; fail before anything is extracted."""
-    column = tc.partition.column
-    if column not in table.c:
-        raise PreflightError(f"table {tc.name}: partition column {column!r} is not a column of the table")
-    if not isinstance(table.c[column].type, sa.Integer):
-        raise PreflightError(
-            f"table {tc.name}: partition column {column!r} is not an integer ({table.c[column].type}). "
-            'Fix: partition on an integer column, or remove "partition"'
-        )
-    if dialect.name == "oracle" and dialect.identifier_preparer.quote(column) != column:
-        # ConnectorX upper-cases the column in its range query, quotes or not (integration, Oracle)
-        raise PreflightError(
-            f"table {tc.name}: ConnectorX cannot partition on Oracle by the case-sensitive column {column!r}. "
-            'Fix: partition on a column with a case-insensitive name, or remove "partition"'
-        )
-
-
 def window(cfg: SourceConfig, tc: TableConfig, req: RunRequest, run_started: datetime, max_cursor):
     """(initial_value, end_value) for dlt's incremental, as the source represents them.
 
@@ -160,8 +142,6 @@ def make_resource(
         )
     table = table if table is not None else reflect(engine, tc)
     specs = column_specs(table)
-    if tc.partition:
-        _check_partition_column(tc, table, engine.dialect)
     log.info("table %s", json.dumps({"table": tc.name, "backend": backend}))
     batch_size = cfg.batch_size(tc)
     # Without this hint dlt labels naive timestamps UTC without shifting them (prototype S5).
