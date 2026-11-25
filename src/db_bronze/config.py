@@ -3,17 +3,19 @@
 One config document = one database connection = one dlt pipeline = one Lambda
 function. Unknown keys are rejected, so a typo fails loudly instead of silently
 falling back to a default. Every static rule fails with `ConfigError` and a
-message that says how to fix it. Copied in style from `api_bronze.config` (D1).
+message that says how to fix it. Strict building is shared with `api_bronze` (`bronze_common`, D1).
 """
 
 from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from bronze_common.config import strict_builder
 
 from . import dialects, secrets
 from .dialects import CONNECTORX_DIALECTS, ISOLATION_LEVELS, Dialect
@@ -70,17 +72,7 @@ def default_backend(dialect: str) -> str:
     return "connectorx" if dialect in CONNECTORX_DIALECTS else "pyarrow"
 
 
-def _build(cls, data: Any, where: str, **overrides):
-    if not isinstance(data, dict):
-        raise ConfigError(f"{where}: expected an object, got {type(data).__name__}")
-    known = {f.name for f in fields(cls)}
-    unknown = sorted(set(data) - known)
-    if unknown:
-        raise ConfigError(f"{where}: unknown keys {unknown}; allowed {sorted(known)}")
-    try:
-        return cls(**{**data, **overrides})
-    except TypeError as e:
-        raise ConfigError(f"{where}: {e}") from e
+_build = strict_builder(ConfigError)
 
 
 def _check_backend_name(what: str, backend: str | None) -> None:
