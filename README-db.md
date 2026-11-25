@@ -427,5 +427,4 @@ Kerberos is untested (it is a placeholder).
 
 Not validated: real S3, real Lambda in a VPC against production databases, Glue 6.0
 reading typed bronze, peak memory on the largest real table. Oracle 19c/21c and Db2
-11.1/10.5 minimums (above). SQL Server and Oracle integration were not rerun after the
-last shared harness edits. There is no database silver transform: only this contract.
+11.1/10.5 (above). There is no database silver transform: only this contract.

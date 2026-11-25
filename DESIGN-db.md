@@ -14,10 +14,11 @@ and answered S2, S3, S6 and S9 for it. Ticket 17 did the same for Db2 (11.5 and 
 
 *Verified:* the unit suite (SQLite, both backends) and the integration suite on Postgres
 11/12/17, MySQL 8.0/8.4, SQL Server 2017/2019/2022, Oracle Free 23.26 and Db2 11.5/12.1,
-on the host and through the Lambda emulator in the image. *Not verified:* Oracle 19c/21c
+on the host and through the Lambda emulator in the image. After the review fixes (25 Nov
+2026) the suite was rerun on Postgres 17, MySQL 8.4 and SQL Server 2022 on the host, and
+on Oracle Free 23.26 and Db2 12.1 inside the image. *Not verified:* Oracle 19c/21c
 (accepted by the preflight minimum, Oracle 19, by decision, but never run, S9) and Db2
-11.1/10.5 (the Db2 minimum is a floor from evidence, S9); SQL Server and
-Oracle integration were not rerun after the last shared harness edits; peak memory on a
+11.1/10.5 (the Db2 minimum is a floor from evidence, S9); peak memory on a
 real large table (S7); real S3, real Lambda in a VPC, Glue 6.0; Kerberos (placeholder).
 
 This is the database counterpart of `api_bronze` (see `DESIGN-api.md`). It records
@@ -596,7 +597,10 @@ amd64 only. On an arm64 host it needs Rosetta (Docker Desktop, or colima with
 host side reaches it through pyodbc and ODBC Driver 18 (`msodbcsql18`, from
 Microsoft's Homebrew tap on macOS), which loads OpenSSL 1.1 or 3 from Homebrew's
 `openssl` prefix; where that now links OpenSSL 4, run pytest with
-`DYLD_LIBRARY_PATH=$(brew --prefix openssl@3)/lib`.
+`DYLD_LIBRARY_PATH=$(brew --prefix openssl@3)/lib`. macOS strips `DYLD_*` variables
+when it starts `/usr/bin/env` or `/bin/bash`, so they do not reach pytest through
+`mise run test:integration`: bring the service up with `docker compose`, then run
+`DB_BRONZE_IT_ENGINES=mssql DYLD_LIBRARY_PATH=... .venv/bin/python -m pytest -m integration`.
 
 The handler-level scenarios of the SQLite suite run against every engine on both
 backends (`test_it_modes.py`, `test_it_keyset.py`, `test_it_paged.py`,
