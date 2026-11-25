@@ -45,7 +45,8 @@ ISOLATION_LEVELS = ("READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SE
 # parameters are ignored), but ConnectorX runs a batch, so a SET TRANSACTION ISOLATION LEVEL goes
 # ahead of the query; not on a partitioned read, which ConnectorX parses as a single SELECT.
 # MySQL: its URL takes no session settings, and the level is not settable through a SET_VAR hint.
-# oracle: until its integration ticket measures it.
+# Oracle (integration, S3): its URL ignores query parameters, multi-statement SQL is rejected and no
+# hint sets the level, so ConnectorX cannot apply it either.
 # The standard levels Db2 has (as UR, CS, RS and RR); no SNAPSHOT, and ibm_db_sa takes no AUTOCOMMIT.
 DB2_ISOLATION_LEVELS = ("READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE")
 CONNECTORX_ISOLATION = {

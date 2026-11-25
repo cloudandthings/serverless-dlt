@@ -53,11 +53,16 @@ if [[ "$inside" != "true" ]]; then
   exit
 fi
 
-# pytest is not part of the Lambda image: a throwaway layer on top adds it, at the versions uv.lock pins.
-pins=$(uv export --frozen --no-hashes --only-group dev --no-emit-project \
-  | grep -E '^(pytest|pluggy|iniconfig|packaging|pygments)==' | tr '\n' ' ')
-printf 'FROM %s\nRUN pip install --no-cache-dir --target /opt/it %s\n' "$tag" "$pins" \
-  | docker build --platform linux/amd64 -t "$tag-pytest" -
+# pytest is not part of the Lambda image: a throwaway layer on top adds it, at the versions and
+# hashes uv.lock pins (--require-hashes, as the image's own install does).
+layer="$(mktemp -d)"
+uv export --frozen --only-group dev --no-emit-project --format requirements-txt \
+  | awk '/^[a-z]/ { keep = ($0 ~ /^(pytest|pluggy|iniconfig|packaging|pygments)==/) } keep && !/^ *#/' \
+  >"$layer/requirements.lock"
+printf 'FROM %s\nCOPY requirements.lock /tmp/it.lock\nRUN pip install --no-cache-dir --require-hashes --only-binary :all: -r /tmp/it.lock --target /opt/it\n' \
+  "$tag" >"$layer/Dockerfile"
+docker build --platform linux/amd64 -t "$tag-pytest" "$layer"
+rm -rf "$layer"
 network="$("${compose[@]}" config --format json | uv run python -c 'import json, sys; print(json.load(sys.stdin)["name"])')_default"
 
 # The handler imports from the image's task root, as on Lambda (Instant Client, thick mode, ODBC);
