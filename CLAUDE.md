@@ -50,6 +50,10 @@ Request flow: `handler.handler` → `config.SourceConfig` / `RunRequest` → `pi
 - **`handler.py`** — loads config from `${CONFIG_URI}/${source_id}.json` or inline `config`, computes time budget from Lambda remaining time minus `SAFETY_MARGIN_S`, and unwraps `BrokenPageError` from dlt's `PipelineStepFailed` so it becomes the Lambda `errorType`.
 - **`config.py`** — strict dataclasses; unknown keys are rejected. **`secrets.py`** resolves `{"env": ...}` / `{"secret_id": ...}` references in `client.auth` and `client.headers` (Secrets Manager values cached per container).
 
+## bronze_common
+
+`src/bronze_common/` holds what api_bronze and db_bronze share and that touches **no dlt internals** (DESIGN-db.md D1): `config.strict_builder` (unknown-key-rejecting dataclass builder, raising the package's own `ConfigError`), `secrets` (`REF_KEYS`, `lookup`, the Secrets Manager cache, `clear_cache`), and `handler` (`load_config`, `lambda_budget` with `SAFETY_MARGIN_S`/`MIN_BUDGET_S`, `find_in_chain`). Both packages' `handler`/`config`/`secrets` are thin over it, and both Dockerfiles copy it into the image. Keep dlt-facing code out of it: a dlt behaviour one package relies on must never bind the other.
+
 ## Invariants and dlt gotchas (don't break these)
 
 - **dlt is pinned at exactly 1.32.0.** The envelope relies on RESTClient internals: passing `hooks` replaces the default `raise_for_status` (the hook calls it itself), and every paginator parses via `response.json()`, which the hook swaps for stdlib `json` so pagination and splitting use one parser (simplejson rejects `NaN`; stdlib accepts it). Upgrading requires the full test suite plus the image smoke test.
@@ -65,12 +69,13 @@ Request flow: `handler.handler` → `config.SourceConfig` / `RunRequest` → `pi
 
 Request flow: `handler.handler` → `config.SourceConfig` / `RunRequest` → `pipeline.run_pipeline` → `preflight.preflight` → `source.make_resource` (one dlt resource per table) → `extract.read_connectorx` / `read_pyarrow` → Arrow batches with `_extracted_at` appended. `validate`, `plan` and `finalize` modes return before any extraction.
 
-- **`config.py`** — strict dataclasses; `EVENT_KEYS` lists every event key, anything else is rejected. Default backend comes from the dialect alone (`default_backend`), never from runtime.
+- **`config.py`** — strict dataclasses; `EVENT_KEYS` lists every event key, anything else is rejected. Default backend comes from the dialect alone (`default_backend`), never from runtime. `backend: sqlalchemy` is designed but not built, so it is rejected with `ConfigError`.
+- **`dialects.py`** — the one per-engine table. Maps the config name (`postgres`, `db2`) to SQLAlchemy's (`postgresql`, `ibm_db_sa`), the URL driver, the address keys, the ConnectorX scheme/isolation/Kerberos support, and each quirk (text timestamps, cast inlined timestamps, text server version...). Ask the entry (`ConnectionConfig.engine`, `dialects.of(sa_dialect)`) for a property; never compare dialect names in other modules. Per-engine hooks are dispatch dicts keyed by the entry's name.
 - **`query.py`** — SQLAlchemy Core statements: cursor window, keyset page, offset page, snapshot, count. **`urls.py`** builds both the SQLAlchemy and ConnectorX URLs from the discrete connection fields.
 - **`extract.py`** — the two backends. pyarrow converts rows to Arrow from reflected types; ConnectorX batches are yielded as they come, and `RuntimeError`/`PanicException` (a `BaseException`) around the ConnectorX call become `ConnectorXFailed`.
-- **`preflight.py`** — rule tables over reflected types (decimal limits, per-dialect deny list, `MIN_SERVER_VERSION`). **`source.py`** holds the schema contract and the backend-change guard (`BackendChanged`).
+- **`preflight.py`** — rule tables over reflected types (decimal limits, per-dialect deny list, `MIN_SERVER_VERSION`) and the `partition` column checks; `validate` and every run apply the same checks. Its NULL-cursor count is the run's `NullCursorRows` when `include_null_cursor` is false. **`source.py`** holds the schema contract and the backend-change guard (`BackendChanged`).
 - **`plan.py`, `manifest.py`** — `plan` and `finalize` events for Step Function orchestration; manifests list the loads of a full snapshot.
-- **`errors.py`** — every handler-visible error derives from `DbBronzeError`; the handler finds it in dlt's `PipelineStepFailed` chain and its class name becomes the Lambda `errorType`. Add new types there, with a `metric`.
+- **`errors.py`** — every handler-visible error derives from `DbBronzeError` (including the one `PreflightError`); the handler finds it in dlt's `PipelineStepFailed` chain and its class name becomes the Lambda `errorType`. Add new types there, with a `metric`; never define an error class elsewhere.
 
 ## db_bronze invariants (don't break these)
 

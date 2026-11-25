@@ -35,6 +35,7 @@ src/api_bronze/
   source.py       dlt resources per endpoint and run mode
   pipeline.py     run_pipeline(config, request): the portable core
   handler.py      Lambda entry point (thin wrapper)
+src/bronze_common/  code shared with db_bronze (strict config building, secrets, handler helpers)
 silver/silver_transform.py   bronze -> silver reference (Spark 4.1 / Glue 6.0)
 tests/            pytest suite, fake API in conftest.py
 docker/           Lambda image + pinned, hashed requirements.lock

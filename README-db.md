@@ -86,10 +86,12 @@ boundary by `primary_key`.
 
 ### NULL cursors
 
-A row whose cursor is NULL never matches the cursor filter. The run counts them
-(`NullCursorRows`, and the `null_cursor_count` of `validate`), so the gap is visible.
-`cursor.include_null_cursor: true` adds `OR cursor IS NULL`, which re-reads those rows
-on every run.
+A row whose cursor is NULL never matches the cursor filter. The preflight counts them
+(within `where`), and every run reports that count as `null_cursor_rows` and the
+`NullCursorRows` metric, as `validate` does as `null_cursor_count`, so the gap is visible
+although those rows never land. `cursor.include_null_cursor: true` adds
+`OR cursor IS NULL`, which re-reads those rows on every run; `NullCursorRows` then counts
+the NULL-cursor rows the run landed.
 
 ## Config reference
 
@@ -167,7 +169,7 @@ cursor from its `initial_value`.
 
 | Key | Meaning |
 |---|---|
-| `backend` | `connectorx`, `pyarrow` or `sqlalchemy`; `null` resolves per table (below). |
+| `backend` | `connectorx` or `pyarrow`; `null` resolves per table (below). `sqlalchemy` is not built yet and fails with `ConfigError`. |
 | `batch_size` | Rows per Arrow batch, default 50000. A table's `batch_size` overrides it. |
 
 ### Per table (`tables[]`)
@@ -181,7 +183,7 @@ cursor from its `initial_value`.
 | `columns` | Projection (null: every column). This is how a column ConnectorX cannot read is excluded. |
 | `where` | Static SQL predicate, ANDed with the cursor filter. |
 | `cursor` | Omit for a **snapshot table**, which runs in `full` mode only. See below. |
-| `backend` | `connectorx`, `pyarrow` or `sqlalchemy`. Overrides `defaults.backend`. |
+| `backend` | `connectorx` or `pyarrow`. Overrides `defaults.backend`. |
 | `chunking` | `{"strategy": "stream"}` (default) or keyset. See below. |
 | `batch_size` | Rows per Arrow batch (ConnectorX `batch_size`, or the fetch size on the traditional backend). |
 | `partition` | `{"column": "...", "num": N}`: ConnectorX parallel read. See Partitioned reads. |
@@ -215,7 +217,7 @@ number of parallel connections).
 **Default backend** is resolved from the config alone, so a config always gives the
 same backend: `connectorx` for `mssql`, `postgres`, `mysql`, `oracle`, `sqlite`;
 `pyarrow` for `db2` and any other dialect. There is no runtime fallback. (`sqlalchemy`
-is accepted by validation but not implemented: a run fails with `NotImplementedError`;
+is a designed backend that is not built yet: the config rejects it with `ConfigError`;
 use `pyarrow`.)
 
 ### Static validation rules
@@ -223,6 +225,7 @@ use `pyarrow`.)
 All fail with `ConfigError` before anything runs.
 
 - `backend: connectorx` on an engine ConnectorX does not read (Db2, other dialects): set `"backend": "pyarrow"`.
+- `backend: sqlalchemy` (not built yet): set `"backend": "pyarrow"`.
 - `backend: connectorx` with `auth.type: kerberos` on any engine except SQL Server.
 - `isolation_level` that ConnectorX cannot apply on that engine (anything on MySQL and Oracle): use `pyarrow`, or remove it. On SQL Server not on a table with `partition`.
 - `isolation_level` `SNAPSHOT` or `AUTOCOMMIT` on `db2`.
@@ -245,7 +248,7 @@ mistyped event fails instead of being ignored.
 | `source_id` | Every event (unless `config` is given): config file `${CONFIG_URI}/<source_id>.json`; a plain name, no `/`, not starting with `.`. |
 | `config` | Every event: an inline config instead of `source_id`. |
 | `mode` | `incremental` (default), `full`, `backfill`, `validate`, `plan`, `finalize`. |
-| `tables` | Every event: a non-empty list of table names to run; unknown names fail. |
+| `tables` | Every event except `finalize`: a non-empty list of table names to run; unknown names fail. `finalize` names its one table in `table` instead, and rejects `tables`. |
 | `window_start`, `window_end` | `backfill` (both required, end after start; both integers or both ISO-8601, both with an offset or neither). |
 | `plan` | `plan`: `snapshot` or `backfill`. |
 | `page_size` | `plan: snapshot`: positive rows per page. |
@@ -364,11 +367,11 @@ persists with a successful load).
 
 | `errorType` | When | Fix |
 |---|---|---|
-| `ConfigError` | Static validation, or a bad event (unknown key, bad mode, a snapshot table in a cursor mode, partition in `incremental`, paging without a key, unknown table in `tables`). The message says how to fix it | Fix the config or event |
+| `ConfigError` | Static validation (including `backend: sqlalchemy`, not built yet), or a bad event (unknown key, bad mode, a snapshot table in a cursor mode, partition in `incremental`, paging without a key, unknown table in `tables`). The message says how to fix it | Fix the config or event |
 | `PreflightError` | Reflection checks failed (table above); also a bad `partition` column. Metric `PreflightFailed` | `"backend": "pyarrow"` on the table, exclude the column with `columns`, cast it in `query`, or upgrade the server |
 | `ConnectorXFailed` | ConnectorX raised at any point, including mid-stream and for a `query` table's unreadable types. Metric `ConnectorXFailed` | `"backend": "pyarrow"` on that table. This changes bronze types, so the next run fails with `BackendChanged` unless the table lands under a new `name` |
 | `BackendChanged` | The table's resolved backend differs from the last successful run's. Fails before extraction. Metric `BackendChanged` | Land the table under a new `name` (silver unions old and new), or set `backend` back to the previous one |
-| `NotImplementedError` | `auth.type: kerberos`, or `backend: sqlalchemy` | Use `password` (see docs/KERBEROS.md) / use `pyarrow` |
+| `NotImplementedError` | `auth.type: kerberos` | Use `password` (see docs/KERBEROS.md) |
 | `PipelineStepFailed` | dlt wrapped an error that is not one of ours. A source column type change on an existing bronze column surfaces as this, with `DataValidationError` as its cause | Restore the column's type, or land the table under a new `name` |
 | `ValueError` | The event has neither an inline `config` nor a plain `source_id` | Fix the event |
 | `KeyError` | A secret `{"env": ...}` reference names an unset environment variable, or `CONFIG_URI` is unset | Set the variable |

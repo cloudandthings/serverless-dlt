@@ -127,7 +127,7 @@ are upgraded as tests land.
 
 | # | Decision | Rejected alternative and why |
 |---|---|---|
-| D1 | Sibling package `src/db_bronze/` in this repo. Conventions are copied from `api_bronze`; no shared module yet. | A shared `bronze_common` now would tie both packages to the same dlt internals before it is clear what they really share. |
+| D1 | Sibling package `src/db_bronze/` in this repo. Code that is the same in both packages and touches **no dlt internals** lives in `src/bronze_common/` (revised at review, 25 Nov 2026): strict config building (`config.strict_builder`, each package passing its own `ConfigError`), secret lookup and the Secrets Manager cache (`secrets`), and the handler's config loading, Lambda time budget (`SAFETY_MARGIN_S`, `MIN_BUDGET_S`) and error unwrapping (`handler`). Both images ship it. Everything dlt-facing (resources, incremental, destination layout) stays in each package. | A shared module that also held dlt-facing code would tie both packages to the same dlt internals (D1 as first written, which kept no shared module until it was clear what they really share). Copying the shared helpers, as before the review, let the two copies drift. |
 | D2 | Bronze is **typed Arrow**: the types the backend returns, the source column names, dlt's normaliser bypassed. | Letting dlt normalise renames columns and re-coerces types. Casting everything to string pushes all typing into silver. |
 | D3 | The backend is a **config parameter**. The default comes from the config alone: ConnectorX where the engine supports it, pyarrow otherwise. Opting out is a config change. | Automatic runtime fallback would land the same table with different types from one run to the next. A canonical cast layer would duplicate type logic. |
 | D4 | **No runtime fallback.** A ConnectorX failure fails the run with instructions for switching backend. | Falling back silently changes types (D3). |
@@ -139,6 +139,21 @@ are upgraded as tests land.
 | D10 | Oracle always runs in **thick** mode. | Mixing thin and thick: thick mode is process-wide once enabled, and Instant Client is in the image anyway for ConnectorX. |
 | D11 | Kerberos: placeholder slot plus `docs/KERBEROS.md` only. | Building it now, before any project needs it. |
 | D12 | `_extracted_at` is the only added column. The backend used appears in logs and metrics only. | A `_backend` column. Source db and schema columns, which are constant per config. |
+
+### 4.1 Deliberate deviations (recorded at review, 25 Nov 2026)
+
+Each of these goes beyond, or against, what this document first specified. All are kept
+on purpose, and each rests on evidence from the integration suite or a review decision.
+
+| Deviation | Why | Evidence |
+|---|---|---|
+| `max_time_s` is rejected for a **MySQL** `stream` table on the traditional backend, not only for ConnectorX streams (section 6.1). | Closing PyMySQL's unbuffered cursor reads the rest of the result first, so a cut stream blocks until its query has run to the end, exactly as a dropped ConnectorX stream does. | S1, integration (MySQL 8.0/8.4); section 7.4. |
+| `sql_variant` is a preflight finding on **every** backend, not only ConnectorX (section 6.2). | pyodbc reads a `sql_variant` only as the bytes of its value, without its type, so no backend lands it losslessly. | Integration, ticket 15 (SQL Server 2017/2019/2022); section 3.3. |
+| **Db2 and Oracle type overrides** in reflection and extraction: Db2 DECFLOAT as exact text, BINARY/VARBINARY and CHAR/VARCHAR FOR BIT DATA as binary, DOUBLE as double, native Decimals and CURRENT SCHEMA as the default schema (`extract.prepare_engine`, `source.reflect`); Oracle NUMBER without precision read as Decimal, TIMESTAMP WITH TIME ZONE read through `SYS_EXTRACT_UTC`. | Without them those types land wrongly or lose digits silently: ibm_db_sa reflects them wrongly or not at all, and Oracle's driver hands NUMBER over as float and drops the offset of TIMESTAMP WITH TIME ZONE. | Integration type matrix, tickets 16 and 17 (section 10.1); section 3.3. |
+| `tests/test_db_readme.py`: a test that README-db.md documents every config key, event key, mode, enumerated value, error type and metric, and the server minimums as the code has them. | Not in the test plan (section 10). It keeps the operator spec from falling behind the code. | Ticket 19. |
+| `finalize` rejects `"tables"` (section 7.5). | It names its one table in `table`; a `tables` list beside it could only repeat or contradict it. | Review. |
+| `backend: sqlalchemy` is rejected when the config loads (sections 6.1, 7.2). | It is not built; failing at config load beats failing mid-run with `NotImplementedError`. | Review decision D-a. |
+| The Oracle preflight minimum is **19**, below the only version the suite ran on (23). | 19c is Oracle's long-term release; refusing it would block every 19c source. 19c and 21c stay **unverified** (S9). | Review decision D-b. |
 
 ---
 
@@ -225,7 +240,7 @@ connection = one pipeline = one Lambda function.** `pipeline_name`,
 | `cursor.initial_value` | ISO-8601 (an offset is allowed and converted through `naive_timezone`) or an integer. |
 | `cursor.lag` | Seconds, or an integer delta for integer cursors. Re-reads a trailing window to catch transactions that committed late. Passed to dlt incremental `lag`. Requires `primary_key`. **Every run re-lands the whole lag window** (S4); bronze accepts the duplicates and silver removes them (section 12). |
 | `cursor.include_null_cursor` | Default `false`. When `true`, adds `OR cursor IS NULL`, which re-reads those rows on every run. |
-| `backend` | `connectorx`, `pyarrow` or `sqlalchemy`. Overrides `defaults.backend`. When both are null, the default is resolved per D3. |
+| `backend` | `connectorx` or `pyarrow`. Overrides `defaults.backend`. When both are null, the default is resolved per D3. `sqlalchemy` (section 7.2) is not built, so the config rejects it (review decision, 25 Nov 2026). |
 | `chunking` | `{"strategy": "stream"}` (default) or `{"strategy": "keyset", "order_by": [...], "page_size": N}`. |
 | `batch_size` | Rows per Arrow batch (ConnectorX `batch_size`, or the fetch size on the traditional backend). |
 | `partition` | `{"column": ..., "num": N}`. ConnectorX `partition_on`. Opt-in, never automatic. |
@@ -250,6 +265,7 @@ Each run logs the resolved backend for every table.
 Each rule fails with `ConfigError` and a message that says how to fix it.
 
 - `backend: connectorx` with an engine ConnectorX does not support (for example Db2).
+- `backend: sqlalchemy`, which is designed (section 7.2) but not built: rejected here rather than failing mid-run (review decision, 25 Nov 2026). The fix is `backend: pyarrow`.
 - `backend: connectorx` with `auth.type: kerberos` on any engine except mssql. Oracle stays rejected until the spike in section 8 proves otherwise.
 - `isolation_level` on a connection whose tables resolve to `connectorx`, except on Postgres with one of the four standard levels, and on SQL Server with one of its five levels on a table without `partition` (S3). The fix is `backend: pyarrow` or no `isolation_level` (or no `partition`).
 - `isolation_level` SNAPSHOT or AUTOCOMMIT on db2, which has neither; the four standard levels are translated to Db2's own names (section 5.1).
@@ -280,11 +296,11 @@ Checks:
     so they are named in the finding; `money` and `datetimeoffset` are findings because ConnectorX
     reads them wrongly without an error (section 3.1). Oracle XMLTYPE and INTERVAL YEAR TO MONTH
     reflect as `NullType` and are caught by the rule for unrecognised types.
-  - On Oracle, a `partition` column with a case-sensitive (quoted, mixed-case) name (section 3.1).
+- For tables with `partition`: the column exists, is an integer, and on Oracle does not have a case-sensitive (quoted, mixed-case) name, which ConnectorX upper-cases in its range query (section 3.1). These are table findings like the others, so `validate` reports them too.
 - On every backend: a type no backend lands losslessly. On SQL Server that is `sql_variant`: pyodbc
   reads only the bytes of its value, without its type. The fix is to exclude the column or cast it in
   `query`.
-- Rows with a NULL cursor are **counted and logged** when `include_null_cursor` is false, so the gap is visible.
+- Rows with a NULL cursor are **counted and logged** when `include_null_cursor` is false, so the gap is visible. That count is the run's `null_cursor_rows` and its `NullCursorRows` metric (section 7.6).
 
 The same checks run, without extracting, as `{"mode": "validate"}`. Use that when onboarding a new source.
 
@@ -305,6 +321,17 @@ carry over from `api_bronze`:
 
 - `dlt.sources.incremental(...)` **must be the resource argument's default value**. Building it in the function body silently disables state and filtering.
 - `write_disposition="append"`, hard-coded. `replace` deletes sibling `mode=` partitions.
+
+Every per-engine difference is recorded in one table, `dialects.py` (review, 25 Nov
+2026): the config's name for the engine (`postgres`, `db2`), SQLAlchemy's
+(`postgresql`, `ibm_db_sa`), the URL driver, the connection keys that locate the
+database, the ConnectorX scheme and what ConnectorX can apply there, and each
+quirk the code works around (text timestamps on SQLite, cast inlined timestamps on
+SQL Server, a text server version on Db2, and so on). Code asks the entry for a
+property instead of comparing dialect names; per-engine hooks (`extract.prepare_engine`,
+the URL option translation, Db2's reflection fix-up) are dispatch tables keyed by
+the entry's name. A dialect name with no entry gets a generic one: the traditional
+backend only.
 
 Queries are built with SQLAlchemy Core, so dialect differences (quoting,
 `LIMIT` vs `FETCH FIRST`/`OFFSET ... FETCH`, `TOP`) come from the dialect, not
@@ -342,7 +369,7 @@ statements do, once bound decimals stop going through a float (section 3.3).
 |---|---|
 | `connectorx` | `cx.read_sql(url, sql, return_type="arrow_stream", batch_size=...)`. Each `RecordBatch` is yielded. `RuntimeError` and `pyo3_runtime.PanicException` are caught **narrowly around the ConnectorX call only** and re-raised as `ConnectorXFailed(table, reason)`. |
 | `pyarrow` | SQLAlchemy streaming cursor (`stream_results` / `yield_per`), with rows converted to Arrow per batch using the reflected column types. |
-| `sqlalchemy` | The same query, rows yielded as Arrow without type hints. For odd dialects where the pyarrow path cannot infer a type. |
+| `sqlalchemy` | *Designed, not built.* The same query, rows yielded as Arrow without type hints, for odd dialects where the pyarrow path cannot infer a type. The config rejects it with `ConfigError` until it is built (review decision, 25 Nov 2026). |
 
 Bronze uses dlt's `direct` naming convention, so source column names survive
 (*prototyped*, S5). The schema contract is
@@ -434,7 +461,7 @@ them, which is the wrong instant whenever `naive_timezone` is not UTC (S5).
 | `{"source_id": "x", "mode": "finalize", "table": "t", "snapshot_id": ..., "load_ids": [...]}` | Writes `<bucket_url>/<dataset>/_manifests/<table>/<snapshot_id>.json`. | none |
 | `{"source_id": "x", "mode": "validate"}` | Static checks plus preflight, nothing extracted. | none |
 
-Every event also accepts `"tables": [...]` to run a subset.
+Every event except `finalize` also accepts `"tables": [...]` to run a subset. **Deviation (review, 25 Nov 2026):** `finalize` rejects `tables`. It writes the manifest of exactly one table, named by `table`; a `tables` list beside it could only repeat `table` or contradict it, so it is treated like any other key that belongs to another kind of event (a mistyped event fails instead of being ignored).
 
 **Offset paging caveats.** These go in the operator docs. OFFSET paging is not
 consistent across invocations: rows that change while a snapshot is running
@@ -461,6 +488,10 @@ collected `load_ids`.
 | `BackendChanged` | A table's resolved backend differs from the one in state (D6). The message says the bronze types would change and gives the fix: a new table `name`. | no | holds |
 | `NotImplementedError` | `auth.type: kerberos` | no | holds |
 
+There is one `PreflightError` (`db_bronze.errors`), a `DbBronzeError` like the
+others, so a preflight failure emits `PreflightFailed` and the structured error
+log like every other failure here.
+
 The handler unwraps these from dlt's `PipelineStepFailed`, as `api_bronze`
 already does for `BrokenPageError`.
 
@@ -470,7 +501,9 @@ Logs are structured JSON, with one `run start` and one `run done` record. The
 EMF metrics, dimensioned by pipeline and table:
 
 - `RowsExtracted`
-- `NullCursorRows`
+- `NullCursorRows`: with `include_null_cursor` false (the default), the preflight's count of the rows
+  the cursor filter never reads (within `where`), so the gap shows even though those rows never
+  land; with it true, the NULL-cursor rows the run extracted.
 - `ConnectorXFailed`
 - `PreflightFailed`
 - `BackendChanged`
