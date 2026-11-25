@@ -12,10 +12,10 @@ import dlt
 import sqlalchemy as sa
 from sqlalchemy.dialects import oracle
 
+from . import dialects
 from .config import RunRequest, SourceConfig, TableConfig, to_source_time
 from .errors import BackendChanged
 from .extract import (
-    DB2_DIALECT,
     column_specs,
     naive_timestamp_columns,
     prepare_engine,
@@ -64,8 +64,8 @@ def reflect(engine: sa.Engine, tc: TableConfig) -> sa.FromClause:
     table = sa.Table(
         tc.table, sa.MetaData(), schema=tc.schema, autoload_with=engine, listeners=[("column_reflect", _exact_numbers)]
     )
-    if engine.dialect.name == DB2_DIALECT:
-        _db2_bit_data_as_binary(engine, table)
+    if after := _AFTER_REFLECTION.get(dialects.of(engine.dialect).name):
+        after(engine, table)
     return table
 
 
@@ -97,6 +97,10 @@ def _exact_numbers(inspector, table, column_info: dict) -> None:
     col_type = column_info["type"]
     if isinstance(col_type, oracle.NUMBER) and col_type.precision is None and not col_type.asdecimal:
         column_info["type"] = oracle.NUMBER(asdecimal=True)
+
+
+# Per-engine corrections to a reflected table, by dialects.py name.
+_AFTER_REFLECTION = {dialects.DB2.name: _db2_bit_data_as_binary}
 
 
 def window(cfg: SourceConfig, tc: TableConfig, req: RunRequest, run_started: datetime, max_cursor):

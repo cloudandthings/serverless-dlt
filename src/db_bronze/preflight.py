@@ -15,9 +15,10 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import mssql, oracle
 from sqlalchemy.dialects import postgresql as pg
 
+from . import dialects
 from .config import SourceConfig, TableConfig
 from .errors import PreflightError
-from .extract import DB2_DIALECT, EXTRACTED_AT
+from .extract import EXTRACTED_AT
 from .source import reflect
 
 log = logging.getLogger(__name__)
@@ -32,12 +33,12 @@ log = logging.getLogger(__name__)
 # emulation on an arm64 host (S9 stays open below 23).
 # Db2 11.5: the whole suite passes on 11.5 and 12.1 (Community images; nothing older is published).
 MIN_SERVER_VERSION: dict[str, tuple[int, ...] | None] = {
-    "mssql": (14,),
-    "postgres": (11,),
-    "mysql": (8, 0),
-    "oracle": (19,),
-    "sqlite": None,
-    "db2": (11, 5),
+    dialects.MSSQL.name: (14,),
+    dialects.POSTGRES.name: (11,),
+    dialects.MYSQL.name: (8, 0),
+    dialects.ORACLE.name: (19,),
+    dialects.SQLITE.name: None,
+    dialects.DB2.name: (11, 5),
 }
 
 # ConnectorX produces Decimal128(38, 10) and holds about 28 significant digits (section 3.1).
@@ -45,7 +46,7 @@ MAX_DECIMAL_SCALE = 10
 MAX_DECIMAL_PRECISION = 28
 # Where a NUMERIC with no declared precision holds any scale, and ConnectorX silently
 # drops digits past the 10th decimal place (integration type matrix, section 10.1).
-UNCONSTRAINED_NUMERIC_DIALECTS = ("postgres", "oracle")
+UNCONSTRAINED_NUMERIC_DIALECTS = (dialects.POSTGRES.name, dialects.ORACLE.name)
 
 
 def _named(*names: str) -> Callable[[sa.types.TypeEngine], bool]:
@@ -91,7 +92,7 @@ def _is_unreadable_postgres_array(t: sa.types.TypeEngine) -> bool:
 # recognise at all (Postgres xml, geometric types, pg_lsn, composite types; MySQL
 # geometry types) are caught on every server dialect by `_UNRECOGNISED`.
 DENY_LIST: dict[str, list[tuple[str, Callable[[sa.types.TypeEngine], bool]]]] = {
-    "postgres": [
+    dialects.POSTGRES.name: [
         ("interval", lambda t: isinstance(t, (sa.Interval, pg.INTERVAL))),
         ("money", lambda t: isinstance(t, pg.MONEY)),
         ("timetz", _is_timetz),
@@ -105,7 +106,7 @@ DENY_LIST: dict[str, list[tuple[str, Callable[[sa.types.TypeEngine], bool]]]] = 
     ],
     # money: read as a double, too narrow for its 19 digits. datetimeoffset: ConnectorX applies the offset
     # twice, so the instant is wrong (integration type matrix, section 10.1). sql_variant: UNREADABLE.
-    "mssql": [
+    dialects.MSSQL.name: [
         ("xml", _named("XML")),
         ("hierarchyid", _named("HIERARCHYID")),
         ("geography", _named("GEOGRAPHY")),
@@ -113,7 +114,7 @@ DENY_LIST: dict[str, list[tuple[str, Callable[[sa.types.TypeEngine], bool]]]] = 
         ("money", lambda t: isinstance(t, mssql.MONEY)),
         ("datetimeoffset", lambda t: isinstance(t, mssql.DATETIMEOFFSET)),
     ],
-    "oracle": [
+    dialects.ORACLE.name: [
         ("raw", lambda t: isinstance(t, oracle.RAW)),
         ("rowid", lambda t: isinstance(t, oracle.ROWID)),
         ("interval", lambda t: isinstance(t, oracle.INTERVAL)),
@@ -128,13 +129,13 @@ DENY_LIST: dict[str, list[tuple[str, Callable[[sa.types.TypeEngine], bool]]]] = 
     ],
 }
 # SQLite reflects a column declared without a type as NullType, and ConnectorX reads it from its values.
-_UNRECOGNISED_EXEMPT = ("sqlite",)
+_UNRECOGNISED_EXEMPT = (dialects.SQLITE.name,)
 
 
 # Types no backend lands losslessly: a finding on every backend. pyodbc reads a sql_variant
 # only as the bytes of its value, without the value's type.
 UNREADABLE: dict[str, list[tuple[str, Callable[[sa.types.TypeEngine], bool]]]] = {
-    "mssql": [("sql_variant", _named("SQL_VARIANT"))],
+    dialects.MSSQL.name: [("sql_variant", _named("SQL_VARIANT"))],
 }
 
 
@@ -145,7 +146,7 @@ def server_version(dialect: sa.Dialect) -> tuple[int, ...] | None:
     '12.01.0500') (integration, Db2), which would not compare with a minimum.
     """
     version = dialect.server_version_info
-    if dialect.name == DB2_DIALECT and version:
+    if dialects.of(dialect).version_is_text and version:
         return tuple(int(part) for part in version[-1].split("."))
     return version
 
@@ -236,10 +237,10 @@ def partition_findings(tc: TableConfig, table: sa.FromClause, dialect: sa.Dialec
             f"partition column {column!r} is not an integer ({table.c[column].type}). "
             'Fix: partition on an integer column, or remove "partition"'
         ]
-    if dialect.name == "oracle" and dialect.identifier_preparer.quote(column) != column:
-        # ConnectorX upper-cases the column in its range query, quotes or not (integration, Oracle)
+    d = dialects.of(dialect)
+    if d.connectorx_partition_upper_cases and dialect.identifier_preparer.quote(column) != column:
         return [
-            f"ConnectorX cannot partition on Oracle by the case-sensitive column {column!r}. "
+            f"ConnectorX cannot partition on {d.title} by the case-sensitive column {column!r}. "
             'Fix: partition on a column with a case-insensitive name, or remove "partition"'
         ]
     return []

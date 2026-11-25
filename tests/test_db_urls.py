@@ -276,3 +276,14 @@ def test_db2_gets_the_standard_isolation_level_by_its_own_name(level, db2):
 def test_other_engines_get_the_isolation_level_as_configured(dialect):
     assert engine_isolation_level(conn(**SERVER[dialect], isolation_level="REPEATABLE READ")) == "REPEATABLE READ"
     assert engine_isolation_level(conn(**SERVER[dialect])) is None
+
+
+@pytest.mark.parametrize("name", ["mssql", "postgres", "mysql", "oracle", "db2", "sqlite"])
+def test_a_config_dialect_and_its_sqlalchemy_dialect_are_one_entry(name):
+    """The URL a config dialect builds loads a SQLAlchemy dialect that maps back to the same entry."""
+    from db_bronze import dialects
+
+    if name == "db2":
+        pytest.importorskip("ibm_db_sa", reason="the Db2 SQLAlchemy dialect is not installed")
+    entry = dialects.dialect(name)
+    assert dialects.of(sa.URL.create(entry.driver).get_dialect()) is entry

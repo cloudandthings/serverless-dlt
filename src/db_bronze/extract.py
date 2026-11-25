@@ -27,6 +27,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import mssql, mysql, oracle
 from sqlalchemy.dialects import postgresql as pg
 
+from . import dialects
 from .errors import ConnectorXFailed
 
 EXTRACTED_AT = "_extracted_at"
@@ -58,7 +59,6 @@ class GEOMETRY(_ClrType):
 
 MSSQL_CLR_TYPES = {"hierarchyid": HIERARCHYID, "geography": GEOGRAPHY, "geometry": GEOMETRY}
 SQL_SS_UDT = -151  # the ODBC type of a CLR column, which pyodbc does not read without a converter
-DB2_DIALECT = "ibm_db_sa"  # the name ibm_db_sa's dialect reports for itself (config and URL say "db2")
 
 
 class DECFLOAT(sa.types.String):
@@ -92,30 +92,41 @@ def _db2_current_schema(connection: sa.Connection) -> str:
     return connection.dialect.normalize_name(schema.strip())
 
 
-def prepare_engine(engine: sa.Engine) -> sa.Engine:
-    """Dialect-specific setup of the engine used for reflection and the traditional backends.
+def _prepare_db2(engine: sa.Engine) -> None:
+    """ibm_db_sa's gaps (integration, Db2).
 
-    Db2 (integration): ibm_db_sa takes the default schema (where a table without
-    `schema` is reflected) from the connecting user, ignoring the `CurrentSchema`
-    driver option, so reflection would look in the wrong schema while queries run
-    in the right one; the default schema is CURRENT SCHEMA instead. And ibm_db_sa
-    declares no native Decimal support, so SQLAlchemy passes every DECIMAL through
-    a float, both ways: a bound keyset seed and every value read lose digits past
-    the 15th, silently. ibm_db binds and returns Decimals exactly, so it is told so.
-    The types it does not know are named (`DB2_TYPES`).
+    It takes the default schema (where a table without `schema` is reflected)
+    from the connecting user, ignoring the `CurrentSchema` driver option, so
+    reflection would look in the wrong schema while queries run in the right
+    one; the default schema is CURRENT SCHEMA instead. And it declares no native
+    Decimal support, so SQLAlchemy passes every DECIMAL through a float, both
+    ways: a bound keyset seed and every value read lose digits past the 15th,
+    silently. ibm_db binds and returns Decimals exactly, so it is told so. The
+    types it does not know are named (`DB2_TYPES`).
     """
-    if engine.dialect.name == DB2_DIALECT:
-        engine.dialect._get_default_schema_name = _db2_current_schema
-        engine.dialect.supports_native_decimal = True
-        engine.dialect.ischema_names = {**engine.dialect.ischema_names, **DB2_TYPES}
-    if engine.dialect.name == "mssql":
-        register_mssql_types(engine.dialect)
-        if engine.dialect.driver == "pyodbc":
+    engine.dialect._get_default_schema_name = _db2_current_schema
+    engine.dialect.supports_native_decimal = True
+    engine.dialect.ischema_names = {**engine.dialect.ischema_names, **DB2_TYPES}
 
-            @sa.event.listens_for(engine, "connect")
-            def _read_clr_types_as_bytes(dbapi_connection, _record):
-                dbapi_connection.add_output_converter(SQL_SS_UDT, bytes)
 
+def _prepare_mssql(engine: sa.Engine) -> None:
+    """Name the CLR types, and let pyodbc read them as their bytes."""
+    register_mssql_types(engine.dialect)
+    if engine.dialect.driver == "pyodbc":
+
+        @sa.event.listens_for(engine, "connect")
+        def _read_clr_types_as_bytes(dbapi_connection, _record):
+            dbapi_connection.add_output_converter(SQL_SS_UDT, bytes)
+
+
+# Per-engine setup of the engine used for reflection and the traditional backends, by dialects.py name.
+_PREPARE = {dialects.DB2.name: _prepare_db2, dialects.MSSQL.name: _prepare_mssql}
+
+
+def prepare_engine(engine: sa.Engine) -> sa.Engine:
+    """Dialect-specific setup of the engine used for reflection and the traditional backends."""
+    if prepare := _PREPARE.get(dialects.of(engine.dialect).name):
+        prepare(engine)
     return engine
 
 

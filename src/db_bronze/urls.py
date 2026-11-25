@@ -20,21 +20,11 @@ from urllib.parse import quote, urlencode
 
 import sqlalchemy as sa
 
-from . import secrets
-from .config import CONNECTORX_DIALECTS, ConfigError, ConnectionConfig
+from . import dialects, secrets
+from .config import ConfigError, ConnectionConfig
 
 log = logging.getLogger(__name__)
 
-SQLALCHEMY_DRIVERS = {
-    "mssql": "mssql+pyodbc",
-    "postgres": "postgresql+psycopg",
-    "mysql": "mysql+pymysql",
-    "oracle": "oracle+oracledb",
-    "db2": "db2+ibm_db",
-    "sqlite": "sqlite",
-}
-ODBC_DRIVER = "ODBC Driver 18 for SQL Server"
-CONNECTORX_SCHEMES = {"mssql": "mssql", "postgres": "postgresql", "mysql": "mysql", "oracle": "oracle"}
 _TRUE = ("yes", "true", "mandatory", "strict")
 
 
@@ -52,15 +42,16 @@ def _driver_options(conn: ConnectionConfig) -> dict[str, str]:
 
 
 def sqlalchemy_url(conn: ConnectionConfig) -> sa.URL:
+    d = conn.engine
     query = _driver_options(conn)
-    if conn.dialect == "sqlite":
-        return sa.URL.create("sqlite", database=_resolved(conn, "path"), query=query)
-    if conn.dialect == "mssql" and "driver" not in {k.lower() for k in query}:
-        query = {"driver": ODBC_DRIVER, **query}
-    if conn.dialect == "oracle":
-        query = {"service_name": _resolved(conn, "service_name"), **query}
+    if d.is_file:
+        return sa.URL.create(d.driver, database=_resolved(conn, "path"), query=query)
+    given = {k.lower() for k in query}
+    query = {**{k: v for k, v in d.default_url_query.items() if k.lower() not in given}, **query}
+    if d.database_key != "database":
+        query = {d.database_key: _resolved(conn, d.database_key), **query}
     return sa.URL.create(
-        SQLALCHEMY_DRIVERS.get(conn.dialect, conn.dialect),
+        d.driver,
         username=_resolved(conn, "username"),
         password=_resolved(conn, "password"),
         host=_resolved(conn, "host"),
@@ -70,40 +61,42 @@ def sqlalchemy_url(conn: ConnectionConfig) -> sa.URL:
     )
 
 
-# ibm_db_sa knows only Db2's own level names. Db2's Repeatable Read (RR) is the standard's SERIALIZABLE,
-# and the standard's REPEATABLE READ is Db2's Read Stability (RS); ibm_db_sa would take "REPEATABLE READ"
-# as RR and reject the other standard names (integration, Db2).
-DB2_ISOLATION_NAMES = {"READ UNCOMMITTED": "UR", "READ COMMITTED": "CS", "REPEATABLE READ": "RS", "SERIALIZABLE": "RR"}
-
-
 def engine_isolation_level(conn: ConnectionConfig) -> str | None:
     """`isolation_level` as the SQLAlchemy dialect spells it, or None to leave the driver's default."""
-    if conn.isolation_level is None or conn.dialect != "db2":
-        return conn.isolation_level
-    return DB2_ISOLATION_NAMES[conn.isolation_level]
+    level = conn.isolation_level
+    return conn.engine.isolation_names.get(level, level) if level is not None else None
+
+
+def _mssql_options(conn: ConnectionConfig, given: dict[str, str]) -> tuple[dict[str, str], set[str]]:
+    lower = {k.lower(): (k, v) for k, v in given.items()}
+    # ODBC Driver 18 encrypts unless told not to; ConnectorX only encrypts when told to.
+    encrypt = lower.get("encrypt", (None, "yes"))
+    options = {"encrypt": "true" if encrypt[1].lower() in _TRUE else "false"}
+    trust = lower.get("trustservercertificate")
+    if trust is not None and trust[1].lower() in _TRUE:
+        options["trust_server_certificate"] = "true"
+    return options, {pair[0] for pair in (lower.get("encrypt"), trust) if pair}
+
+
+def _postgres_options(conn: ConnectionConfig, given: dict[str, str]) -> tuple[dict[str, str], set[str]]:
+    # ConnectorX hands sslmode and libpq `options` to the server, as libpq does (spike S3).
+    options = {k: given[k] for k in ("sslmode", "options") if k in given}
+    used = set(options)
+    if conn.isolation_level is not None:
+        setting = "-c default_transaction_isolation=" + conn.isolation_level.lower().replace(" ", "\\ ")
+        options["options"] = f"{options['options']} {setting}" if "options" in options else setting
+    return options, used
+
+
+# How each engine's `driver_options` translate to ConnectorX URL options: (options, the keys used).
+_CONNECTORX_OPTIONS = {dialects.MSSQL.name: _mssql_options, dialects.POSTGRES.name: _postgres_options}
 
 
 def _connectorx_options(conn: ConnectionConfig) -> dict[str, str]:
     """`driver_options` spelled the ConnectorX way, where ConnectorX has the same option."""
     given = _driver_options(conn)
-    options: dict[str, str] = {}
-    used: set[str] = set()
-    if conn.dialect == "mssql":
-        lower = {k.lower(): (k, v) for k, v in given.items()}
-        # ODBC Driver 18 encrypts unless told not to; ConnectorX only encrypts when told to.
-        encrypt = lower.get("encrypt", (None, "yes"))
-        options["encrypt"] = "true" if encrypt[1].lower() in _TRUE else "false"
-        trust = lower.get("trustservercertificate")
-        if trust is not None and trust[1].lower() in _TRUE:
-            options["trust_server_certificate"] = "true"
-        used = {pair[0] for pair in (lower.get("encrypt"), trust) if pair}
-    elif conn.dialect == "postgres":
-        # ConnectorX hands sslmode and libpq `options` to the server, as libpq does (spike S3).
-        used = {k for k in ("sslmode", "options") if k in given}
-        options = {k: given[k] for k in ("sslmode", "options") if k in given}
-        if conn.isolation_level is not None:
-            setting = "-c default_transaction_isolation=" + conn.isolation_level.lower().replace(" ", "\\ ")
-            options["options"] = f"{options['options']} {setting}" if "options" in options else setting
+    translate = _CONNECTORX_OPTIONS.get(conn.engine.name)
+    options, used = translate(conn, given) if translate else ({}, set())
     dropped = sorted(set(given) - used)
     if dropped:
         log.warning("driver_options %s have no ConnectorX equivalent and are not passed to it", dropped)
@@ -117,23 +110,22 @@ def connectorx_sql(conn: ConnectionConfig, sql: str) -> str:
     applies to the statement after it (spike S3). Elsewhere the level is in the
     URL (Postgres) or rejected by validation.
     """
-    if conn.dialect == "mssql" and conn.isolation_level is not None:
+    if conn.engine.connectorx_isolation_in_batch and conn.isolation_level is not None:
         return f"SET TRANSACTION ISOLATION LEVEL {conn.isolation_level}; {sql}"
     return sql
 
 
 def connectorx_url(conn: ConnectionConfig) -> str:
-    if conn.dialect not in CONNECTORX_DIALECTS:
+    d = conn.engine
+    if d.connectorx is None:
         raise ConfigError(f'ConnectorX does not support dialect {conn.dialect!r}; set "backend": "pyarrow"')
-    if conn.dialect == "sqlite":
-        return "sqlite://" + quote(os.path.abspath(_resolved(conn, "path")))
+    if d.is_file:
+        return f"{d.connectorx}://" + quote(os.path.abspath(_resolved(conn, "path")))
     user = quote(str(_resolved(conn, "username") or ""), safe="")
     password = _resolved(conn, "password")
     userinfo = f"{user}:{quote(str(password), safe='')}@" if password is not None else (f"{user}@" if user else "")
     port = _port(conn)
     host = _resolved(conn, "host") + (f":{port}" if port is not None else "")
-    database = _resolved(conn, "service_name" if conn.dialect == "oracle" else "database")
+    database = _resolved(conn, d.database_key)
     query = urlencode(_connectorx_options(conn), quote_via=quote)  # ConnectorX reads "+" literally
-    return f"{CONNECTORX_SCHEMES[conn.dialect]}://{userinfo}{host}/{quote(database, safe='')}" + (
-        f"?{query}" if query else ""
-    )
+    return f"{d.connectorx}://{userinfo}{host}/{quote(database, safe='')}" + (f"?{query}" if query else "")
