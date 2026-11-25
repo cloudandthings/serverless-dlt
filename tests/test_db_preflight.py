@@ -225,3 +225,10 @@ def test_db2s_version_is_read_from_the_level_its_driver_reports():
     assert server_version(db2) == (11, 5, 900)
     assert server_version_finding("db2", (11, 5, 900), {"db2": (12, 1)}) is not None
     assert server_version(SimpleNamespace(name="postgresql", server_version_info=(17, 2))) == (17, 2)
+
+
+def test_oracle_19c_and_21c_are_accepted_and_18c_is_not():
+    """Oracle's minimum is 19 (19c, the long-term release); only 23 is proven by the integration suite."""
+    assert server_version_finding("oracle", (19, 3, 0, 0, 0)) is None
+    assert server_version_finding("oracle", (21, 3, 0, 0, 0)) is None
+    assert server_version_finding("oracle", (18, 4, 0, 0, 0)) is not None

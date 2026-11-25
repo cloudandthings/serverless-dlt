@@ -352,7 +352,7 @@ Minimum server versions, set from what the integration suite passed on:
 | mssql | 14 (SQL Server 2017) | 2017, 2019, 2022 |
 | postgres | 11 | 11, 12, 17 |
 | mysql | 8.0 | 8.0, 8.4 |
-| oracle | 23 | Oracle Free 23.26 only. **19c and 21c were not run**; a 19c or 21c server fails preflight until someone runs the suite there and lowers the minimum |
+| oracle | 19 | Oracle Free 23.26 only. **19c and 21c are accepted but unverified**: the integration suite has not run on them (their images do not start on an arm64 host). Run it on an x86_64 host before relying on them |
 | db2 | 11.5 | 11.5.5.1 and 12.1.5. 11.1 and 10.5 were not run |
 | sqlite | none | |
 

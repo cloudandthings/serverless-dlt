@@ -27,14 +27,15 @@ log = logging.getLogger(__name__)
 # backend is never switched silently. Postgres 11, MySQL 8.0 and SQL Server 2017 (14) are
 # the oldest series the whole integration suite has passed on (11.16, 8.0.46, 14.0.3570;
 # DESIGN-db.md section 11). SQL Server on Linux starts at 2017, so nothing older was run.
-# Oracle 23 (Free 23.26) is the only series it could run on so far: older servers are
-# x86_64 only and do not start under emulation on an arm64 host (S9 stays open below 23).
+# Oracle 19 (19c, the long-term release) by decision: 19c and 21c are accepted but UNVERIFIED.
+# Only 23 (Free 23.26) has run the suite; older servers are x86_64 only and do not start under
+# emulation on an arm64 host (S9 stays open below 23).
 # Db2 11.5: the whole suite passes on 11.5 and 12.1 (Community images; nothing older is published).
 MIN_SERVER_VERSION: dict[str, tuple[int, ...] | None] = {
     "mssql": (14,),
     "postgres": (11,),
     "mysql": (8, 0),
-    "oracle": (23,),
+    "oracle": (19,),
     "sqlite": None,
     "db2": (11, 5),
 }
