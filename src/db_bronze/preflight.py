@@ -15,8 +15,10 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import mssql, oracle
 from sqlalchemy.dialects import postgresql as pg
 
+from . import dialects
 from .config import SourceConfig, TableConfig
-from .extract import DB2_DIALECT, EXTRACTED_AT
+from .errors import PreflightError
+from .extract import EXTRACTED_AT
 from .source import reflect
 
 log = logging.getLogger(__name__)
@@ -26,16 +28,17 @@ log = logging.getLogger(__name__)
 # backend is never switched silently. Postgres 11, MySQL 8.0 and SQL Server 2017 (14) are
 # the oldest series the whole integration suite has passed on (11.16, 8.0.46, 14.0.3570;
 # DESIGN-db.md section 11). SQL Server on Linux starts at 2017, so nothing older was run.
-# Oracle 23 (Free 23.26) is the only series it could run on so far: older servers are
-# x86_64 only and do not start under emulation on an arm64 host (S9 stays open below 23).
+# Oracle 19 (19c, the long-term release) by decision: 19c and 21c are accepted but UNVERIFIED.
+# Only 23 (Free 23.26) has run the suite; older servers are x86_64 only and do not start under
+# emulation on an arm64 host (S9 stays open below 23).
 # Db2 11.5: the whole suite passes on 11.5 and 12.1 (Community images; nothing older is published).
 MIN_SERVER_VERSION: dict[str, tuple[int, ...] | None] = {
-    "mssql": (14,),
-    "postgres": (11,),
-    "mysql": (8, 0),
-    "oracle": (23,),
-    "sqlite": None,
-    "db2": (11, 5),
+    dialects.MSSQL.name: (14,),
+    dialects.POSTGRES.name: (11,),
+    dialects.MYSQL.name: (8, 0),
+    dialects.ORACLE.name: (19,),
+    dialects.SQLITE.name: None,
+    dialects.DB2.name: (11, 5),
 }
 
 # ConnectorX produces Decimal128(38, 10) and holds about 28 significant digits (section 3.1).
@@ -43,7 +46,7 @@ MAX_DECIMAL_SCALE = 10
 MAX_DECIMAL_PRECISION = 28
 # Where a NUMERIC with no declared precision holds any scale, and ConnectorX silently
 # drops digits past the 10th decimal place (integration type matrix, section 10.1).
-UNCONSTRAINED_NUMERIC_DIALECTS = ("postgres", "oracle")
+UNCONSTRAINED_NUMERIC_DIALECTS = (dialects.POSTGRES.name, dialects.ORACLE.name)
 
 
 def _named(*names: str) -> Callable[[sa.types.TypeEngine], bool]:
@@ -89,7 +92,7 @@ def _is_unreadable_postgres_array(t: sa.types.TypeEngine) -> bool:
 # recognise at all (Postgres xml, geometric types, pg_lsn, composite types; MySQL
 # geometry types) are caught on every server dialect by `_UNRECOGNISED`.
 DENY_LIST: dict[str, list[tuple[str, Callable[[sa.types.TypeEngine], bool]]]] = {
-    "postgres": [
+    dialects.POSTGRES.name: [
         ("interval", lambda t: isinstance(t, (sa.Interval, pg.INTERVAL))),
         ("money", lambda t: isinstance(t, pg.MONEY)),
         ("timetz", _is_timetz),
@@ -103,7 +106,7 @@ DENY_LIST: dict[str, list[tuple[str, Callable[[sa.types.TypeEngine], bool]]]] = 
     ],
     # money: read as a double, too narrow for its 19 digits. datetimeoffset: ConnectorX applies the offset
     # twice, so the instant is wrong (integration type matrix, section 10.1). sql_variant: UNREADABLE.
-    "mssql": [
+    dialects.MSSQL.name: [
         ("xml", _named("XML")),
         ("hierarchyid", _named("HIERARCHYID")),
         ("geography", _named("GEOGRAPHY")),
@@ -111,7 +114,7 @@ DENY_LIST: dict[str, list[tuple[str, Callable[[sa.types.TypeEngine], bool]]]] = 
         ("money", lambda t: isinstance(t, mssql.MONEY)),
         ("datetimeoffset", lambda t: isinstance(t, mssql.DATETIMEOFFSET)),
     ],
-    "oracle": [
+    dialects.ORACLE.name: [
         ("raw", lambda t: isinstance(t, oracle.RAW)),
         ("rowid", lambda t: isinstance(t, oracle.ROWID)),
         ("interval", lambda t: isinstance(t, oracle.INTERVAL)),
@@ -126,30 +129,14 @@ DENY_LIST: dict[str, list[tuple[str, Callable[[sa.types.TypeEngine], bool]]]] = 
     ],
 }
 # SQLite reflects a column declared without a type as NullType, and ConnectorX reads it from its values.
-_UNRECOGNISED_EXEMPT = ("sqlite",)
+_UNRECOGNISED_EXEMPT = (dialects.SQLITE.name,)
 
 
 # Types no backend lands losslessly: a finding on every backend. pyodbc reads a sql_variant
 # only as the bytes of its value, without the value's type.
 UNREADABLE: dict[str, list[tuple[str, Callable[[sa.types.TypeEngine], bool]]]] = {
-    "mssql": [("sql_variant", _named("SQL_VARIANT"))],
+    dialects.MSSQL.name: [("sql_variant", _named("SQL_VARIANT"))],
 }
-
-
-class PreflightError(Exception):
-    """One or more tables cannot run. `findings` maps table name to what is wrong with it."""
-
-    def __init__(self, findings: dict[str, list[str]]):
-        self.findings = findings
-        lines = [f"preflight failed for {len(findings)} table(s); nothing was extracted:"]
-        for name, items in findings.items():
-            lines.append(f"  table {name}:")
-            lines.extend(f"    - {item}" for item in items)
-        lines.append(
-            'Fix each table by setting "backend": "pyarrow" on it, or by excluding the offending column '
-            'with "columns" (or casting it in "query").'
-        )
-        super().__init__("\n".join(lines))
 
 
 def server_version(dialect: sa.Dialect) -> tuple[int, ...] | None:
@@ -159,7 +146,7 @@ def server_version(dialect: sa.Dialect) -> tuple[int, ...] | None:
     '12.01.0500') (integration, Db2), which would not compare with a minimum.
     """
     version = dialect.server_version_info
-    if dialect.name == DB2_DIALECT and version:
+    if dialects.of(dialect).version_is_text and version:
         return tuple(int(part) for part in version[-1].split("."))
     return version
 
@@ -238,6 +225,27 @@ def column_findings(dialect: str, backend: str, columns: list[tuple[str, sa.type
     return findings
 
 
+def partition_findings(tc: TableConfig, table: sa.FromClause, dialect: sa.Dialect) -> list[str]:
+    """What stops ConnectorX `partition_on` reading the table's partition column; empty when it can."""
+    if tc.partition is None:
+        return []
+    column = tc.partition.column
+    if column not in table.c:
+        return [f"partition column {column!r} is not a column of the table"]
+    if not isinstance(table.c[column].type, sa.Integer):
+        return [
+            f"partition column {column!r} is not an integer ({table.c[column].type}). "
+            'Fix: partition on an integer column, or remove "partition"'
+        ]
+    d = dialects.of(dialect)
+    if d.connectorx_partition_upper_cases and dialect.identifier_preparer.quote(column) != column:
+        return [
+            f"ConnectorX cannot partition on {d.title} by the case-sensitive column {column!r}. "
+            'Fix: partition on a column with a case-insensitive name, or remove "partition"'
+        ]
+    return []
+
+
 @dataclass
 class TableReport:
     """What preflight learned about one table."""
@@ -283,7 +291,8 @@ def preflight(
         wanted = set(tc.columns) if tc.columns else None
         # A query's result columns are not reflected: their types are unknown (None), not unrecognised.
         columns = [(c.name, None if tc.query else c.type) for c in table.columns if wanted is None or c.name in wanted]
-        report = TableReport(tc.name, backend, column_findings(dialect, backend, columns), table=table)
+        findings = column_findings(dialect, backend, columns) + partition_findings(tc, table, engine.dialect)
+        report = TableReport(tc.name, backend, findings, table=table)
         report.null_cursor_count = count_null_cursor(engine, table, tc)
         log.info("preflight %s", json.dumps(report.as_dict()))
         reports.append(report)

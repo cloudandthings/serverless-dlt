@@ -14,6 +14,7 @@ from sqlalchemy.dialects import oracle
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.sql.functions import FunctionElement
 
+from . import dialects
 from .config import TableConfig
 
 
@@ -31,13 +32,9 @@ class _Timestamp(FunctionElement):
 
 
 @compiles(_Timestamp)
-def _timestamp_default(element, compiler, **kw):
-    return compiler.process(next(iter(element.clauses)), **kw)
-
-
-@compiles(_Timestamp, "sqlite")
-def _timestamp_sqlite(element, compiler, **kw):
-    return f"julianday({compiler.process(next(iter(element.clauses)), **kw)})"
+def _timestamp(element, compiler, **kw):
+    rendered = compiler.process(next(iter(element.clauses)), **kw)
+    return f"julianday({rendered})" if dialects.of(compiler.dialect).timestamps_are_text else rendered
 
 
 class _TimestampValue(FunctionElement):
@@ -58,23 +55,13 @@ class _TimestampValue(FunctionElement):
 
 
 @compiles(_TimestampValue)
-def _timestamp_value_default(element, compiler, **kw):
-    return _timestamp_default(element, compiler, **kw)
-
-
-@compiles(_TimestampValue, "sqlite")
-def _timestamp_value_sqlite(element, compiler, **kw):
-    return _timestamp_sqlite(element, compiler, **kw)
-
-
-@compiles(_TimestampValue, "mssql")
-def _timestamp_value_mssql(element, compiler, **kw):
+def _timestamp_value(element, compiler, **kw):
+    d = dialects.of(compiler.dialect)
+    if not (d.inlined_timestamps_need_cast and kw.get("literal_binds")):
+        return _timestamp(element, compiler, **kw)
     value = next(iter(element.clauses))
-    rendered = compiler.process(value, **kw)
-    if not kw.get("literal_binds"):
-        return rendered
     aware = getattr(getattr(value, "value", None), "tzinfo", None) is not None
-    return f"CAST({rendered} AS {'DATETIMEOFFSET' if aware else 'DATETIME2'})"
+    return f"CAST({compiler.process(value, **kw)} AS {'DATETIMEOFFSET' if aware else 'DATETIME2'})"
 
 
 def query_source(tc: TableConfig, columns: list[str]) -> sa.Subquery:
@@ -219,6 +206,6 @@ def literal_sql(stmt: sa.Select, dialect: sa.Dialect) -> str:
     (SQLAlchemy 2.1.9), which ConnectorX rejects. An explicit `LIMIT -1`
     (no limit, to SQLite) is inlined like any other value.
     """
-    if dialect.name == "sqlite" and stmt._offset_clause is not None and stmt._limit_clause is None:
+    if dialects.of(dialect).offset_needs_limit and stmt._offset_clause is not None and stmt._limit_clause is None:
         stmt = stmt.limit(-1)
     return str(stmt.compile(dialect=dialect, compile_kwargs={"literal_binds": True}))

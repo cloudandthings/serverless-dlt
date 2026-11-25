@@ -12,10 +12,10 @@ import dlt
 import sqlalchemy as sa
 from sqlalchemy.dialects import oracle
 
+from . import dialects
 from .config import RunRequest, SourceConfig, TableConfig, to_source_time
-from .errors import BackendChanged, PreflightError
+from .errors import BackendChanged
 from .extract import (
-    DB2_DIALECT,
     column_specs,
     naive_timestamp_columns,
     prepare_engine,
@@ -64,8 +64,8 @@ def reflect(engine: sa.Engine, tc: TableConfig) -> sa.FromClause:
     table = sa.Table(
         tc.table, sa.MetaData(), schema=tc.schema, autoload_with=engine, listeners=[("column_reflect", _exact_numbers)]
     )
-    if engine.dialect.name == DB2_DIALECT:
-        _db2_bit_data_as_binary(engine, table)
+    if after := _AFTER_REFLECTION.get(dialects.of(engine.dialect).name):
+        after(engine, table)
     return table
 
 
@@ -99,22 +99,8 @@ def _exact_numbers(inspector, table, column_info: dict) -> None:
         column_info["type"] = oracle.NUMBER(asdecimal=True)
 
 
-def _check_partition_column(tc: TableConfig, table: sa.FromClause, dialect: sa.Dialect) -> None:
-    """ConnectorX `partition_on` needs an integer column; fail before anything is extracted."""
-    column = tc.partition.column
-    if column not in table.c:
-        raise PreflightError(f"table {tc.name}: partition column {column!r} is not a column of the table")
-    if not isinstance(table.c[column].type, sa.Integer):
-        raise PreflightError(
-            f"table {tc.name}: partition column {column!r} is not an integer ({table.c[column].type}). "
-            'Fix: partition on an integer column, or remove "partition"'
-        )
-    if dialect.name == "oracle" and dialect.identifier_preparer.quote(column) != column:
-        # ConnectorX upper-cases the column in its range query, quotes or not (integration, Oracle)
-        raise PreflightError(
-            f"table {tc.name}: ConnectorX cannot partition on Oracle by the case-sensitive column {column!r}. "
-            'Fix: partition on a column with a case-insensitive name, or remove "partition"'
-        )
+# Per-engine corrections to a reflected table, by dialects.py name.
+_AFTER_REFLECTION = {dialects.DB2.name: _db2_bit_data_as_binary}
 
 
 def window(cfg: SourceConfig, tc: TableConfig, req: RunRequest, run_started: datetime, max_cursor):
@@ -154,14 +140,8 @@ def make_resource(
     a ConnectorX stream table: cutting that stream short leaves its query running.
     """
     backend = cfg.backend(tc)
-    if backend == "sqlalchemy":  # stopgap until the sqlalchemy backend lands
-        raise NotImplementedError(
-            f'table {tc.name}: backend "sqlalchemy" is not implemented yet; set "backend": "pyarrow"'
-        )
     table = table if table is not None else reflect(engine, tc)
     specs = column_specs(table)
-    if tc.partition:
-        _check_partition_column(tc, table, engine.dialect)
     log.info("table %s", json.dumps({"table": tc.name, "backend": backend}))
     batch_size = cfg.batch_size(tc)
     # Without this hint dlt labels naive timestamps UTC without shifting them (prototype S5).

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from db_bronze.errors import DbBronzeError
 from db_bronze.handler import handler
 
 
@@ -68,6 +69,20 @@ def test_a_wide_decimal_on_connectorx_fails_preflight_listing_every_column(invok
     assert "Amount" in message and "Fee" in message  # every offender, not just the first
     assert '"backend": "pyarrow"' in message
     assert nothing_landed(bucket)
+
+
+def emf(out: str) -> list[dict]:
+    return [d for line in out.splitlines() if line.startswith("{") and "_aws" in (d := json.loads(line))]
+
+
+def test_a_preflight_failure_emits_the_preflight_failed_metric_and_logs_the_error(invoke, capsys, caplog):
+    capsys.readouterr()
+    with caplog.at_level(logging.ERROR, logger="db_bronze"), pytest.raises(DbBronzeError) as failure:
+        invoke()
+    assert type(failure.value).__name__ == "PreflightError"
+    metrics = [r for r in emf(capsys.readouterr().out) if "PreflightFailed" in r]
+    assert [(m["pipeline"], m["PreflightFailed"]) for m in metrics] == [("core_banking", 1)]
+    assert any('"error": "PreflightError"' in r.getMessage() for r in caplog.records)
 
 
 def test_the_same_table_on_pyarrow_passes(invoke, bucket):

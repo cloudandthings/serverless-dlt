@@ -3,19 +3,22 @@
 One config document = one database connection = one dlt pipeline = one Lambda
 function. Unknown keys are rejected, so a typo fails loudly instead of silently
 falling back to a default. Every static rule fails with `ConfigError` and a
-message that says how to fix it. Copied in style from `api_bronze.config` (D1).
+message that says how to fix it. Strict building is shared with `api_bronze` (`bronze_common`, D1).
 """
 
 from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import secrets
+from bronze_common.config import strict_builder
+
+from . import dialects, secrets
+from .dialects import CONNECTORX_DIALECTS, ISOLATION_LEVELS, Dialect
 from .errors import DbBronzeError
 from .extract import EXTRACTED_AT
 
@@ -29,31 +32,13 @@ EVENT_KEYS = frozenset({
     "page", "snapshot_id", "partition_date",  # a page of a planned snapshot (mode=full)
     "table", "load_ids",  # finalize
 })
-BACKENDS = ("connectorx", "pyarrow", "sqlalchemy")
-# Engines ConnectorX reads (section 3.1); these default to it (D3, section 5.3). Db2 is not supported.
-CONNECTORX_DIALECTS = ("mssql", "postgres", "mysql", "oracle", "sqlite")
+BACKENDS = ("connectorx", "pyarrow")
+# Designed (DESIGN-db.md 7.2) but not built: rejected when the config loads rather than failing mid-run.
+UNBUILT_BACKENDS = ("sqlalchemy",)
 CURSOR_TYPES = ("timestamp", "integer")
 CHUNKING_STRATEGIES = ("stream", "keyset")
 AUTH_TYPES = ("password", "kerberos")
-# What SQLAlchemy's `isolation_level` accepts across the supported dialects (SNAPSHOT: mssql).
-ISOLATION_LEVELS = ("READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE", "SNAPSHOT", "AUTOCOMMIT")
-# Engines where ConnectorX can apply `isolation_level` (spike S3), and the levels it can apply there.
-# Postgres: ConnectorX passes libpq `options` to the server, so `-c default_transaction_isolation=...`
-# becomes the session default. SQL Server: its URL takes no session settings either (unknown
-# parameters are ignored), but ConnectorX runs a batch, so a SET TRANSACTION ISOLATION LEVEL goes
-# ahead of the query; not on a partitioned read, which ConnectorX parses as a single SELECT.
-# MySQL: its URL takes no session settings, and the level is not settable through a SET_VAR hint.
-# oracle: until its integration ticket measures it.
-# The standard levels Db2 has (as UR, CS, RS and RR); no SNAPSHOT, and ibm_db_sa takes no AUTOCOMMIT.
-DB2_ISOLATION_LEVELS = ("READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE")
-CONNECTORX_ISOLATION = {
-    "postgres": ("READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE"),
-    "mssql": ("READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SNAPSHOT", "SERIALIZABLE"),
-}
-# Where the level goes into the SQL batch rather than the URL, so a partitioned read cannot carry it.
-CONNECTORX_ISOLATION_IN_BATCH = ("mssql",)
 PARQUET_CODECS = ("zstd", "snappy", "gzip", "none")
-SERVER_DIALECTS = ("mssql", "postgres", "mysql", "db2")  # host + database; oracle uses service_name
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _DIALECT = re.compile(r"^[a-z][a-z0-9_]*(\+[a-z0-9_]+)?$")
 
@@ -87,17 +72,14 @@ def default_backend(dialect: str) -> str:
     return "connectorx" if dialect in CONNECTORX_DIALECTS else "pyarrow"
 
 
-def _build(cls, data: Any, where: str, **overrides):
-    if not isinstance(data, dict):
-        raise ConfigError(f"{where}: expected an object, got {type(data).__name__}")
-    known = {f.name for f in fields(cls)}
-    unknown = sorted(set(data) - known)
-    if unknown:
-        raise ConfigError(f"{where}: unknown keys {unknown}; allowed {sorted(known)}")
-    try:
-        return cls(**{**data, **overrides})
-    except TypeError as e:
-        raise ConfigError(f"{where}: {e}") from e
+_build = strict_builder(ConfigError)
+
+
+def _check_backend_name(what: str, backend: str | None) -> None:
+    if backend in UNBUILT_BACKENDS:
+        raise ConfigError(f'{what} "{backend}" is not implemented yet; set "backend": "pyarrow"')
+    if backend is not None and backend not in BACKENDS:
+        raise ConfigError(f"{what} {backend!r} not in {BACKENDS}")
 
 
 def _names(value: Any, where: str) -> tuple[str, ...]:
@@ -169,7 +151,7 @@ class ConnectionConfig:
         if not isinstance(self.dialect, str) or not _DIALECT.match(self.dialect):
             raise ConfigError(
                 f"connection.dialect {self.dialect!r} is not a SQLAlchemy dialect name; use one of "
-                f"{('mssql', 'postgres', 'mysql', 'oracle', 'db2', 'sqlite')} or another dialect's name"
+                f"{tuple(dialects.DIALECTS)} or another dialect's name"
             )
         for name in ("host", "database", "service_name", "path", "username", "password"):
             value = getattr(self, name)
@@ -188,10 +170,11 @@ class ConnectionConfig:
         self._check_fields_for_dialect()
         if self.isolation_level is not None and self.isolation_level not in ISOLATION_LEVELS:
             raise ConfigError(f"connection.isolation_level {self.isolation_level!r} not in {ISOLATION_LEVELS}")
-        if self.dialect == "db2" and self.isolation_level not in (None, *DB2_ISOLATION_LEVELS):
+        d = self.engine
+        if self.isolation_level not in (None, *d.isolation_levels):
             raise ConfigError(
-                f"connection.isolation_level {self.isolation_level!r} has no Db2 equivalent; "
-                f"on db2 use one of {DB2_ISOLATION_LEVELS}"
+                f"connection.isolation_level {self.isolation_level!r} has no {d.title} equivalent; "
+                f"on {d.name} use one of {d.isolation_levels}"
             )
         try:
             ZoneInfo(self.naive_timezone)
@@ -201,29 +184,37 @@ class ConnectionConfig:
                 'use a name such as "UTC" or "Africa/Johannesburg"'
             ) from None
 
+    @property
+    def engine(self) -> Dialect:
+        """The dialect table's entry for this connection (dialects.py)."""
+        return dialects.dialect(self.dialect)
+
     def _check_fields_for_dialect(self) -> None:
-        d = self.dialect
-        if d == "sqlite":
+        d = self.engine
+        file_dialects = [x.name for x in dialects.DIALECTS.values() if x.is_file]
+        if d.is_file:
             if not self.path:
-                raise ConfigError('connection: set "path" to the database file for sqlite')
+                raise ConfigError(f'connection: set "path" to the database file for {d.name}')
             server_keys = ("host", "port", "database", "service_name", "username", "password")
             given = [k for k in server_keys if getattr(self, k) is not None]
             if given:
-                raise ConfigError(f'connection: sqlite takes only "path"; remove "{given[0]}"')
+                raise ConfigError(f'connection: {d.name} takes only "path"; remove "{given[0]}"')
             return
         if self.path is not None:
-            raise ConfigError(f'connection: only sqlite takes "path"; for {d!r} set "host" and "database"')
-        if d == "oracle":
+            raise ConfigError(
+                f'connection: only {" and ".join(file_dialects)} takes "path"; for {d.name!r} set "host" and "database"'
+            )
+        if d.database_key == "service_name":
             if self.database is not None:
-                raise ConfigError('connection: oracle takes "service_name", not "database"; rename the key')
-            required = ("host", "service_name")
-        else:
-            if self.service_name is not None:
-                raise ConfigError(f'connection: only oracle takes "service_name"; for {d!r} use "database"')
-            required = ("host", "database") if d in SERVER_DIALECTS else ()
-        for key in required:
+                raise ConfigError(f'connection: {d.name} takes "service_name", not "database"; rename the key')
+        elif self.service_name is not None:
+            takers = [x.name for x in dialects.DIALECTS.values() if x.database_key == "service_name"]
+            raise ConfigError(
+                f'connection: only {" and ".join(takers)} takes "service_name"; for {d.name!r} use "database"'
+            )
+        for key in d.address:
             if getattr(self, key) is None:
-                raise ConfigError(f'connection: {d} needs a server address; set "{key}"')
+                raise ConfigError(f'connection: {d.name} needs a server address; set "{key}"')
 
 
 @dataclass(frozen=True)
@@ -411,8 +402,7 @@ class SourceConfig:
             raise ConfigError(f"max_time_s must be a number of seconds > 0, or null: {self.max_time_s!r}")
         if self.parquet_compression not in PARQUET_CODECS:
             raise ConfigError(f"parquet_compression {self.parquet_compression!r} not in {PARQUET_CODECS}")
-        if self.defaults.backend is not None and self.defaults.backend not in BACKENDS:
-            raise ConfigError(f"defaults.backend {self.defaults.backend!r} not in {BACKENDS}")
+        _check_backend_name("defaults.backend", self.defaults.backend)
         for t in self.tables:
             self._check_backend(t)
             self._check_max_time(t)
@@ -428,8 +418,8 @@ class SourceConfig:
             return None
         if self.backend(t) == "connectorx":
             return "stopping a ConnectorX stream early leaves its query running on the server"
-        if self.connection.dialect == "mysql":
-            return "closing a MySQL stream early blocks until its query has run to the end"
+        if self.connection.engine.stream_close_blocks:
+            return f"closing a {self.connection.engine.title} stream early blocks until its query has run to the end"
         return None
 
     def _check_max_time(self, t: TableConfig) -> None:
@@ -445,8 +435,7 @@ class SourceConfig:
         )
 
     def _check_backend(self, t: TableConfig) -> None:
-        if t.backend is not None and t.backend not in BACKENDS:
-            raise ConfigError(f"table {t.name}: backend {t.backend!r} not in {BACKENDS}")
+        _check_backend_name(f"table {t.name}: backend", t.backend)
         if t.partition and self.backend(t) != "connectorx":
             raise ConfigError(
                 f"table {t.name}: partition is a ConnectorX read (partition_on), but the table resolves to "
@@ -454,28 +443,31 @@ class SourceConfig:
             )
         if self.backend(t) != "connectorx":
             return
-        dialect = self.connection.dialect
-        if dialect not in CONNECTORX_DIALECTS:
+        d = self.connection.engine
+        dialect = d.name
+        if d.connectorx is None:
             raise ConfigError(
                 f"table {t.name}: ConnectorX does not support dialect {dialect!r} (it reads {CONNECTORX_DIALECTS}); "
                 'set "backend": "pyarrow" on the table or in defaults'
             )
         level = self.connection.isolation_level
-        if level is not None and level not in CONNECTORX_ISOLATION.get(dialect, ()):
+        if level is not None and level not in d.connectorx_isolation:
+            can = {x.name: x.connectorx_isolation for x in dialects.DIALECTS.values() if x.connectorx_isolation}
             raise ConfigError(
                 f"table {t.name}: ConnectorX cannot apply connection.isolation_level {level!r} on {dialect} "
-                f"(it can on: {CONNECTORX_ISOLATION}); "
+                f"(it can on: {can}); "
                 'set "backend": "pyarrow" on the table or in defaults, or remove "isolation_level"'
             )
-        if level is not None and t.partition and dialect in CONNECTORX_ISOLATION_IN_BATCH:
+        if level is not None and t.partition and d.connectorx_isolation_in_batch:
             raise ConfigError(
                 f"table {t.name}: on {dialect} ConnectorX applies connection.isolation_level with a SET statement "
                 "ahead of the query, which a partitioned read does not allow; "
                 'remove "partition", or set "backend": "pyarrow" on the table, or remove "isolation_level"'
             )
-        if self.connection.auth.type == "kerberos" and dialect != "mssql":
+        if self.connection.auth.type == "kerberos" and not d.connectorx_kerberos:
+            kerberos = " and ".join(x.name for x in dialects.DIALECTS.values() if x.connectorx_kerberos)
             raise ConfigError(
-                f"table {t.name}: ConnectorX supports Kerberos only on mssql, not {dialect!r} (docs/KERBEROS.md); "
+                f"table {t.name}: ConnectorX supports Kerberos only on {kerberos}, not {dialect!r} (docs/KERBEROS.md); "
                 'set "backend": "pyarrow" on the table or in defaults'
             )
 

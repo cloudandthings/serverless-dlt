@@ -11,6 +11,8 @@ COPY docker/requirements.lock /tmp/requirements.lock
 RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.lock --target "${LAMBDA_TASK_ROOT}" \
  && rm /tmp/requirements.lock
 
+# bronze_common: the code api_bronze and db_bronze share (DESIGN-db.md D1)
+COPY src/bronze_common "${LAMBDA_TASK_ROOT}/bronze_common"
 COPY src/api_bronze "${LAMBDA_TASK_ROOT}/api_bronze"
 
 # Only /tmp is writable on Lambda. dlt would otherwise write under $HOME.

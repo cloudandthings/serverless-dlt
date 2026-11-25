@@ -14,9 +14,11 @@ and answered S2, S3, S6 and S9 for it. Ticket 17 did the same for Db2 (11.5 and 
 
 *Verified:* the unit suite (SQLite, both backends) and the integration suite on Postgres
 11/12/17, MySQL 8.0/8.4, SQL Server 2017/2019/2022, Oracle Free 23.26 and Db2 11.5/12.1,
-on the host and through the Lambda emulator in the image. *Not verified:* Oracle 19c/21c
-and Db2 11.1/10.5 (their preflight minimums are floors from evidence, S9); SQL Server and
-Oracle integration were not rerun after the last shared harness edits; peak memory on a
+on the host and through the Lambda emulator in the image. After the review fixes (25 Nov
+2026) the suite was rerun on Postgres 17, MySQL 8.4 and SQL Server 2022 on the host, and
+on Oracle Free 23.26 and Db2 12.1 inside the image. *Not verified:* Oracle 19c/21c
+(accepted by the preflight minimum, Oracle 19, by decision, but never run, S9) and Db2
+11.1/10.5 (the Db2 minimum is a floor from evidence, S9); peak memory on a
 real large table (S7); real S3, real Lambda in a VPC, Glue 6.0; Kerberos (placeholder).
 
 This is the database counterpart of `api_bronze` (see `DESIGN-api.md`). It records
@@ -126,7 +128,7 @@ are upgraded as tests land.
 
 | # | Decision | Rejected alternative and why |
 |---|---|---|
-| D1 | Sibling package `src/db_bronze/` in this repo. Conventions are copied from `api_bronze`; no shared module yet. | A shared `bronze_common` now would tie both packages to the same dlt internals before it is clear what they really share. |
+| D1 | Sibling package `src/db_bronze/` in this repo. Code that is the same in both packages and touches **no dlt internals** lives in `src/bronze_common/` (revised at review, 25 Nov 2026): strict config building (`config.strict_builder`, each package passing its own `ConfigError`), secret lookup and the Secrets Manager cache (`secrets`), and the handler's config loading, Lambda time budget (`SAFETY_MARGIN_S`, `MIN_BUDGET_S`) and error unwrapping (`handler`). Both images ship it. Everything dlt-facing (resources, incremental, destination layout) stays in each package. | A shared module that also held dlt-facing code would tie both packages to the same dlt internals (D1 as first written, which kept no shared module until it was clear what they really share). Copying the shared helpers, as before the review, let the two copies drift. |
 | D2 | Bronze is **typed Arrow**: the types the backend returns, the source column names, dlt's normaliser bypassed. | Letting dlt normalise renames columns and re-coerces types. Casting everything to string pushes all typing into silver. |
 | D3 | The backend is a **config parameter**. The default comes from the config alone: ConnectorX where the engine supports it, pyarrow otherwise. Opting out is a config change. | Automatic runtime fallback would land the same table with different types from one run to the next. A canonical cast layer would duplicate type logic. |
 | D4 | **No runtime fallback.** A ConnectorX failure fails the run with instructions for switching backend. | Falling back silently changes types (D3). |
@@ -138,6 +140,21 @@ are upgraded as tests land.
 | D10 | Oracle always runs in **thick** mode. | Mixing thin and thick: thick mode is process-wide once enabled, and Instant Client is in the image anyway for ConnectorX. |
 | D11 | Kerberos: placeholder slot plus `docs/KERBEROS.md` only. | Building it now, before any project needs it. |
 | D12 | `_extracted_at` is the only added column. The backend used appears in logs and metrics only. | A `_backend` column. Source db and schema columns, which are constant per config. |
+
+### 4.1 Deliberate deviations (recorded at review, 25 Nov 2026)
+
+Each of these goes beyond, or against, what this document first specified. All are kept
+on purpose, and each rests on evidence from the integration suite or a review decision.
+
+| Deviation | Why | Evidence |
+|---|---|---|
+| `max_time_s` is rejected for a **MySQL** `stream` table on the traditional backend, not only for ConnectorX streams (section 6.1). | Closing PyMySQL's unbuffered cursor reads the rest of the result first, so a cut stream blocks until its query has run to the end, exactly as a dropped ConnectorX stream does. | S1, integration (MySQL 8.0/8.4); section 7.4. |
+| `sql_variant` is a preflight finding on **every** backend, not only ConnectorX (section 6.2). | pyodbc reads a `sql_variant` only as the bytes of its value, without its type, so no backend lands it losslessly. | Integration, ticket 15 (SQL Server 2017/2019/2022); section 3.3. |
+| **Db2 and Oracle type overrides** in reflection and extraction: Db2 DECFLOAT as exact text, BINARY/VARBINARY and CHAR/VARCHAR FOR BIT DATA as binary, DOUBLE as double, native Decimals and CURRENT SCHEMA as the default schema (`extract.prepare_engine`, `source.reflect`); Oracle NUMBER without precision read as Decimal, TIMESTAMP WITH TIME ZONE read through `SYS_EXTRACT_UTC`. | Without them those types land wrongly or lose digits silently: ibm_db_sa reflects them wrongly or not at all, and Oracle's driver hands NUMBER over as float and drops the offset of TIMESTAMP WITH TIME ZONE. | Integration type matrix, tickets 16 and 17 (section 10.1); section 3.3. |
+| `tests/test_db_readme.py`: a test that README-db.md documents every config key, event key, mode, enumerated value, error type and metric, and the server minimums as the code has them. | Not in the test plan (section 10). It keeps the operator spec from falling behind the code. | Ticket 19. |
+| `finalize` rejects `"tables"` (section 7.5). | It names its one table in `table`; a `tables` list beside it could only repeat or contradict it. | Review. |
+| `backend: sqlalchemy` is rejected when the config loads (sections 6.1, 7.2). | It is not built; failing at config load beats failing mid-run with `NotImplementedError`. | Review decision D-a. |
+| The Oracle preflight minimum is **19**, below the only version the suite ran on (23). | 19c is Oracle's long-term release; refusing it would block every 19c source. 19c and 21c stay **unverified** (S9). | Review decision D-b. |
 
 ---
 
@@ -224,7 +241,7 @@ connection = one pipeline = one Lambda function.** `pipeline_name`,
 | `cursor.initial_value` | ISO-8601 (an offset is allowed and converted through `naive_timezone`) or an integer. |
 | `cursor.lag` | Seconds, or an integer delta for integer cursors. Re-reads a trailing window to catch transactions that committed late. Passed to dlt incremental `lag`. Requires `primary_key`. **Every run re-lands the whole lag window** (S4); bronze accepts the duplicates and silver removes them (section 12). |
 | `cursor.include_null_cursor` | Default `false`. When `true`, adds `OR cursor IS NULL`, which re-reads those rows on every run. |
-| `backend` | `connectorx`, `pyarrow` or `sqlalchemy`. Overrides `defaults.backend`. When both are null, the default is resolved per D3. |
+| `backend` | `connectorx` or `pyarrow`. Overrides `defaults.backend`. When both are null, the default is resolved per D3. `sqlalchemy` (section 7.2) is not built, so the config rejects it (review decision, 25 Nov 2026). |
 | `chunking` | `{"strategy": "stream"}` (default) or `{"strategy": "keyset", "order_by": [...], "page_size": N}`. |
 | `batch_size` | Rows per Arrow batch (ConnectorX `batch_size`, or the fetch size on the traditional backend). |
 | `partition` | `{"column": ..., "num": N}`. ConnectorX `partition_on`. Opt-in, never automatic. |
@@ -249,6 +266,7 @@ Each run logs the resolved backend for every table.
 Each rule fails with `ConfigError` and a message that says how to fix it.
 
 - `backend: connectorx` with an engine ConnectorX does not support (for example Db2).
+- `backend: sqlalchemy`, which is designed (section 7.2) but not built: rejected here rather than failing mid-run (review decision, 25 Nov 2026). The fix is `backend: pyarrow`.
 - `backend: connectorx` with `auth.type: kerberos` on any engine except mssql. Oracle stays rejected until the spike in section 8 proves otherwise.
 - `isolation_level` on a connection whose tables resolve to `connectorx`, except on Postgres with one of the four standard levels, and on SQL Server with one of its five levels on a table without `partition` (S3). The fix is `backend: pyarrow` or no `isolation_level` (or no `partition`).
 - `isolation_level` SNAPSHOT or AUTOCOMMIT on db2, which has neither; the four standard levels are translated to Db2's own names (section 5.1).
@@ -266,7 +284,7 @@ The preflight reflects each table that is about to run, using one SQLAlchemy ref
 
 Checks:
 
-- **Server version** is at or above a minimum per dialect. The minimums are set from what the integration tests prove, not guessed. A server below the minimum fails; the backend is never switched silently. Proven so far (S9): **Postgres 11**, **MySQL 8.0**, **SQL Server 2017** (14), **Oracle 23** (older series not yet run, see S9), **Db2 11.5**.
+- **Server version** is at or above a minimum per dialect. The minimums are set from what the integration tests prove, not guessed. A server below the minimum fails; the backend is never switched silently. Proven so far (S9): **Postgres 11**, **MySQL 8.0**, **SQL Server 2017** (14), **Oracle 19** (by decision: 19c and 21c are accepted but **unverified**, only 23 has run, see S9), **Db2 11.5**.
 - For tables on ConnectorX:
   - **DECIMAL/NUMERIC with scale > 10 or precision > 28**, and on Postgres and Oracle a **NUMERIC/NUMBER without precision**. This check is mandatory: it is the only thing standing between a table and silent precision loss (section 3.1). Oracle `NUMBER(p, 0)` is exempt whatever p: ConnectorX reads it as int64, and a wider value fails loudly.
   - Column types on the per-dialect deny list from section 3.1. A type SQLAlchemy does not recognise
@@ -279,11 +297,11 @@ Checks:
     so they are named in the finding; `money` and `datetimeoffset` are findings because ConnectorX
     reads them wrongly without an error (section 3.1). Oracle XMLTYPE and INTERVAL YEAR TO MONTH
     reflect as `NullType` and are caught by the rule for unrecognised types.
-  - On Oracle, a `partition` column with a case-sensitive (quoted, mixed-case) name (section 3.1).
+- For tables with `partition`: the column exists, is an integer, and on Oracle does not have a case-sensitive (quoted, mixed-case) name, which ConnectorX upper-cases in its range query (section 3.1). These are table findings like the others, so `validate` reports them too.
 - On every backend: a type no backend lands losslessly. On SQL Server that is `sql_variant`: pyodbc
   reads only the bytes of its value, without its type. The fix is to exclude the column or cast it in
   `query`.
-- Rows with a NULL cursor are **counted and logged** when `include_null_cursor` is false, so the gap is visible.
+- Rows with a NULL cursor are **counted and logged** when `include_null_cursor` is false, so the gap is visible. That count is the run's `null_cursor_rows` and its `NullCursorRows` metric (section 7.6).
 
 The same checks run, without extracting, as `{"mode": "validate"}`. Use that when onboarding a new source.
 
@@ -304,6 +322,17 @@ carry over from `api_bronze`:
 
 - `dlt.sources.incremental(...)` **must be the resource argument's default value**. Building it in the function body silently disables state and filtering.
 - `write_disposition="append"`, hard-coded. `replace` deletes sibling `mode=` partitions.
+
+Every per-engine difference is recorded in one table, `dialects.py` (review, 25 Nov
+2026): the config's name for the engine (`postgres`, `db2`), SQLAlchemy's
+(`postgresql`, `ibm_db_sa`), the URL driver, the connection keys that locate the
+database, the ConnectorX scheme and what ConnectorX can apply there, and each
+quirk the code works around (text timestamps on SQLite, cast inlined timestamps on
+SQL Server, a text server version on Db2, and so on). Code asks the entry for a
+property instead of comparing dialect names; per-engine hooks (`extract.prepare_engine`,
+the URL option translation, Db2's reflection fix-up) are dispatch tables keyed by
+the entry's name. A dialect name with no entry gets a generic one: the traditional
+backend only.
 
 Queries are built with SQLAlchemy Core, so dialect differences (quoting,
 `LIMIT` vs `FETCH FIRST`/`OFFSET ... FETCH`, `TOP`) come from the dialect, not
@@ -341,7 +370,7 @@ statements do, once bound decimals stop going through a float (section 3.3).
 |---|---|
 | `connectorx` | `cx.read_sql(url, sql, return_type="arrow_stream", batch_size=...)`. Each `RecordBatch` is yielded. `RuntimeError` and `pyo3_runtime.PanicException` are caught **narrowly around the ConnectorX call only** and re-raised as `ConnectorXFailed(table, reason)`. |
 | `pyarrow` | SQLAlchemy streaming cursor (`stream_results` / `yield_per`), with rows converted to Arrow per batch using the reflected column types. |
-| `sqlalchemy` | The same query, rows yielded as Arrow without type hints. For odd dialects where the pyarrow path cannot infer a type. |
+| `sqlalchemy` | *Designed, not built.* The same query, rows yielded as Arrow without type hints, for odd dialects where the pyarrow path cannot infer a type. The config rejects it with `ConfigError` until it is built (review decision, 25 Nov 2026). |
 
 Bronze uses dlt's `direct` naming convention, so source column names survive
 (*prototyped*, S5). The schema contract is
@@ -433,7 +462,7 @@ them, which is the wrong instant whenever `naive_timezone` is not UTC (S5).
 | `{"source_id": "x", "mode": "finalize", "table": "t", "snapshot_id": ..., "load_ids": [...]}` | Writes `<bucket_url>/<dataset>/_manifests/<table>/<snapshot_id>.json`. | none |
 | `{"source_id": "x", "mode": "validate"}` | Static checks plus preflight, nothing extracted. | none |
 
-Every event also accepts `"tables": [...]` to run a subset.
+Every event except `finalize` also accepts `"tables": [...]` to run a subset. **Deviation (review, 25 Nov 2026):** `finalize` rejects `tables`. It writes the manifest of exactly one table, named by `table`; a `tables` list beside it could only repeat `table` or contradict it, so it is treated like any other key that belongs to another kind of event (a mistyped event fails instead of being ignored).
 
 **Offset paging caveats.** These go in the operator docs. OFFSET paging is not
 consistent across invocations: rows that change while a snapshot is running
@@ -460,6 +489,10 @@ collected `load_ids`.
 | `BackendChanged` | A table's resolved backend differs from the one in state (D6). The message says the bronze types would change and gives the fix: a new table `name`. | no | holds |
 | `NotImplementedError` | `auth.type: kerberos` | no | holds |
 
+There is one `PreflightError` (`db_bronze.errors`), a `DbBronzeError` like the
+others, so a preflight failure emits `PreflightFailed` and the structured error
+log like every other failure here.
+
 The handler unwraps these from dlt's `PipelineStepFailed`, as `api_bronze`
 already does for `BrokenPageError`.
 
@@ -469,7 +502,9 @@ Logs are structured JSON, with one `run start` and one `run done` record. The
 EMF metrics, dimensioned by pipeline and table:
 
 - `RowsExtracted`
-- `NullCursorRows`
+- `NullCursorRows`: with `include_null_cursor` false (the default), the preflight's count of the rows
+  the cursor filter never reads (within `where`), so the gap shows even though those rows never
+  land; with it true, the NULL-cursor rows the run extracted.
 - `ConnectorXFailed`
 - `PreflightFailed`
 - `BackendChanged`
@@ -562,7 +597,10 @@ amd64 only. On an arm64 host it needs Rosetta (Docker Desktop, or colima with
 host side reaches it through pyodbc and ODBC Driver 18 (`msodbcsql18`, from
 Microsoft's Homebrew tap on macOS), which loads OpenSSL 1.1 or 3 from Homebrew's
 `openssl` prefix; where that now links OpenSSL 4, run pytest with
-`DYLD_LIBRARY_PATH=$(brew --prefix openssl@3)/lib`.
+`DYLD_LIBRARY_PATH=$(brew --prefix openssl@3)/lib`. macOS strips `DYLD_*` variables
+when it starts `/usr/bin/env` or `/bin/bash`, so they do not reach pytest through
+`mise run test:integration`: bring the service up with `docker compose`, then run
+`DB_BRONZE_IT_ENGINES=mssql DYLD_LIBRARY_PATH=... .venv/bin/python -m pytest -m integration`.
 
 The handler-level scenarios of the SQLite suite run against every engine on both
 backends (`test_it_modes.py`, `test_it_keyset.py`, `test_it_paged.py`,
@@ -608,7 +646,11 @@ instance profile (`db2start: command not found`). The compose file mounts an
 `/etc/environment` with `BASH_ENV` pointing at the profile, which su applies; on an
 x86_64 host it changes nothing. The image's fenced user cannot read the instance
 directory there either (SQL1646N), so the harness drops a test's schema object by
-object rather than through `SYSPROC.ADMIN_DROP_SCHEMA`.
+object rather than through `SYSPROC.ADMIN_DROP_SCHEMA`. The 12.1.5 setup's own `CREATE DATABASE` can
+also segfault under Rosetta (seen once at review, 25 Nov 2026) while the log still says
+"Setup has completed"; the healthcheck then never passes. Running
+`su - db2inst1 -c '. ~/sqllib/db2profile; db2 create db BRONZE'` in the container
+creates it, and the waiting run carries on.
 
 ### 10.1 Landed types (*integration*, 24 Nov 2026)
 
@@ -742,7 +784,7 @@ on every decimal, which is why a backend change fails with `BackendChanged`
 | S6 | Do Instant Client (Basic) and `libaio` work on AL2023? Can thick-mode oracledb and ConnectorX share `libclntsh` in one process? | Pin an Instant Client version known to work; isolate Oracle in its own image. **First part answered (image smoke test, 24 Nov 2026, linux/amd64 under emulation):** Instant Client Basic 23.26.4.0.0 with `libaio-0.3.111` (AL2023 package) loads. In one process, oracledb 26.1.0 enters thick mode (client 23.26.4) and ConnectorX 0.4.6 then loads `libclntsh` too: an Oracle connection to a closed port fails with `ORA-12541` from OCI, not `DPI-1047`. Same image: unixODBC 2.3.9 (AL2023) with msodbcsql18 18.7.1.1 from the RHEL 9 repo, listed by `pyodbc.drivers()`; ibm_db 3.3.0 imports once `pam` is installed. **Second part answered (integration, ticket 16):** yes. Against Oracle Free 23.26, one invocation lands one table through thick-mode oracledb and another through ConnectorX in the same process, inside the image under the emulator, and the whole Oracle suite runs both backends in one pytest process inside the image. |
 | S7 | What is peak memory for the largest real table under ConnectorX streaming? | Smaller `batch_size`, keyset chunking, or more Lambda memory. **First input (integration, 24 Nov 2026):** the whole Postgres and MySQL scenario suite (tables of tens of rows, so this is the fixed cost of a run, not the data) peaks at **588 MiB** for the image container across the session (cgroup `memory.peak`: emulator plus the warm Python runtime, amd64 under QEMU, where jemalloc cannot return memory, so an overestimate) and **254 MiB** RSS for the host pytest process running the handler in-process. A 1 GB function has room for the fixed cost; the per-table figure still needs a run on the largest real table. The SQL Server suite (ticket 15) peaks at **318 MiB** for the image container, amd64 under Rosetta rather than QEMU, and 124 MiB RSS for the host process. |
 | S8 | Is egress to packages.microsoft.com and the Oracle download host allowed from the build pipeline? | Internal mirrors through the build arguments. |
-| S9 | What are the per-dialect minimum server versions? | **Answered for Postgres and MySQL (integration):** the whole integration suite passes on Postgres 11.16, 12.22 and 17.12, and on MySQL 8.0.46 and 8.4.13. Preflight minimums: Postgres 11, MySQL 8.0. Older series were not run (Postgres 10 and MySQL 5.7 are long out of vendor support). **SQL Server (integration):** the whole suite, both backends, passes on 2017 (14.0.3570.2, CU 31), 2019 (15.0.4510.2) and 2022 (16.0.4325.4, CU 28), on the host, and on 2022 inside the image as well. Preflight minimum: SQL Server 2017 (version 14); SQL Server on Linux, and so the compose stack, starts there. **Oracle (integration, ticket 16):** the whole suite passes on Oracle Free 23.26 (`23.26.0.0`), so the preflight minimum is **Oracle 23**, which fails a 19c or 21c server at preflight. That is a floor from evidence, not a claim that 19c fails: the older series exist only as x86_64 images (`gvenzl/oracle-xe:21-slim-faststart`, `:18-slim-faststart`), and on this arm64 host their PMON does not start under Rosetta (`ORA-00443`). **Still open:** run `DB_BRONZE_IT_ORACLE_IMAGE=gvenzl/oracle-xe:21-slim-faststart DB_BRONZE_IT_ORACLE_SERVICE=XEPDB1 mise run test:integration --inside --engines oracle` (and `:18`) on an x86_64 Docker host, and lower the minimum to what passes; the matrix leaves out the 23ai BOOLEAN and JSON below 23. 19c, the long-term release, has no public image. **Db2 (integration, ticket 17):** the whole Db2 suite (pyarrow) passes inside the image on Db2 Community 12.1.5.0 and on 11.5.5.1, the oldest Community image published (`icr.io/db2_community/db2` has 11.5.5.1 to 12.1.5.0), so the preflight minimum is **Db2 11.5**. Older series (11.1, 10.5) have no Community image and were not run. To repeat the 11.5 run: `DB_BRONZE_IT_DB2_IMAGE=icr.io/db2_community/db2:11.5.5.1 mise run test:integration --inside --engines db2`; under colima's Rosetta the RHEL 7 based 11.5 image does not create the database by itself (its su skips pam_env, so the compose fix does not reach it), so once its log says "Setup has completed" run `su - db2inst1 -c '. ~/sqllib/db2profile; db2start; db2 create db BRONZE'` in the container. |
+| S9 | What are the per-dialect minimum server versions? | **Answered for Postgres and MySQL (integration):** the whole integration suite passes on Postgres 11.16, 12.22 and 17.12, and on MySQL 8.0.46 and 8.4.13. Preflight minimums: Postgres 11, MySQL 8.0. Older series were not run (Postgres 10 and MySQL 5.7 are long out of vendor support). **SQL Server (integration):** the whole suite, both backends, passes on 2017 (14.0.3570.2, CU 31), 2019 (15.0.4510.2) and 2022 (16.0.4325.4, CU 28), on the host, and on 2022 inside the image as well. Preflight minimum: SQL Server 2017 (version 14); SQL Server on Linux, and so the compose stack, starts there. **Oracle (integration, ticket 16):** the whole suite passes on Oracle Free 23.26 (`23.26.0.0`), which first set the preflight minimum to Oracle 23. **Review decision (25 Nov 2026):** the minimum is lowered to **Oracle 19**, so 19c (the long-term release) and 21c are accepted, but they are **unverified**: no integration run has proven them. The older series exist only as x86_64 images (`gvenzl/oracle-xe:21-slim-faststart`, `:18-slim-faststart`), and on this arm64 host their PMON does not start under Rosetta (`ORA-00443`). **Still open:** run `DB_BRONZE_IT_ORACLE_IMAGE=gvenzl/oracle-xe:21-slim-faststart DB_BRONZE_IT_ORACLE_SERVICE=XEPDB1 mise run test:integration --inside --engines oracle` (and `:18`) on an x86_64 Docker host, and raise the minimum if they fail; the matrix leaves out the 23ai BOOLEAN and JSON below 23. 19c, the long-term release, has no public image. **Db2 (integration, ticket 17):** the whole Db2 suite (pyarrow) passes inside the image on Db2 Community 12.1.5.0 and on 11.5.5.1, the oldest Community image published (`icr.io/db2_community/db2` has 11.5.5.1 to 12.1.5.0), so the preflight minimum is **Db2 11.5**. Older series (11.1, 10.5) have no Community image and were not run. To repeat the 11.5 run: `DB_BRONZE_IT_DB2_IMAGE=icr.io/db2_community/db2:11.5.5.1 mise run test:integration --inside --engines db2`; under colima's Rosetta the RHEL 7 based 11.5 image does not create the database by itself (its su skips pam_env, so the compose fix does not reach it), so once its log says "Setup has completed" run `su - db2inst1 -c '. ~/sqllib/db2profile; db2start; db2 create db BRONZE'` in the container. |
 
 Still not validated, as for `api_bronze`: real S3, real Lambda in a VPC
 against the production databases, and Glue 6.0 reading typed bronze.

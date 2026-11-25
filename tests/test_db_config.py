@@ -213,9 +213,8 @@ def test_cursor_value_rules(changes, match):
 PARTITION = {"column": "TransactionId", "num": 4}
 
 
-@pytest.mark.parametrize("backend", ["pyarrow", "sqlalchemy"])
-def test_partition_needs_connectorx(backend):
-    message = rejected(config("postgres", backend=backend, partition=PARTITION))
+def test_partition_needs_connectorx():
+    message = rejected(config("postgres", backend="pyarrow", partition=PARTITION))
     assert "partition is a ConnectorX read" in message and 'set "backend": "connectorx"' in message
 
 

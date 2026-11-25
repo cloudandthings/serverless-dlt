@@ -93,8 +93,21 @@ def test_partition_with_keyset_is_rejected_when_the_config_loads(invoke):
 def test_non_integer_partition_column_fails_the_preflight(bucket, invoke):
     from db_bronze.errors import PreflightError
 
-    with pytest.raises(PreflightError, match=r"table transactions: partition column 'Branch Code' is not an integer"):
+    bad = r"table transactions:\s+- partition column 'Branch Code' is not an integer"
+    with pytest.raises(PreflightError, match=bad):
         invoke(TRANSACTIONS | {"partition": {"column": "Branch Code", "num": 2}}, mode="full")
+    assert files(bucket) == []
+
+
+@pytest.mark.parametrize(
+    "column,finding",
+    [("Branch Code", "partition column 'Branch Code' is not an integer"),
+     ("Missing", "partition column 'Missing' is not a column of the table")],
+)
+def test_validate_reports_a_bad_partition_column_without_extracting(bucket, invoke, column, finding):
+    report = invoke(TRANSACTIONS | {"partition": {"column": column, "num": 2}}, mode="validate")
+    assert report["ok"] is False
+    assert any(finding in f for f in report["tables"][0]["findings"])
     assert files(bucket) == []
 
 

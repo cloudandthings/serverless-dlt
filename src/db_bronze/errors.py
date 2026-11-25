@@ -16,9 +16,30 @@ class DbBronzeError(Exception):
 
 
 class PreflightError(DbBronzeError):
-    """Reflection checks failed at the start of a run."""
+    """Reflection checks failed at the start of a run, before anything was extracted.
+
+    Built from `findings` (table name -> what is wrong with it), or from one message.
+    """
 
     metric = "PreflightFailed"
+
+    def __init__(self, findings: dict[str, list[str]] | str):
+        if isinstance(findings, str):
+            self.findings: dict[str, list[str]] = {}
+            super().__init__(findings)
+            return
+        self.findings = findings
+        if len(findings) == 1:
+            self.table = next(iter(findings))
+        lines = [f"preflight failed for {len(findings)} table(s); nothing was extracted:"]
+        for name, items in findings.items():
+            lines.append(f"  table {name}:")
+            lines.extend(f"    - {item}" for item in items)
+        lines.append(
+            'Fix each table by setting "backend": "pyarrow" on it, or by excluding the offending column '
+            'with "columns" (or casting it in "query").'
+        )
+        super().__init__("\n".join(lines))
 
 
 class ConnectorXFailed(DbBronzeError):

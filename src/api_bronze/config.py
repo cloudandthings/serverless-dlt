@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
+
+from bronze_common.config import strict_builder
 
 from .envelope import CURSOR_TYPES, parse_cursor
 from .split import path_keys
@@ -26,17 +28,7 @@ class ConfigError(ValueError):
     pass
 
 
-def _build(cls, data: Any, where: str, **overrides):
-    if not isinstance(data, dict):
-        raise ConfigError(f"{where}: expected an object, got {type(data).__name__}")
-    known = {f.name for f in fields(cls)}
-    unknown = sorted(set(data) - known)
-    if unknown:
-        raise ConfigError(f"{where}: unknown keys {unknown}; allowed {sorted(known)}")
-    try:
-        return cls(**{**data, **overrides})
-    except TypeError as e:
-        raise ConfigError(f"{where}: {e}") from e
+_build = strict_builder(ConfigError)
 
 
 def parse_utc(value: str | datetime, where: str) -> datetime:
