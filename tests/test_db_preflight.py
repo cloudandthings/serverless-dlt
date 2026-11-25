@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.dialects import mssql, oracle
 from sqlalchemy.dialects import postgresql as pg
 
 from db_bronze.extract import register_mssql_types
-from db_bronze.preflight import MIN_SERVER_VERSION, PreflightError, column_findings, server_version_finding
+from db_bronze.preflight import (
+    MIN_SERVER_VERSION,
+    PreflightError,
+    column_findings,
+    server_version,
+    server_version_finding,
+)
 
 OK = [("Id", sa.Integer()), ("Name", sa.String(20)), ("Amount", sa.Numeric(18, 2)), ("At", sa.DateTime())]
 
@@ -209,3 +217,11 @@ def test_a_query_tables_columns_are_not_checked_their_types_are_not_reflected(tm
     })
     _, [report] = preflight(cfg, cfg.tables, engine)
     assert report.findings == []
+
+
+def test_db2s_version_is_read_from_the_level_its_driver_reports():
+    """ibm_db_sa reports ('DB2/LINUXX8664', '12.01.0500') (integration, Db2); as numbers, that is (12, 1, 500)."""
+    db2 = SimpleNamespace(name="ibm_db_sa", server_version_info=("DB2/LINUXX8664", "11.05.0900"))
+    assert server_version(db2) == (11, 5, 900)
+    assert server_version_finding("db2", (11, 5, 900), {"db2": (12, 1)}) is not None
+    assert server_version(SimpleNamespace(name="postgresql", server_version_info=(17, 2))) == (17, 2)

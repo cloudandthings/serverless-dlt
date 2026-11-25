@@ -30,6 +30,12 @@ image, on the compose network (`DB_BRONZE_IT_NETWORK=compose`), so the handler
 and ConnectorX run in-process with Instant Client. Oracle's spike tests that call
 ConnectorX directly need it.
 
+Db2 (ticket 17) is in the compose profile `db2`; a test's "database" is a fresh
+schema in database BRONZE. Seeding and the handler both need ibm_db, which exists
+for x86_64 Linux only, so elsewhere the Db2 tests skip: run them `--inside`. A test
+that drives ConnectorX (the `connectorx` marker, or `backend` connectorx) skips on
+Db2, which ConnectorX does not read.
+
 """
 
 from __future__ import annotations
@@ -58,6 +64,7 @@ import sqlalchemy as sa
 # Before any Oracle connection: with ORACLE_CLIENT_LIB_DIR set (inside the image), the handler
 # module puts oracledb into thick mode, process-wide, as a Lambda cold start does (D10).
 import db_bronze.handler  # noqa: F401
+from db_bronze.extract import prepare_engine
 
 COMPOSE_FILE = Path(__file__).with_name("compose.yaml")
 PASSWORD = "bronze-it"
@@ -135,7 +142,34 @@ class Engine:
 
 def connectorx_in_process(dialect: str) -> bool:
     """Whether this process can call ConnectorX on `dialect` directly (Oracle: only with Instant Client)."""
+    if dialect in NO_CONNECTORX:
+        return False
     return dialect != "oracle" or bool(os.environ.get("ORACLE_CLIENT_LIB_DIR"))
+
+
+def connectorx_skip_reason(dialect: str) -> str | None:
+    """Why this run cannot exercise ConnectorX on `dialect`, or None."""
+    if dialect in NO_CONNECTORX:
+        return f"ConnectorX does not support {dialect} (DESIGN-db.md 3.1): it runs on pyarrow only"
+    if not connectorx_in_process(dialect):
+        return f"{dialect}: ConnectorX needs Instant Client in this process; run with --inside"
+    return None
+
+
+# Engines ConnectorX does not read: the config rejects `backend: connectorx` there (DESIGN-db.md 6.1).
+NO_CONNECTORX = ("db2",)
+
+
+def _ibm_db_missing() -> str | None:
+    try:
+        import ibm_db  # noqa: F401
+    except ImportError:
+        return (
+            f"Db2 needs ibm_db, whose wheels are x86_64 Linux only (DESIGN-db.md 3.3), so not on this "
+            f"{platform.system()} {platform.machine()} host: run `mise run test:integration --inside --engines db2` "
+            "(pytest inside the image), or on an x86_64 Linux host"
+        )
+    return None
 
 
 @dataclass(frozen=True)
@@ -197,6 +231,51 @@ class OracleEngine(Engine):
             conn.exec_driver_sql(f"DROP USER {database} CASCADE")
 
 
+@dataclass(frozen=True)
+class Db2Engine(Engine):
+    """Db2 Community (LUW). A test's "database" is a fresh schema in one database, made current with `CurrentSchema`.
+
+    Creating a Db2 database takes minutes, and its users are operating-system
+    users, so a schema is what a test can get fresh. Everything a test needs,
+    seeding included, goes through ibm_db, which exists for x86_64 Linux only.
+    """
+
+    def unavailable(self) -> str | None:
+        return _ibm_db_missing()
+
+    def url(self, database: str) -> sa.URL:
+        return super().url(self.admin_database).update_query_dict({"CurrentSchema": database.upper()})
+
+    def admin(self) -> sa.Engine:
+        return sa.create_engine(super().url(self.admin_database))  # ibm_db_sa has no AUTOCOMMIT level
+
+    def connection(self, database: str, *, in_network: bool = IN_NETWORK) -> dict:
+        return super().connection(self.admin_database, in_network=in_network) | {
+            "driver_options": {"CurrentSchema": database.upper()}
+        }
+
+    def create_database(self, admin: sa.Engine, database: str) -> None:
+        with admin.begin() as conn:
+            conn.exec_driver_sql(f"CREATE SCHEMA {database}")
+
+    def drop_database(self, admin: sa.Engine, database: str) -> None:
+        """Every routine, view and table in the schema, then the schema.
+
+        Not SYSPROC.ADMIN_DROP_SCHEMA: it runs fenced, and the Community image's
+        fenced user cannot read the instance directory under Rosetta (SQL1646N).
+        """
+        schema = database.upper()
+        with admin.begin() as conn:
+            objects = conn.exec_driver_sql(
+                "SELECT 'SPECIFIC FUNCTION', specificname FROM SYSCAT.ROUTINES WHERE routineschema = ? "
+                "UNION ALL SELECT CASE type WHEN 'V' THEN 'VIEW' ELSE 'TABLE' END, tabname FROM SYSCAT.TABLES "
+                "WHERE tabschema = ? ORDER BY 1",
+                (schema, schema),
+            ).all()
+            for kind, name in objects:
+                conn.exec_driver_sql(f'DROP {kind} "{schema}"."{name}"')
+            conn.exec_driver_sql(f'DROP SCHEMA "{schema}" RESTRICT')
+
 ENGINES = {
     "postgres": Engine(
         "postgres", "postgres", int(os.environ.get("DB_BRONZE_IT_PG_PORT", "55432")), "postgres", "postgres",
@@ -214,6 +293,9 @@ ENGINES = {
     ),
     "oracle": OracleEngine(
         "oracle", "oracle", int(os.environ.get("DB_BRONZE_IT_ORACLE_PORT", "51521")), "system", "", "oracle+oracledb",
+    ),
+    "db2": Db2Engine(
+        "db2", "db2", int(os.environ.get("DB_BRONZE_IT_DB2_PORT", "55000")), "db2inst1", "BRONZE", "db2+ibm_db",
     ),
 }
 if os.environ.get("DB_BRONZE_IT_ENGINES"):
@@ -259,7 +341,7 @@ class SourceDB:
         self.dialect = engine.dialect
         self.database = database
         self.bucket = bucket
-        self.sa = sa.create_engine(engine.url(database))
+        self.sa = prepare_engine(sa.create_engine(engine.url(database)))  # set up as db_bronze sets up its own
         self.metadata = sa.MetaData()
 
     def connection(self, **overrides) -> dict:
@@ -367,6 +449,12 @@ def source(request, bucket: Path):
     """A fresh, empty database on each engine in turn; dropped when the test ends."""
     if reason := skip_reason(request.param):
         pytest.skip(reason)
+    callspec = getattr(request.node, "callspec", None)
+    on_connectorx = request.node.get_closest_marker("connectorx") or (
+        callspec is not None and callspec.params.get("backend") == "connectorx"
+    )
+    if on_connectorx and request.param in NO_CONNECTORX:
+        pytest.skip(connectorx_skip_reason(request.param))
     request.getfixturevalue("compose")
     engine = ENGINES[request.param]
     database = f"it_{uuid.uuid4().hex[:12]}"

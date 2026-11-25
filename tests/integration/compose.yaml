@@ -64,3 +64,34 @@ services:
       interval: 5s
       start_period: 30s
       retries: 120
+
+  # Db2 Community (LUW), x86_64 only, as is ibm_db: on an arm64 host it needs Rosetta (colima
+  # --vz-rosetta, Docker Desktop), and its tests run only where ibm_db imports (`--inside`, or an
+  # x86_64 Linux host). The image creates database BRONZE on first start, which takes minutes;
+  # each test gets a fresh schema in it. Db2 needs a privileged container. A profile of its own,
+  # like Oracle, so host runs on a Mac do not start it.
+  db2:
+    profiles: [db2]
+    image: ${DB_BRONZE_IT_DB2_IMAGE:-icr.io/db2_community/db2:12.1.5.0}
+    platform: linux/amd64
+    privileged: true
+    environment:
+      LICENSE: accept
+      DB2INSTANCE: db2inst1
+      DB2INST1_PASSWORD: bronze-it
+      DBNAME: BRONZE
+      ARCHIVE_LOGS: "false"
+      AUTOCONFIG: "false"
+    ports: ["127.0.0.1:${DB_BRONZE_IT_DB2_PORT:-55000}:50000"]
+    # The image's setup runs `su - db2inst1 -c "db2start"` and so on, relying on a login shell to read
+    # the instance profile. Under Rosetta without binfmt's preserve-argv0 flag (colima --vz-rosetta)
+    # su's "-bash" loses its dash: no login shell, no profile, "db2start: command not found", and no
+    # database. su reads /etc/environment (pam_env), so BASH_ENV makes every such shell read the profile.
+    # Not on the 11.5 images (RHEL 7, whose su skips pam_env for root): there, under Rosetta, start
+    # it by hand once the setup has finished (DESIGN-db.md S9).
+    volumes: ["./db2-environment:/etc/environment:ro"]
+    healthcheck:
+      test: ["CMD-SHELL", "su - db2inst1 -c '. ~/sqllib/db2profile && db2 connect to BRONZE' >/dev/null 2>&1"]
+      interval: 10s
+      start_period: 60s
+      retries: 180

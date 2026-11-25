@@ -437,3 +437,11 @@ def test_the_lambda_budget_skips_streams_that_cannot_stop_early(dialect, table, 
 
     cfg = SourceConfig.from_dict(config(dialect, **table))
     assert time_budget(cfg, RunRequest(), cfg.tables[0], 60) == budget
+
+
+@pytest.mark.parametrize("level", ["SNAPSHOT", "AUTOCOMMIT"])
+def test_db2_takes_only_the_four_standard_isolation_levels(level):
+    # ibm_db_sa knows Db2's levels only; the standard four are translated (integration, Db2).
+    message = rejected(config("db2", connection={"isolation_level": level}))
+    assert f"isolation_level {level!r}" in message and "db2" in message
+    assert "READ UNCOMMITTED" in message and "SERIALIZABLE" in message

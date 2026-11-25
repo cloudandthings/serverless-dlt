@@ -70,6 +70,19 @@ def sqlalchemy_url(conn: ConnectionConfig) -> sa.URL:
     )
 
 
+# ibm_db_sa knows only Db2's own level names. Db2's Repeatable Read (RR) is the standard's SERIALIZABLE,
+# and the standard's REPEATABLE READ is Db2's Read Stability (RS); ibm_db_sa would take "REPEATABLE READ"
+# as RR and reject the other standard names (integration, Db2).
+DB2_ISOLATION_NAMES = {"READ UNCOMMITTED": "UR", "READ COMMITTED": "CS", "REPEATABLE READ": "RS", "SERIALIZABLE": "RR"}
+
+
+def engine_isolation_level(conn: ConnectionConfig) -> str | None:
+    """`isolation_level` as the SQLAlchemy dialect spells it, or None to leave the driver's default."""
+    if conn.isolation_level is None or conn.dialect != "db2":
+        return conn.isolation_level
+    return DB2_ISOLATION_NAMES[conn.isolation_level]
+
+
 def _connectorx_options(conn: ConnectionConfig) -> dict[str, str]:
     """`driver_options` spelled the ConnectorX way, where ConnectorX has the same option."""
     given = _driver_options(conn)

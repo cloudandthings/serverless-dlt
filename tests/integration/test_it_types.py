@@ -18,7 +18,9 @@ import connectorx as cx
 import pyarrow.parquet as pq
 import pytest
 
-from .conftest import connectorx_in_process
+from db_bronze import preflight
+
+from .conftest import connectorx_skip_reason
 
 pytestmark = pytest.mark.integration
 
@@ -192,6 +194,38 @@ MATRIX = {
         "c_geography": ("geography", "geography::Point(1, 2, 4326)", False),
         "c_geometry": ("geometry", "geometry::Point(1, 2, 0)", False),
     },
+    # ConnectorX does not read Db2 at all (the third field is False throughout): pyarrow only.
+    "db2": {
+        "c_smallint": ("smallint", "1", False),
+        "c_integer": ("integer", "2", False),
+        "c_bigint": ("bigint", "3", False),
+        "c_decimal_18_4": ("decimal(18,4)", "12345678901234.5678", False),
+        "c_decimal_31_12": ("decimal(31,12)", "1234567890123456789.123456789012", False),
+        "c_decimal_31_0": ("decimal(31,0)", "1234567890123456789012345678901", False),
+        "c_decfloat16": ("decfloat(16)", "1.234567890123456", False),
+        # a numeric literal holds 31 digits at most
+        "c_decfloat34": ("decfloat(34)", "DECFLOAT('1.234567890123456789012345678901234', 34)", False),
+        "c_real": ("real", "1.5", False),
+        "c_double": ("double", "2.5", False),
+        "c_boolean": ("boolean", "true", False),
+        "c_char": ("char(5)", "'c'", False),
+        "c_varchar": ("varchar(20)", "'v'", False),
+        "c_clob": ("clob", "'cl'", False),
+        "c_graphic": ("graphic(5)", "'g'", False),
+        "c_vargraphic": ("vargraphic(20)", "'\u00fcn\u00ef'", False),
+        "c_dbclob": ("dbclob", "'db'", False),
+        "c_char_bit": ("char(4) for bit data", "x'01020304'", False),
+        "c_varchar_bit": ("varchar(8) for bit data", "x'0102'", False),
+        "c_binary": ("binary(4)", "bx'01020304'", False),
+        "c_varbinary": ("varbinary(8)", "bx'0102'", False),
+        "c_blob": ("blob", "blob(x'0102')", False),
+        "c_date": ("date", "'2026-11-20'", False),
+        "c_time": ("time", "'08:00:01'", False),
+        "c_timestamp": ("timestamp", "'2026-11-20 08:00:00.123456'", False),
+        "c_timestamp_0": ("timestamp(0)", "'2026-11-20 08:00:01'", False),
+        "c_timestamp_12": ("timestamp(12)", "'2026-11-20 08:00:00.123456789012'", False),
+        "c_xml": ("xml", "xmlparse(document '<a/>')", False),
+    },
 }
 
 # Statements a matrix needs before its table: the types its columns use.
@@ -301,6 +335,17 @@ LANDED = {
         "c_clob": "string", "c_blob": "large_binary",
         "c_date": "timestamp[us]", "c_timestamp": "timestamp[us]", "c_timestamp_3": "timestamp[us]",
     },
+    ("db2", "pyarrow"): {
+        "c_smallint": "int64", "c_integer": "int64", "c_bigint": "int64",
+        "c_decimal_18_4": "decimal128(18, 4)", "c_decimal_31_12": "decimal128(31, 12)",
+        "c_decimal_31_0": "decimal128(31, 0)", "c_decfloat16": "string", "c_decfloat34": "string",
+        "c_real": "double", "c_double": "double", "c_boolean": "bool",
+        "c_char": "string", "c_varchar": "string", "c_clob": "string", "c_graphic": "string",
+        "c_vargraphic": "string", "c_dbclob": "string", "c_char_bit": "binary", "c_varchar_bit": "binary",
+        "c_binary": "binary", "c_varbinary": "binary", "c_blob": "binary",
+        "c_date": "date32[day]", "c_time": "time64[us]", "c_timestamp": "timestamp[us]",
+        "c_timestamp_0": "timestamp[us]", "c_timestamp_12": "timestamp[us]", "c_xml": "string",
+    },
 }
 
 # Values that must survive exactly: the wide decimals, and what the pyarrow backend turns into text.
@@ -337,6 +382,19 @@ EXACT = {
         "c_date": datetime(2026, 11, 20, 8, 0, 1),
         "c_timestamp": datetime(2026, 11, 20, 8, 0, 0, 123456),
         "c_char": "c    ",
+    },
+    "db2": {
+        "c_decimal_31_12": Decimal("1234567890123456789.123456789012"),  # through a float, it would not be
+        "c_decimal_31_0": Decimal("1234567890123456789012345678901"),
+        "c_decfloat34": "1.234567890123456789012345678901234",
+        "c_double": 2.5,
+        "c_char": "c    ",
+        "c_vargraphic": "\u00fcn\u00ef",
+        "c_char_bit": b"\x01\x02\x03\x04",
+        "c_varchar_bit": b"\x01\x02",
+        "c_binary": b"\x01\x02\x03\x04",
+        "c_timestamp_12": datetime(2026, 11, 20, 8, 0, 0, 123456),  # picoseconds truncated to the microsecond
+        "c_xml": '\ufeff<?xml version="1.0" encoding="UTF-16" ?><a/>',  # as the driver serializes it
     },
 }
 EXACT_PYARROW = {
@@ -383,6 +441,7 @@ EXACT_PYARROW = {
         "c_bfile": "DATA_PUMP_DIR/x.txt",
         "c_boolean": True,
     },
+    "db2": {},  # pyarrow only: EXACT holds them
 }
 
 # Columns no backend lands losslessly: preflight fails them on pyarrow as well. pyodbc reads a
@@ -396,7 +455,7 @@ SINCE = {"oracle": {"c_boolean": (23,), "c_json": (23,)}}
 
 def server_version(source) -> tuple[int, ...]:
     with source.sa.connect():
-        return source.sa.dialect.server_version_info
+        return preflight.server_version(source.sa.dialect)
 
 
 def seed_matrix(source) -> dict[str, tuple[str, str, bool]]:
@@ -407,7 +466,7 @@ def seed_matrix(source) -> dict[str, tuple[str, str, bool]]:
     values = ", ".join(value for _, value, _ in matrix.values())
     source.execute(
         *SETUP.get(source.dialect, []),
-        f"CREATE TABLE type_matrix (id integer PRIMARY KEY, {columns})",
+        f"CREATE TABLE type_matrix (id integer NOT NULL PRIMARY KEY, {columns})",  # Db2: a key is NOT NULL
         f"INSERT INTO type_matrix VALUES (1, {values})",
         "INSERT INTO type_matrix (id) VALUES (2)",  # every type NULL as well
     )
@@ -439,8 +498,8 @@ FAILS_LOUDLY = {"oracle": {"c_number_38": "PosOverflow"}}  # NUMBER(p, 0) is rea
 
 
 def connectorx_here(source) -> None:
-    if not connectorx_in_process(source.dialect):
-        pytest.skip(f"{source.dialect}: ConnectorX needs Instant Client in this process; run with --inside")
+    if reason := connectorx_skip_reason(source.dialect):
+        pytest.skip(reason)
 
 
 def test_the_preflight_fails_exactly_the_columns_a_backend_cannot_land(source, run, backend):
@@ -460,6 +519,7 @@ def denied(matrix: dict[str, tuple[str, str, bool]]) -> set[str]:
     return {name for name, (_, _, cx_reads) in matrix.items() if not cx_reads}
 
 
+@pytest.mark.connectorx
 def test_every_column_connectorx_cannot_read_fails_the_preflight_naming_each_one(source, run):
     matrix = seed_matrix(source)
     table = {"name": "type_matrix", "table": "type_matrix", "backend": "connectorx"}

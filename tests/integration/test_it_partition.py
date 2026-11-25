@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 from .conftest import fails
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.connectorx]
 
 TRANSACTIONS = {
     "name": "transactions",
