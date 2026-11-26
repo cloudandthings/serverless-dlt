@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#MISE description="tflint (terraform + AWS rulesets, terraform/.tflint.hcl) over every module and example"
+set -euo pipefail
+cd "$MISE_PROJECT_ROOT/terraform"
+
+config="$MISE_PROJECT_ROOT/terraform/.tflint.hcl"
+tflint --init --config="$config"
+tflint --config="$config" --recursive

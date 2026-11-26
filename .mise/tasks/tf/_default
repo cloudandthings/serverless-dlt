@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description="All Terraform checks: fmt, validate, test (mocked AWS), lint (needs network for providers/plugins; not part of `check`)"
+#MISE depends=["tf:fmt", "tf:test", "tf:lint"]
+set -euo pipefail

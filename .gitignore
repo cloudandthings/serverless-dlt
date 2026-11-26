@@ -248,3 +248,12 @@ __marimo__/
 # mise (personal overrides)
 mise.local.toml
 .mise/config.local.toml
+
+# Terraform (examples' .terraform.lock.hcl files are committed)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+.tflint.d/
+terraform/modules/**/.terraform.lock.hcl

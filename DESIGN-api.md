@@ -84,7 +84,7 @@ because of the empty-page behaviour in §5.4.
 
 ### 5.1 Arrow items bypass the normaliser
 
-The resource yields `pyarrow.Table`s with a fixed schema (README "Row schema").
+The resource yields `pyarrow.Table`s with a fixed schema (README "Row schema (one row per API record)").
 dlt writes Arrow items to Parquet as given: no flattening, renaming, coercion
 or timestamp rewriting. It still applies incremental filtering on the cursor
 column, writes the layout, and records `_dlt_loads` and state. The REST client

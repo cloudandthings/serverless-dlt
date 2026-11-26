@@ -9,6 +9,8 @@
 python = "3.12"        # pyproject: requires-python >=3.12,<3.13; Lambda image is python:3.12
 uv = "0.13"
 java = "temurin-21"    # only for the Spark (silver) tests: pyspark 4.1 needs Java 17+
+terraform = "1.17"     # terraform/ examples: tf:fmt, tf:validate
+tflint = "0.66"        # tf:lint
 
 [env]
 # Make uv use mise's interpreter instead of one it downloads itself

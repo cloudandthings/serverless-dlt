@@ -1,0 +1,5 @@
+region       = "eu-west-1"
+name_prefix  = "acme-data"
+image_tag    = "2026-11-26-7b89afe"
+architecture = "arm64"
+alarm_email  = "data-alerts@example.com"

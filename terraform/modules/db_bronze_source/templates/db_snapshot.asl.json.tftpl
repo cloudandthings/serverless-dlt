@@ -1,0 +1,116 @@
+{
+  "Comment": "db_bronze paged snapshot of one table (DESIGN-db.md D8, 7.5): plan -> Map over pages -> finalize. Execution input: {\"source_id\": \"core_banking_snapshot\", \"table\": \"transactions\", \"page_size\": 500000}. The source config must use its own pipeline_name (here core_banking_snapshot), never the incremental's: pages write dlt state rows and run in parallel. Replace the FunctionName with the snapshot function's ARN.",
+  "StartAt": "Plan",
+  "States": {
+    "Plan": {
+      "Type": "Task",
+      "Comment": "COUNT(*), then pages [{table, offset, limit}] (the last one open-ended), a snapshot_id and the partition_date",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${function_arn}",
+        "Payload": {
+          "source_id.$": "$.source_id",
+          "mode": "plan",
+          "plan": "snapshot",
+          "tables.$": "States.Array($.table)",
+          "page_size.$": "$.page_size"
+        }
+      },
+      "ResultSelector": {
+        "snapshot_id.$": "$.Payload.snapshot_id",
+        "partition_date.$": "$.Payload.partition_date",
+        "pages.$": "$.Payload.pages"
+      },
+      "ResultPath": "$.plan",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "Pages"
+    },
+    "Pages": {
+      "Type": "Map",
+      "Comment": "One invocation per page. MaxConcurrency bounds the load on the source database: deep OFFSETs get slower.",
+      "ItemsPath": "$.plan.pages",
+      "MaxConcurrency": ${max_concurrency},
+      "ItemSelector": {
+        "source_id.$": "$.source_id",
+        "snapshot_id.$": "$.plan.snapshot_id",
+        "partition_date.$": "$.plan.partition_date",
+        "page.$": "$$.Map.Item.Value"
+      },
+      "ItemProcessor": {
+        "ProcessorConfig": {"Mode": "INLINE"},
+        "StartAt": "Page",
+        "States": {
+          "Page": {
+            "Type": "Task",
+            "Comment": "mode=full with page: lands under mode=full/<partition_date>, returns its load ids. A retried page lands again under a new load id; only the returned one is listed in the manifest, so the other is ignored by silver.",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "${function_arn}",
+              "Payload": {
+                "source_id.$": "$.source_id",
+                "mode": "full",
+                "tables.$": "States.Array($.page.table)",
+                "page": {
+                  "offset.$": "$.page.offset",
+                  "limit.$": "$.page.limit"
+                },
+                "snapshot_id.$": "$.snapshot_id",
+                "partition_date.$": "$.partition_date"
+              }
+            },
+            "ResultSelector": {
+              "load_ids.$": "$.Payload.load_ids"
+            },
+            "Retry": [
+              {
+                "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+              }
+            ],
+            "End": true
+          }
+        }
+      },
+      "ResultPath": "$.pages",
+      "Next": "Finalize"
+    },
+    "Finalize": {
+      "Type": "Task",
+      "Comment": "Writes _manifests/<table>/<snapshot_id>.json. Until it exists, silver ignores the snapshot's loads.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${function_arn}",
+        "Payload": {
+          "source_id.$": "$.source_id",
+          "mode": "finalize",
+          "table.$": "$.table",
+          "snapshot_id.$": "$.plan.snapshot_id",
+          "load_ids.$": "$.pages[*].load_ids[*]"
+        }
+      },
+      "ResultSelector": {
+        "snapshot_id.$": "$.Payload.snapshot_id",
+        "load_ids.$": "$.Payload.load_ids",
+        "manifest.$": "$.Payload.manifest"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "End": true
+    }
+  }
+}

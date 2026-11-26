@@ -1,4 +1,6 @@
-"""README-db.md documents everything the code accepts: every config key, event key, mode, error type and metric.
+"""README.md's "Database sources" section documents everything db_bronze accepts.
+
+That is every config key, event key, mode, error type and metric.
 
 A key added to the config or the event without a README entry fails here, so the operator spec cannot
 fall behind the code. (The reverse, nothing documented that is unimplemented, is checked by review.)
@@ -15,7 +17,9 @@ import pytest
 from db_bronze import config, errors, preflight
 from db_bronze.config import EVENT_KEYS, MODES
 
-README = (Path(__file__).resolve().parent.parent / "README-db.md").read_text()
+_TEXT = (Path(__file__).resolve().parent.parent / "README.md").read_text()
+# Only the db_bronze section counts, so an api_bronze key of the same name cannot satisfy a check.
+README = _TEXT.split("\n## Database sources (`db_bronze`)", 1)[1].split("\n## ", 1)[0]
 
 CONFIG_CLASSES = (
     config.SourceConfig,
@@ -37,7 +41,7 @@ def documented(name: str) -> bool:
 @pytest.mark.parametrize("cls", CONFIG_CLASSES, ids=lambda c: c.__name__)
 def test_every_config_key_is_documented(cls):
     missing = [f.name for f in fields(cls) if not documented(f.name)]
-    assert not missing, f"{cls.__name__} keys missing from README-db.md: {missing}"
+    assert not missing, f"{cls.__name__} keys missing from README.md's Database sources section: {missing}"
 
 
 def test_every_event_key_is_documented():
@@ -60,7 +64,7 @@ def test_every_error_type_is_documented_with_a_fix():
     names = {c.__name__ for c in ours if c is not errors.DbBronzeError}
     names |= {config.ConfigError.__name__}
     names |= {"NotImplementedError", "PipelineStepFailed"}
-    section = README.split("## Errors", 1)[1]
+    section = README.split("\n### Errors", 1)[1]
     assert not [n for n in sorted(names) if f"`{n}`" not in section]
 
 

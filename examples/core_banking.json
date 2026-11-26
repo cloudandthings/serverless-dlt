@@ -1,0 +1,32 @@
+{
+  "pipeline_name": "core_banking",
+  "dataset_name": "core_banking",
+  "bucket_url": "s3://bronze-bucket/bronze",
+  "parquet_compression": "zstd",
+  "max_time_s": null,
+  "connection": {
+    "dialect": "mssql",
+    "host": "sql01.corp.example",
+    "port": 1433,
+    "database": "CoreBanking",
+    "username": {"secret_id": "ingest/core_banking", "key": "username"},
+    "password": {"secret_id": "ingest/core_banking", "key": "password"},
+    "auth": {"type": "password"},
+    "driver_options": {"Encrypt": "yes"},
+    "isolation_level": "READ COMMITTED",
+    "naive_timezone": "Africa/Johannesburg"
+  },
+  "defaults": {"backend": null, "batch_size": 50000},
+  "tables": [
+    {
+      "name": "transactions",
+      "schema": "dbo",
+      "table": "Transactions",
+      "primary_key": ["TransactionId"],
+      "where": "BranchCode <> 'TEST'",
+      "cursor": {"column": "UpdatedAt", "type": "timestamp", "initial_value": "2020-01-01T00:00:00Z", "lag": 300},
+      "chunking": {"strategy": "keyset", "order_by": ["UpdatedAt", "TransactionId"], "page_size": 200000}
+    },
+    {"name": "branches", "schema": "dbo", "table": "Branches", "primary_key": ["BranchCode"], "backend": "pyarrow"}
+  ]
+}

@@ -1,0 +1,7 @@
+region         = "eu-west-1"
+name_prefix    = "acme-data"
+image_tag      = "2026-11-26-7b89afe"
+vpc_id         = "vpc-0123456789abcdef0"
+subnet_ids     = ["subnet-0123456789abcdef0", "subnet-0fedcba9876543210"]
+db_cidr_blocks = ["10.20.30.40/32"]
+alarm_email    = "data-alerts@example.com"

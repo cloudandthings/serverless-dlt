@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+#MISE description="Check Terraform formatting under terraform/ (--fix rewrites)"
+#USAGE flag "--fix" help="Rewrite files instead of checking"
+set -euo pipefail
+cd "$MISE_PROJECT_ROOT"
+
+if [[ "${usage_fix:-false}" == "true" ]]; then
+  terraform fmt -recursive terraform/
+else
+  terraform fmt -check -diff -recursive terraform/
+fi

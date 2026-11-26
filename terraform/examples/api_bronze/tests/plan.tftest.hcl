@@ -1,0 +1,64 @@
+# Offline plan of the whole example against a mocked AWS provider: no credentials needed.
+# Behaviour is asserted in the modules' own tests; this proves the example wires together.
+
+mock_provider "aws" {
+  override_during = plan
+
+  mock_data "aws_region" {
+    defaults = { region = "eu-west-1" }
+  }
+  mock_data "aws_caller_identity" {
+    defaults = { account_id = "123456789012" }
+  }
+  mock_data "aws_partition" {
+    defaults = { partition = "aws" }
+  }
+  mock_data "aws_iam_policy_document" {
+    defaults = { json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}" }
+  }
+}
+
+# Bucket names are computed; give the mocks the names the platform would create.
+override_resource {
+  target          = module.platform.aws_s3_bucket.this["bronze"]
+  override_during = plan
+  values          = { id = "test-bronze", arn = "arn:aws:s3:::test-bronze" }
+}
+
+override_resource {
+  target          = module.platform.aws_s3_bucket.this["config"]
+  override_during = plan
+  values          = { id = "test-config", arn = "arn:aws:s3:::test-config" }
+}
+
+variables {
+  name_prefix = "test"
+  image_tag   = "v1"
+}
+
+run "plan" {
+  command = plan
+
+  assert {
+    condition     = output.config_uri == "s3://test-config/sources"
+    error_message = "CONFIG_URI must be the platform's config bucket and prefix."
+  }
+
+  assert {
+    condition = jsonencode(output.grants.vendor_orders.s3_data_urls) == jsonencode([
+      "s3://test-bronze/bronze/vendor",
+      "s3://test-bronze/bronze/_quarantine/vendor_orders",
+    ])
+    error_message = "vendor_orders must be granted its dataset and its quarantine prefix."
+  }
+
+  assert {
+    condition     = output.grants.vendor_orders_backfill.s3_data_urls[1] == "s3://test-bronze/bronze/_quarantine/vendor_orders_backfill"
+    error_message = "The backfill function runs under its own pipeline_name."
+  }
+
+  assert {
+    condition     = jsonencode(output.grants.vendor_countries.secret_ids) == jsonencode(["ingest/vendor"])
+    error_message = "The api_key secret reference must be granted."
+  }
+}

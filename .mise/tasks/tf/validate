@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#MISE description="terraform init (no backend) + validate every module and example. Needs the Terraform registry, no AWS credentials"
+set -euo pipefail
+cd "$MISE_PROJECT_ROOT"
+
+status=0
+for dir in terraform/modules/*/ terraform/examples/*/; do
+  echo "== ${dir}"
+  if ! terraform -chdir="$dir" init -backend=false -input=false -no-color >/dev/null; then
+    terraform -chdir="$dir" init -backend=false -input=false -no-color >&2 || true
+    status=1
+    continue
+  fi
+  terraform -chdir="$dir" validate -no-color || status=1
+done
+exit "$status"

@@ -6,13 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `api_bronze`: a dlt-based AWS Lambda that lands REST API records into an S3 bronze layer as Parquet, **one row per record, with the record's JSON text cut verbatim** from the response body (never parsed and re-serialised). A separate Spark/Glue job (`silver/silver_transform.py`) parses bronze into typed silver columns.
 
-README.md is the operator-facing spec (bronze contract, config reference, run modes, deployment). DESIGN-api.md explains every design decision and the evidence behind it. Read DESIGN-api.md before changing behaviour. `dlt-lambda-ingestion-assessment.md` is the earlier feasibility study (background only).
+README.md is the operator-facing spec for both packages (shared bronze layout, then an "API sources" and a "Database sources" section, then deployment, silver, testing, open items). DESIGN-api.md explains every design decision and the evidence behind it. Read DESIGN-api.md before changing behaviour. `dlt-lambda-ingestion-assessment.md` is the earlier feasibility study (background only).
 
-`db_bronze` is the sibling package for relational sources: typed Parquet with source column names, same bronze layout. Its operator spec is README-db.md and its design record is DESIGN-db.md; read DESIGN-db.md before changing db_bronze behaviour. `tests/test_db_readme.py` fails when a config key, event key, mode, errorType or metric is missing from README-db.md, so update README-db.md in the same change.
+`db_bronze` is the sibling package for relational sources: typed Parquet with source column names, same bronze layout. Its operator spec is README.md's "Database sources" section and its design record is DESIGN-db.md; read DESIGN-db.md before changing db_bronze behaviour. `tests/test_db_readme.py` fails when a config key, event key, mode, errorType or metric is missing from that section (it reads only the text between ``## Database sources (`db_bronze`)`` and the next `## ` heading, and the errors from its `### Errors`), so update README.md in the same change and keep those headings.
 
 ## Commands
 
-Tooling (Python 3.12, uv, Temurin 21 for Spark) is pinned in `mise.toml`. Tasks are bash scripts in `.mise/tasks/`; the path is the task name (`.mise/tasks/docker/build` → `docker:build`, `test/_default` → `test`). Add new tasks there as executable bash files with `#MISE description=...` headers (and `#USAGE` for flags). Don't add inline `[tasks]` to `mise.toml`.
+Tooling (Python 3.12, uv, Temurin 21 for Spark, Terraform and tflint for `tf:*`) is pinned in `mise.toml`. Tasks are bash scripts in `.mise/tasks/`; the path is the task name (`.mise/tasks/docker/build` → `docker:build`, `test/_default` → `test`). Add new tasks there as executable bash files with `#MISE description=...` headers (and `#USAGE` for flags). Don't add inline `[tasks]` to `mise.toml`.
 
 ```sh
 mise install                               # tools
@@ -31,7 +31,10 @@ mise run test:integration --image          # same suite through the emulator in 
 mise run test:integration --inside         # pytest inside the image on the compose network (Oracle ConnectorX spikes, Db2 off x86_64)
 mise run test:integration --engines mssql  # limit engines; --keep leaves them up; --no-build reuses the image; -t tag
 mise run bench                             # split benchmark
+mise run tf                                # Terraform: tf:fmt (--fix), tf:validate, tf:test (mocked AWS), tf:lint; needs network, not in `check`
 ```
+
+`terraform/` holds deployment modules and examples (see terraform/README.md). Its db snapshot state machine template must stay identical to `examples/db_snapshot.asl.json` (`tests/test_terraform_examples.py`); change both together.
 
 `docker/requirements-api.lock` and `docker/requirements-db.lock` must be regenerated whenever dependencies change; the image installs with `--require-hashes` (`docker:build` does it automatically).
 
@@ -75,7 +78,7 @@ Request flow: `handler.handler` → `config.SourceConfig` / `RunRequest` → `pi
 - **`extract.py`** — the two backends. pyarrow converts rows to Arrow from reflected types; ConnectorX batches are yielded as they come, and `RuntimeError`/`PanicException` (a `BaseException`) around the ConnectorX call become `ConnectorXFailed`.
 - **`preflight.py`** — rule tables over reflected types (decimal limits, per-dialect deny list, `MIN_SERVER_VERSION`) and the `partition` column checks; `validate` and every run apply the same checks. Its NULL-cursor count is the run's `NullCursorRows` when `include_null_cursor` is false. **`source.py`** holds the schema contract and the backend-change guard (`BackendChanged`).
 - **`plan.py`, `manifest.py`** — `plan` and `finalize` events for Step Function orchestration; manifests list the loads of a full snapshot.
-- **`errors.py`** — every handler-visible error derives from `DbBronzeError` (including the one `PreflightError`); the handler finds it in dlt's `PipelineStepFailed` chain and its class name becomes the Lambda `errorType`. Add new types there, with a `metric`; never define an error class elsewhere.
+- **`errors.py`** — every handler-visible error derives from `DbBronzeError` (including the one `PreflightError`); the handler finds it in dlt's `PipelineStepFailed` chain and its class name becomes the Lambda `errorType`. Add new types there, with a `metric`; never define an error class elsewhere. The exceptions: `ConfigError` lives in `config.py` (no metric), and Kerberos surfaces a bare `NotImplementedError` (placeholder).
 
 ## db_bronze invariants (don't break these)
 
@@ -91,7 +94,7 @@ Request flow: `handler.handler` → `config.SourceConfig` / `RunRequest` → `pi
 
 ## Status
 
-Unit/integration tested locally and image smoke-tested via the emulator. Not yet validated: real S3, real Lambda, Glue 6.0. db_bronze additionally passed its integration suite on Postgres, MySQL, SQL Server, Oracle and Db2, with the unverified items listed in README-db.md "Open items". `silver_transform.merge_into_iceberg` and `main` are untested sketches. See README "Open items".
+Unit/integration tested locally and image smoke-tested via the emulator. Not yet validated: real S3, real Lambda, Glue 6.0. db_bronze additionally passed its integration suite on Postgres, MySQL, SQL Server, Oracle and Db2, with the unverified items listed in README "Open items". `silver_transform.merge_into_iceberg` and `main` are untested sketches. See README "Open items".
 
 ## Agent skills
 
