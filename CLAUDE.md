@@ -23,7 +23,7 @@ mise run test:unit                         # no Spark/Java
 mise run test:spark                        # installs silver group, runs Spark tests
 mise run test tests/test_modes.py::test_name   # extra args go to pytest (also test:unit / test:spark)
 mise run check                             # lint + test
-mise run docker:lock                       # regenerate docker/requirements.lock from uv.lock (--db: requirements-db.lock)
+mise run docker:lock                       # regenerate docker/requirements-api.lock from uv.lock (--db: requirements-db.lock)
 mise run docker:build                      # lock + image (-t tag, -p linux/arm64|linux/amd64; --db: db_bronze image, amd64 only)
 mise run docker:smoke                      # build + invoke via Lambda Runtime Interface Emulator (--db: db_bronze image)
 mise run test:integration                  # db_bronze against docker-compose engines (-m integration; plain `test` skips them)
@@ -33,7 +33,7 @@ mise run test:integration --engines mssql  # limit engines; --keep leaves them u
 mise run bench                             # split benchmark
 ```
 
-`docker/requirements.lock` and `docker/requirements-db.lock` must be regenerated whenever dependencies change; the image installs with `--require-hashes` (`docker:build` does it automatically).
+`docker/requirements-api.lock` and `docker/requirements-db.lock` must be regenerated whenever dependencies change; the image installs with `--require-hashes` (`docker:build` does it automatically).
 
 Tests need no network or AWS: `tests/conftest.py` runs an in-process fake REST API (`EventsAPI`, routable bytes overrides, 500s, auth checks) and uses a local directory as the bucket (`file://`). `tests/test_silver.py` imports `silver_transform` by inserting `silver/` on `sys.path`.
 

@@ -19,7 +19,7 @@ Postgres, MySQL, Oracle and Db2) is specified in [README-db.md](README-db.md).
 | Part | State |
 |---|---|
 | `src/api_bronze` (ingestion library + Lambda handler) | Tested: 65 tests against an in-process fake API, local filesystem as the bucket |
-| `docker/Dockerfile` | Built (linux/arm64) and smoke-tested through the Lambda Runtime Interface Emulator (`scripts/smoke_image.py`) |
+| `docker/Dockerfile.api` | Built (linux/arm64) and smoke-tested through the Lambda Runtime Interface Emulator (`scripts/smoke_image.py`) |
 | `silver/silver_transform.py`: read, completeness filter, parse, quarantine split, rescue, dedup | Tested locally with pyspark 4.1.1 on bronze written by this library |
 | `silver/silver_transform.py`: `merge_into_iceberg`, `main` | **Untested sketch**: no Iceberg catalog was available |
 | Real S3, real Lambda, Glue 6.0, Iceberg write, memory with large pages | **Not yet validated**: see [Open items](#open-items) |
@@ -38,7 +38,7 @@ src/api_bronze/
 src/bronze_common/  code shared with db_bronze (strict config building, secrets, handler helpers)
 silver/silver_transform.py   bronze -> silver reference (Spark 4.1 / Glue 6.0)
 tests/            pytest suite, fake API in conftest.py
-docker/           Lambda image + pinned, hashed requirements.lock
+docker/           Lambda image + pinned, hashed requirements-api.lock
 scripts/          smoke_image.py (image via emulator), bench_split.py
 examples/         example source configs and invocation events
 .mise/tasks/      mise tasks (bash): setup, lint, check, bench, test/*, docker/*
@@ -226,7 +226,7 @@ config document in S3 plus a function.
 
 | Setting | Value | Why |
 |---|---|---|
-| Package | Container image (`docker/Dockerfile`) | dlt with pyarrow is far over the 250 MB zip limit |
+| Package | Container image (`docker/Dockerfile.api`) | dlt with pyarrow is far over the 250 MB zip limit |
 | Handler | `api_bronze.handler.handler` (image default) | |
 | Timeout | 900 s | Split loading uses the remaining time; unsorted APIs must finish in it |
 | Memory | Start at 1–2 GB; measure | A page is held several times over (bytes, text, parsed, Arrow). Size to the largest page |

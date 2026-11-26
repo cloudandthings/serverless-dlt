@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #MISE description="Export the pinned, hashed requirements a Lambda image installs"
-#USAGE flag "--db" help="Export docker/requirements-db.lock (db_bronze image) instead of docker/requirements.lock"
+#USAGE flag "--db" help="Export docker/requirements-db.lock (db_bronze image) instead of docker/requirements-api.lock"
 set -euo pipefail
 cd "$MISE_PROJECT_ROOT"
 
@@ -9,5 +9,5 @@ if [[ "${usage_db:-false}" == "true" ]]; then
   # The db image also carries the API's aws extra (Secrets Manager refs)
   uv export --no-dev --no-emit-project --extra aws --extra db --format requirements-txt -o docker/requirements-db.lock
 else
-  uv export --no-dev --no-emit-project --extra aws --format requirements-txt -o docker/requirements.lock
+  uv export --no-dev --no-emit-project --extra aws --format requirements-txt -o docker/requirements-api.lock
 fi

@@ -46,10 +46,10 @@ ENV LD_LIBRARY_PATH=/opt/oracle/instantclient:${LD_LIBRARY_PATH} \
 #     KRB5CCNAME=FILE:/tmp/krb5cc
 
 # Wheels only: an sdist build here would mean a dependency changed platform support.
-COPY docker/requirements-db.lock /tmp/requirements.lock
-RUN pip install --no-cache-dir --require-hashes --only-binary :all: -r /tmp/requirements.lock \
+COPY docker/requirements-db.lock /tmp/requirements-db.lock
+RUN pip install --no-cache-dir --require-hashes --only-binary :all: -r /tmp/requirements-db.lock \
       --target "${LAMBDA_TASK_ROOT}" \
- && rm /tmp/requirements.lock
+ && rm /tmp/requirements-db.lock
 
 # bronze_common: the code api_bronze and db_bronze share (DESIGN-db.md D1)
 COPY src/bronze_common "${LAMBDA_TASK_ROOT}/bronze_common"

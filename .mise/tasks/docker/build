@@ -21,7 +21,7 @@ if [[ "${usage_db:-false}" == "true" ]]; then
 else
   platform="${usage_platform:-linux/arm64}"
   mise run docker:lock
-  dockerfile=docker/Dockerfile
+  dockerfile=docker/Dockerfile.api
   tag="${usage_tag:-api-bronze:test}"
 fi
 

@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+#MISE description="Remove tools/images/VMs installed for dev (see .scratch/installed-for-dev.md). Dry run unless --yes"
+#USAGE flag "--yes" help="Actually delete (default: only print what would be removed)"
+#USAGE flag "--keep-tools" help="Keep mise-installed python/uv/java"
+#USAGE flag "--keep-colima" help="Keep the Colima mssql VM"
+
+cd "$MISE_PROJECT_ROOT"
+
+run() {
+  if [[ "${usage_yes:-false}" == "true" ]]; then
+    echo "+ $*"
+    "$@" || echo "  (failed, continuing)"
+  else
+    echo "[dry-run] $*"
+  fi
+}
+
+# Only items marked "sure" in .scratch/installed-for-dev.md.
+# Brew packages and the Colima `default` profile are NOT touched: verify those by hand.
+IMAGES=(
+  api-bronze:test
+  db-bronze:it
+  db-bronze:it-pytest
+  db-bronze:test
+  db-bronze:test-pytest
+  public.ecr.aws/lambda/python:3.12
+  postgres:17
+  mysql:8.4
+  mcr.microsoft.com/mssql/server:2022-latest
+  container-registry.oracle.com/database/free:23.26.0.0
+  gvenzl/oracle-xe:18-slim-faststart
+  gvenzl/oracle-xe:21-slim-faststart
+  icr.io/db2_community/db2:12.1.5.0
+)
+
+echo "== Docker images"
+if docker info >/dev/null 2>&1; then
+  for img in "${IMAGES[@]}"; do
+    if docker image inspect "$img" >/dev/null 2>&1; then
+      run docker image rm "$img"
+    fi
+  done
+else
+  echo "docker not reachable (is Colima running?); skipping images"
+fi
+
+if [[ "${usage_keep_colima:-false}" != "true" ]]; then
+  echo "== Colima mssql VM"
+  if command -v colima >/dev/null && colima list 2>/dev/null | grep -q '^mssql'; then
+    run colima delete --force mssql
+  fi
+fi
+
+echo "== Project-local files"
+run rm -rf .venv .smoke .pytest_cache .ruff_cache
+
+if [[ "${usage_keep_tools:-false}" != "true" ]]; then
+  echo "== mise tools (python, uv, java)"
+  run mise uninstall python@3.12 uv@0.13 java@temurin-21
+fi
+
+echo "== uv cache is shared across projects; run 'uv cache clean' by hand if wanted"
+[[ "${usage_yes:-false}" == "true" ]] || echo "Dry run only. Re-run with --yes to delete."

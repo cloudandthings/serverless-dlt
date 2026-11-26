@@ -3,7 +3,7 @@
 Starts the fake API on the host, runs the image with bronze and config mounted
 as local folders, invokes the function like Lambda would, and checks bronze.
 
-    docker build -f docker/Dockerfile --platform linux/arm64 -t api-bronze:test .
+    docker build -f docker/Dockerfile.api --platform linux/arm64 -t api-bronze:test .
     uv run python scripts/smoke_image.py api-bronze:test
 """
 

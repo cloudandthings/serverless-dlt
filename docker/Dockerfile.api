@@ -2,14 +2,14 @@
 # each Lambda function differs only by its event/config, not by its code.
 #
 # Build from the repo root (the build context must contain src/ and docker/):
-#   uv export --no-dev --no-emit-project --extra aws --format requirements-txt -o docker/requirements.lock
-#   docker build -f docker/Dockerfile --platform linux/arm64 -t api-bronze .
+#   uv export --no-dev --no-emit-project --extra aws --format requirements-txt -o docker/requirements-api.lock
+#   docker build -f docker/Dockerfile.api --platform linux/arm64 -t api-bronze .
 # Use linux/amd64 for x86_64 functions. The function's architecture must match.
 FROM public.ecr.aws/lambda/python:3.12
 
-COPY docker/requirements.lock /tmp/requirements.lock
-RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.lock --target "${LAMBDA_TASK_ROOT}" \
- && rm /tmp/requirements.lock
+COPY docker/requirements-api.lock /tmp/requirements-api.lock
+RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements-api.lock --target "${LAMBDA_TASK_ROOT}" \
+ && rm /tmp/requirements-api.lock
 
 # bronze_common: the code api_bronze and db_bronze share (DESIGN-db.md D1)
 COPY src/bronze_common "${LAMBDA_TASK_ROOT}/bronze_common"
