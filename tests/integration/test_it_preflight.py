@@ -1,4 +1,5 @@
-"""db_bronze integration: the preflight, `validate` and the error types on real engines (DESIGN-db.md 6.2, 7.6).
+"""db_bronze integration: the preflight, `validate` and the error types on real engines (docs/db/preflight.md,
+docs/db/errors.md).
 
 What Lambda reports is the `errorType` (the raised class name) and its message,
 so these tests check exactly that.
@@ -93,7 +94,7 @@ def test_an_invalid_config_fails_with_config_error_and_nothing_lands(source, run
 def test_kerberos_fails_at_run_start_with_not_implemented_and_nothing_lands(source, run):
     source.transactions((1, "2026-11-20 08:00:00", "JHB", 100))
     kerberos = {"type": "kerberos", "principal": "svc_ingest@CORP.EXAMPLE", "keytab": {"secret_id": "ingest/keytab"}}
-    with fails("NotImplementedError", "docs/KERBEROS.md"):
+    with fails("NotImplementedError", "docs/db/kerberos.md"):
         run({"source_id": "core"}, tx("pyarrow"), connection={"auth": kerberos})
     assert source.nothing_landed()
 

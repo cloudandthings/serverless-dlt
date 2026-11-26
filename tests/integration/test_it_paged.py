@@ -1,6 +1,6 @@
 """db_bronze integration: paged snapshots and planned backfills (`plan`, pages, `finalize`) on real engines.
 
-DESIGN-db.md D8 and section 7.5. Paged and parallel runs use a pipeline name of
+docs/db/design.md D8 and docs/db/modes.md. Paged and parallel runs use a pipeline name of
 their own, as in the SQLite suite.
 """
 

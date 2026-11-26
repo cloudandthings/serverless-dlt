@@ -1,4 +1,4 @@
-"""Cursor queries, built with SQLAlchemy Core (DESIGN-db.md section 7.3).
+"""Cursor queries, built with SQLAlchemy Core (docs/db/design.md Cursor handling).
 
 Dialect differences (quoting, subquery aliases, booleans) come from the
 dialect, not from string templates, so every statement compiles offline for
@@ -148,7 +148,7 @@ def cursor_select(source: sa.FromClause, tc: TableConfig, start: Any, end: Any =
 def keyset_select(
     source: sa.FromClause, tc: TableConfig, start: Any, end: Any, after: tuple | None
 ) -> sa.Select:
-    """One keyset page (DESIGN-db.md 7.4): the cursor window, then rows after `after` in `order_by` order.
+    """One keyset page (docs/db/design.md Chunking): the cursor window, then rows after `after` in `order_by` order.
 
     `after` holds the `order_by` values of the previous page's last row, or None
     for the first page. The tie-break is spelled out, `c1 > v1 OR (c1 = v1 AND

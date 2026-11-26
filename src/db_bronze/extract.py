@@ -1,4 +1,4 @@
-"""Backends: run a SQLAlchemy statement and yield Arrow record batches (DESIGN-db.md section 7.2).
+"""Backends: run a SQLAlchemy statement and yield Arrow record batches (docs/db/design.md Backends).
 
 `connectorx`: ConnectorX `arrow_stream`; its record batches are yielded as they
 come, with the types ConnectorX produces (D2).
@@ -8,7 +8,7 @@ Arrow using the types from SQLAlchemy reflection, so a table's Arrow schema is
 the same on every run and in every batch (D2). Driver values Arrow cannot take
 (UUIDs, network addresses, parsed JSON, MySQL SETs, Postgres bit strings,
 intervals, time-with-time-zone, Oracle BFILE locators) and unconstrained NUMERIC
-land as text, losslessly (DESIGN-db.md section 10.1). Postgres arrays land as lists
+land as text, losslessly (docs/db/types.md). Postgres arrays land as lists
 of their element type, with the same conversions applied to each element.
 """
 
@@ -36,7 +36,7 @@ EXTRACTED_AT = "_extracted_at"
 class _ClrType(sa.types.LargeBinary):
     """A SQL Server CLR type. SQLAlchemy does not know them and would reflect NullType.
 
-    Named, the preflight can deny them on ConnectorX (DESIGN-db.md section 3.1).
+    Named, the preflight can deny them on ConnectorX (docs/db/engines.md).
     On the pyarrow backend they land as binary: SQL Server's own serialization,
     as `CAST(c AS varbinary(max))` gives it (pyodbc reads them through an output
     converter, see `prepare_engine`).

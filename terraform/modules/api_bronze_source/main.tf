@@ -1,4 +1,4 @@
-# One API source = one config document + one function (README "Deploying on Lambda").
+# One API source = one config document + one function (docs/deployment.md).
 
 locals {
   bucket_url     = trimsuffix(var.config.bucket_url, "/")
@@ -60,7 +60,7 @@ module "function" {
   tags                = var.tags
 }
 
-# "Vendor sent garbage" apart from every other failure (README "Deploying on Lambda", Alarms).
+# "Vendor sent garbage" apart from every other failure (docs/deployment.md "Alarms").
 resource "aws_cloudwatch_log_metric_filter" "broken_page" {
   name           = "${module.function.function_name}-broken-page"
   log_group_name = module.function.log_group_name
@@ -76,7 +76,7 @@ resource "aws_cloudwatch_log_metric_filter" "broken_page" {
 
 resource "aws_cloudwatch_metric_alarm" "broken_page" {
   alarm_name          = "${module.function.function_name}-broken-page"
-  alarm_description   = "${local.pipeline_name}: a 2xx page was unusable. The raw body is under ${local.quarantine_url}/_quarantine/${local.pipeline_name}/ (README \"API operations\"). The cursor has not moved."
+  alarm_description   = "${local.pipeline_name}: a 2xx page was unusable. The raw body is under ${local.quarantine_url}/_quarantine/${local.pipeline_name}/ (docs/api/broken-responses.md). The cursor has not moved."
   namespace           = "api_bronze"
   metric_name         = local.broken_page_metric
   statistic           = "Sum"

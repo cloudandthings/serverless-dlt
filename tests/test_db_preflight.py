@@ -1,4 +1,4 @@
-"""db_bronze: preflight rules against fake reflected metadata (DESIGN-db.md section 6.2)."""
+"""db_bronze: preflight rules against fake reflected metadata (docs/db/preflight.md)."""
 
 from __future__ import annotations
 

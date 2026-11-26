@@ -1,8 +1,8 @@
-"""README.md's "Database sources" section documents everything db_bronze accepts.
+"""The db operator docs (`docs/db/`) document everything db_bronze accepts.
 
 That is every config key, event key, mode, error type and metric.
 
-A key added to the config or the event without a README entry fails here, so the operator spec cannot
+A key added to the config or the event without a docs entry fails here, so the operator spec cannot
 fall behind the code. (The reverse, nothing documented that is unimplemented, is checked by review.)
 """
 
@@ -17,9 +17,13 @@ import pytest
 from db_bronze import config, errors, preflight
 from db_bronze.config import EVENT_KEYS, MODES
 
-_TEXT = (Path(__file__).resolve().parent.parent / "README.md").read_text()
-# Only the db_bronze section counts, so an api_bronze key of the same name cannot satisfy a check.
-README = _TEXT.split("\n## Database sources (`db_bronze`)", 1)[1].split("\n## ", 1)[0]
+_DOCS = Path(__file__).resolve().parent.parent / "docs" / "db"
+# Only the db operator docs count: not the api docs (an api_bronze key of the same name cannot satisfy a
+# check), and not design.md or engines.md (research, not the spec).
+OPERATOR_DOCS = ("configuration.md", "modes.md", "preflight.md", "errors.md")
+DOCS = "\n".join((_DOCS / name).read_text() for name in OPERATOR_DOCS)
+ERRORS = (_DOCS / "errors.md").read_text().split("\n## Errors", 1)[1].split("\n## ", 1)[0]
+PREFLIGHT = (_DOCS / "preflight.md").read_text()
 
 CONFIG_CLASSES = (
     config.SourceConfig,
@@ -35,13 +39,13 @@ CONFIG_CLASSES = (
 
 
 def documented(name: str) -> bool:
-    return f"`{name}`" in README
+    return f"`{name}`" in DOCS
 
 
 @pytest.mark.parametrize("cls", CONFIG_CLASSES, ids=lambda c: c.__name__)
 def test_every_config_key_is_documented(cls):
     missing = [f.name for f in fields(cls) if not documented(f.name)]
-    assert not missing, f"{cls.__name__} keys missing from README.md's Database sources section: {missing}"
+    assert not missing, f"{cls.__name__} keys missing from the db operator docs (docs/db/): {missing}"
 
 
 def test_every_event_key_is_documented():
@@ -56,7 +60,7 @@ def test_every_enumerated_value_is_documented():
     values = (*config.BACKENDS, *config.CURSOR_TYPES, *config.CHUNKING_STRATEGIES, *config.AUTH_TYPES)
     values += (*config.ISOLATION_LEVELS, *config.PARQUET_CODECS)
     values += ("mssql", "postgres", "mysql", "oracle", "db2", "sqlite")
-    assert not [v for v in values if v not in README]
+    assert not [v for v in values if v not in DOCS]
 
 
 def test_every_error_type_is_documented_with_a_fix():
@@ -64,8 +68,7 @@ def test_every_error_type_is_documented_with_a_fix():
     names = {c.__name__ for c in ours if c is not errors.DbBronzeError}
     names |= {config.ConfigError.__name__}
     names |= {"NotImplementedError", "PipelineStepFailed"}
-    section = README.split("\n### Errors", 1)[1]
-    assert not [n for n in sorted(names) if f"`{n}`" not in section]
+    assert not [n for n in sorted(names) if f"`{n}`" not in ERRORS]
 
 
 def test_every_metric_is_documented():
@@ -76,5 +79,5 @@ def test_every_metric_is_documented():
 def test_server_minimums_match_the_code():
     for dialect, minimum in preflight.MIN_SERVER_VERSION.items():
         if minimum:
-            row = re.search(rf"\| {dialect} \|[^\n]*", README)
+            row = re.search(rf"\| {dialect} \|[^\n]*", PREFLIGHT)
             assert row and ".".join(map(str, minimum)) in row.group(0), dialect

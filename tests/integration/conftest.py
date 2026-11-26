@@ -1,4 +1,4 @@
-"""Integration harness: real source engines in docker-compose (DESIGN-db.md section 10).
+"""Integration harness: real source engines in docker-compose (docs/testing.md).
 
 Every test here is marked `integration`, which the default pytest run deselects
 (pyproject `addopts`), so `mise run test` never needs Docker. `mise run
@@ -150,13 +150,13 @@ def connectorx_in_process(dialect: str) -> bool:
 def connectorx_skip_reason(dialect: str) -> str | None:
     """Why this run cannot exercise ConnectorX on `dialect`, or None."""
     if dialect in NO_CONNECTORX:
-        return f"ConnectorX does not support {dialect} (DESIGN-db.md 3.1): it runs on pyarrow only"
+        return f"ConnectorX does not support {dialect} (docs/db/engines.md): it runs on pyarrow only"
     if not connectorx_in_process(dialect):
         return f"{dialect}: ConnectorX needs Instant Client in this process; run with --inside"
     return None
 
 
-# Engines ConnectorX does not read: the config rejects `backend: connectorx` there (DESIGN-db.md 6.1).
+# Engines ConnectorX does not read: the config rejects `backend: connectorx` there (docs/db/configuration.md).
 NO_CONNECTORX = ("db2",)
 
 
@@ -165,7 +165,7 @@ def _ibm_db_missing() -> str | None:
         import ibm_db  # noqa: F401
     except ImportError:
         return (
-            f"Db2 needs ibm_db, whose wheels are x86_64 Linux only (DESIGN-db.md 3.3), so not on this "
+            f"Db2 needs ibm_db, whose wheels are x86_64 Linux only (docs/db/engines.md), so not on this "
             f"{platform.system()} {platform.machine()} host: run `mise run test:integration --inside --engines db2` "
             "(pytest inside the image), or on an x86_64 Linux host"
         )

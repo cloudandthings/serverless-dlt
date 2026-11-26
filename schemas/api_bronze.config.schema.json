@@ -1,0 +1,318 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "api_bronze.config.schema.json",
+  "title": "api_bronze source config",
+  "description": "One JSON document per REST API source = one dlt pipeline = one Lambda function (docs/api/configuration.md). src/api_bronze/config.py is authoritative; this schema mirrors it for editors and CI. Unknown keys are rejected, so a typo fails instead of falling back to a default.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pipeline_name", "dataset_name", "bucket_url", "client", "resources"],
+  "properties": {
+    "pipeline_name": {
+      "$ref": "#/$defs/name",
+      "description": "STABLE: part of the state identity. Changing it silently restarts from initial_value."
+    },
+    "dataset_name": {
+      "$ref": "#/$defs/name",
+      "description": "STABLE: part of the state identity; folder under bucket_url."
+    },
+    "bucket_url": {
+      "type": "string",
+      "minLength": 1,
+      "description": "STABLE: bronze root, e.g. s3://bucket/bronze. Part of the state identity.",
+      "examples": ["s3://bronze-bucket/bronze"]
+    },
+    "quarantine_url": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "Where broken 2xx pages are written (_quarantine/). Default: bucket_url."
+    },
+    "parquet_compression": {
+      "enum": ["zstd", "snappy", "gzip", "none"],
+      "default": "zstd"
+    },
+    "max_time_s": {
+      "type": ["number", "null"],
+      "exclusiveMinimum": 0,
+      "description": "Cap per run for split loading. Applies only in incremental mode when every resource is sorted_ascending."
+    },
+    "client": { "$ref": "#/$defs/client" },
+    "resources": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/resource" },
+      "description": "One dlt resource (bronze table) per endpoint. Names must be unique (checked by config.py, not by this schema)."
+    }
+  },
+  "$defs": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "isoTimestamp": {
+      "type": "string",
+      "description": "ISO-8601 timestamp as datetime.fromisoformat reads it; without an offset it is UTC.",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}(?:[T ]\\d{2}(?::\\d{2}(?::\\d{2}(?:[.,]\\d+)?)?)?(?:Z|[+-]\\d{2}(?::?\\d{2}(?::?\\d{2}(?:\\.\\d+)?)?)?)?)?$",
+      "examples": ["2020-01-01T00:00:00Z"]
+    },
+    "dottedPath": {
+      "type": "string",
+      "description": "Dotted object keys, optionally prefixed with \"$.\". No array indexes or wildcards.",
+      "pattern": "^\\s*(?:\\$?|(?:\\$\\.)?[^.\\[\\]*]+(?:\\.[^.\\[\\]*]+)*)\\s*$"
+    },
+    "secretRef": {
+      "title": "Secret reference",
+      "description": "Resolved at run time: {\"env\": NAME}, {\"secret_id\": id} (whole SecretString) or {\"secret_id\": id, \"key\": k} (one key of a JSON SecretString), optionally with \"format\" (e.g. \"Bearer {}\") to wrap the value.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "env": { "type": "string", "minLength": 1 },
+        "secret_id": { "type": "string", "minLength": 1 },
+        "key": { "type": "string", "minLength": 1 },
+        "format": { "type": "string" }
+      },
+      "oneOf": [
+        { "required": ["env"], "not": { "anyOf": [{ "required": ["secret_id"] }, { "required": ["key"] }] } },
+        { "required": ["secret_id"], "not": { "required": ["env"] } }
+      ]
+    },
+    "secretString": {
+      "anyOf": [{ "type": "string" }, { "$ref": "#/$defs/secretRef" }]
+    },
+    "jsonPath": {
+      "type": ["string", "null"],
+      "description": "A JSONPath into the response body (dlt TJsonPath)."
+    },
+    "client": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base_url", "paginator"],
+      "properties": {
+        "base_url": { "type": "string", "minLength": 1, "examples": ["https://api.vendor.example/v2/"] },
+        "paginator": { "$ref": "#/$defs/paginator" },
+        "auth": {
+          "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/auth" }]
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/secretString" },
+          "description": "Static request headers; any value may be a secret reference."
+        }
+      }
+    },
+    "paginator": {
+      "title": "dlt 1.32 rest_api paginator",
+      "description": "dlt's paginator config vocabulary. \"auto\" (or no type) is rejected: auto-detection can guess wrong silently.",
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "enum": ["json_link", "json_response", "header_link", "header_cursor", "single_page", "cursor", "offset", "page_number"]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "enum": ["json_link", "json_response"] } } },
+          "then": {
+            "additionalProperties": false,
+            "properties": { "type": true, "next_url_path": { "$ref": "#/$defs/jsonPath" } }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "header_link" } } },
+          "then": {
+            "additionalProperties": false,
+            "properties": { "type": true, "links_next_key": { "type": ["string", "null"] } }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "header_cursor" } } },
+          "then": {
+            "additionalProperties": false,
+            "properties": {
+              "type": true,
+              "cursor_key": { "type": ["string", "null"] },
+              "cursor_param": { "type": ["string", "null"] }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "single_page" } } },
+          "then": { "additionalProperties": false, "properties": { "type": true } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "cursor" } } },
+          "then": {
+            "additionalProperties": false,
+            "properties": {
+              "type": true,
+              "cursor_path": { "$ref": "#/$defs/jsonPath" },
+              "cursor_param": { "type": ["string", "null"] },
+              "cursor_body_path": { "type": ["string", "null"] },
+              "stop_after_empty_page": { "type": ["boolean", "null"] },
+              "has_more_path": { "$ref": "#/$defs/jsonPath" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "offset" } } },
+          "then": {
+            "additionalProperties": false,
+            "required": ["limit"],
+            "properties": {
+              "type": true,
+              "limit": { "type": "integer", "minimum": 1 },
+              "offset": { "type": ["integer", "null"], "minimum": 0 },
+              "offset_param": { "type": ["string", "null"] },
+              "offset_body_path": { "type": ["string", "null"] },
+              "limit_param": { "type": ["string", "null"] },
+              "limit_body_path": { "type": ["string", "null"] },
+              "total_path": { "$ref": "#/$defs/jsonPath" },
+              "maximum_offset": { "type": ["integer", "null"] },
+              "stop_after_empty_page": { "type": ["boolean", "null"] },
+              "has_more_path": { "$ref": "#/$defs/jsonPath" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "page_number" } } },
+          "then": {
+            "additionalProperties": false,
+            "properties": {
+              "type": true,
+              "base_page": { "type": ["integer", "null"] },
+              "page": { "type": ["integer", "null"] },
+              "page_param": { "type": ["string", "null"] },
+              "page_body_path": { "type": ["string", "null"] },
+              "total_path": { "$ref": "#/$defs/jsonPath" },
+              "maximum_page": { "type": ["integer", "null"] },
+              "stop_after_empty_page": { "type": ["boolean", "null"] },
+              "has_more_path": { "$ref": "#/$defs/jsonPath" }
+            }
+          }
+        }
+      ]
+    },
+    "auth": {
+      "title": "dlt 1.32 rest_api auth",
+      "description": "dlt's auth config vocabulary. Any value may be a secret reference. Without \"type\", dlt uses bearer.",
+      "type": "object",
+      "properties": {
+        "type": { "enum": ["bearer", "api_key", "http_basic", "oauth2_client_credentials"] }
+      },
+      "allOf": [
+        {
+          "if": {
+            "anyOf": [
+              { "not": { "required": ["type"] } },
+              { "properties": { "type": { "const": "bearer" } } }
+            ]
+          },
+          "then": {
+            "additionalProperties": false,
+            "required": ["token"],
+            "properties": { "type": true, "token": { "$ref": "#/$defs/secretString" } }
+          }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "api_key" } } },
+          "then": {
+            "additionalProperties": false,
+            "required": ["api_key"],
+            "properties": {
+              "type": true,
+              "name": { "$ref": "#/$defs/secretString", "default": "Authorization" },
+              "api_key": { "$ref": "#/$defs/secretString" },
+              "location": { "enum": ["header", "cookie", "query", "param"], "default": "header" }
+            }
+          }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "http_basic" } } },
+          "then": {
+            "additionalProperties": false,
+            "required": ["username", "password"],
+            "properties": {
+              "type": true,
+              "username": { "$ref": "#/$defs/secretString" },
+              "password": { "$ref": "#/$defs/secretString" }
+            }
+          }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "oauth2_client_credentials" } } },
+          "then": {
+            "additionalProperties": false,
+            "required": ["access_token_url", "client_id", "client_secret"],
+            "properties": {
+              "type": true,
+              "access_token_url": { "$ref": "#/$defs/secretString" },
+              "client_id": { "$ref": "#/$defs/secretString" },
+              "client_secret": { "$ref": "#/$defs/secretString" },
+              "access_token": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/secretString" }] },
+              "access_token_request_data": { "type": ["object", "null"] },
+              "default_token_expiration": { "type": ["integer", "null"], "minimum": 0 }
+            }
+          }
+        }
+      ]
+    },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "path", "records_path"],
+      "properties": {
+        "name": { "$ref": "#/$defs/name", "description": "Bronze table name, unique within the config." },
+        "path": { "type": "string", "description": "Request path relative to client.base_url." },
+        "records_path": {
+          "$ref": "#/$defs/dottedPath",
+          "description": "Dotted path to the records array; \"$\" if the body is the array."
+        },
+        "id_path": {
+          "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/dottedPath" }],
+          "description": "Dotted path to the record id (record_id is null if omitted)."
+        },
+        "params": {
+          "type": "object",
+          "description": "Static query params."
+        },
+        "paginator": {
+          "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/paginator" }],
+          "description": "Overrides client.paginator for this endpoint."
+        },
+        "incremental": {
+          "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/incremental" }],
+          "description": "Without it the endpoint is a snapshot resource (mode=full only)."
+        }
+      }
+    },
+    "incremental": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cursor_path", "initial_value", "start_param"],
+      "properties": {
+        "cursor_path": { "type": "string", "minLength": 1, "description": "Dotted path to the cursor inside each record." },
+        "initial_value": {
+          "$ref": "#/$defs/isoTimestamp",
+          "description": "Where the first run (and mode=full) starts."
+        },
+        "start_param": { "type": "string", "minLength": 1, "description": "Query param that receives the lower bound." },
+        "end_param": { "type": ["string", "null"], "description": "Query param for the upper bound, if the API has one." },
+        "cursor_type": {
+          "enum": ["iso8601", "epoch_s", "epoch_ms"],
+          "default": "iso8601",
+          "description": "How the record's cursor is encoded. ISO without an offset is UTC."
+        },
+        "param_format": {
+          "enum": ["iso8601", "iso8601_z", "epoch_s", "epoch_ms"],
+          "default": "iso8601",
+          "description": "How bounds are sent: iso8601 (+00:00), iso8601_z (Z), epoch_s, epoch_ms."
+        },
+        "sorted_ascending": {
+          "type": "boolean",
+          "default": false,
+          "description": "True only if the API returns records in ascending cursor order (enables split loading)."
+        }
+      }
+    }
+  }
+}

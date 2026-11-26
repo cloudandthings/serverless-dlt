@@ -1,4 +1,5 @@
-"""db_bronze integration: opt-in partitioned ConnectorX reads on real engines (DESIGN-db.md 3.1, 5.2, 6.1).
+"""db_bronze integration: opt-in partitioned ConnectorX reads on real engines (docs/db/engines.md,
+docs/db/configuration.md).
 
 `partition_on` opens N connections to the server, which SQLite never showed.
 """

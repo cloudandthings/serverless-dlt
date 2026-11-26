@@ -13,7 +13,7 @@ dependencies = [
 [project.optional-dependencies]
 # Secrets Manager refs (secrets.py). The Lambda base image ships boto3, but pin it.
 aws = ["boto3>=1.40"]
-# db_bronze (DESIGN-db.md section 9): every driver, for the one x86_64 image (D9).
+# db_bronze (docs/db/design.md Packaging): every driver, for the one x86_64 image (D9).
 # ConnectorX >= 0.4.6: in 0.4.5 a failed stream ended silently, looking like a short read (section 3.1).
 # ibm_db ships x86_64 Linux wheels only (bundled clidriver), hence the marker: `uv sync` still works on a Mac.
 db = [
@@ -29,7 +29,12 @@ db = [
 
 [dependency-groups]
 # The tests cover both packages, so dev pulls in the db extra.
-dev = ["api-bronze[db]", "pytest>=8", "ruff>=0.8"]
+dev = [
+    "api-bronze[db]",
+    "jsonschema>=4.26.0",
+    "pytest>=8",
+    "ruff>=0.8",
+]
 # Runs the silver reference transform test locally (needs Java 17+).
 silver = ["pyspark==4.1.1"]
 

@@ -286,7 +286,7 @@ def test_query_table_with_a_cursor(db, bucket, invoke):
 
 
 def test_lag_lands_a_late_commit_and_re_lands_the_lag_window_on_every_run(db, bucket, invoke):
-    """Prototype S4: with `lag`, dlt deduplicates nothing at the boundary (DESIGN-db.md 7.3, 12)."""
+    """Prototype S4: with `lag`, dlt deduplicates nothing at the boundary (docs/bronze-contract.md)."""
     cursor = {"column": "UpdatedAt", "type": "timestamp", "initial_value": "2026-01-01T00:00:00Z", "lag": 10}
     db.insert(*[(i, f"2026-11-20 08:00:{i * 10:02}", "JHB", i) for i in range(1, 6)])  # :10 .. :50
     invoke(cursor=cursor)

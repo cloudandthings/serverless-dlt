@@ -1,4 +1,4 @@
-"""Source config and run request: plain dataclasses, validated strictly (DESIGN-db.md sections 5 and 6.1).
+"""Source config and run request: plain dataclasses, validated strictly (docs/db/configuration.md).
 
 One config document = one database connection = one dlt pipeline = one Lambda
 function. Unknown keys are rejected, so a typo fails loudly instead of silently
@@ -33,7 +33,7 @@ EVENT_KEYS = frozenset({
     "table", "load_ids",  # finalize
 })
 BACKENDS = ("connectorx", "pyarrow")
-# Designed (DESIGN-db.md 7.2) but not built: rejected when the config loads rather than failing mid-run.
+# Designed (docs/db/design.md Backends) but not built: rejected when the config loads rather than failing mid-run.
 UNBUILT_BACKENDS = ("sqlalchemy",)
 CURSOR_TYPES = ("timestamp", "integer")
 CHUNKING_STRATEGIES = ("stream", "keyset")
@@ -60,7 +60,7 @@ def to_source_time(value: datetime, naive_timezone: str) -> datetime:
     A value with an offset is converted to wall-clock time in `naive_timezone`
     and its offset dropped. A naive value is already source time. Used only at
     the boundaries (config `initial_value`, event window bounds); data values are
-    never converted (DESIGN-db.md 7.3).
+    never converted (docs/db/design.md Cursor handling).
     """
     if value.tzinfo is None:
         return value
@@ -223,7 +223,7 @@ class CursorConfig:
     type: str  # timestamp | integer
     initial_value: str | int  # ISO-8601 for timestamp cursors, an integer for integer cursors
     # Seconds (timestamp) or an integer delta: re-read this trailing window on every run. dlt then
-    # deduplicates nothing, so the whole window lands again each run (prototype S4, DESIGN-db.md 12).
+    # deduplicates nothing, so the whole window lands again each run (prototype S4, docs/bronze-contract.md).
     lag: int | float | None = None
     include_null_cursor: bool = False  # adds `OR cursor IS NULL`: those rows land on every run
 
@@ -467,7 +467,8 @@ class SourceConfig:
         if self.connection.auth.type == "kerberos" and not d.connectorx_kerberos:
             kerberos = " and ".join(x.name for x in dialects.DIALECTS.values() if x.connectorx_kerberos)
             raise ConfigError(
-                f"table {t.name}: ConnectorX supports Kerberos only on {kerberos}, not {dialect!r} (docs/KERBEROS.md); "
+                f"table {t.name}: ConnectorX supports Kerberos only on {kerberos}, not {dialect!r} "
+                "(docs/db/kerberos.md); "
                 'set "backend": "pyarrow" on the table or in defaults'
             )
 

@@ -1,6 +1,6 @@
 """db_bronze: paged snapshots and planned backfills (`plan`, pages, `finalize`), handler-level against SQLite.
 
-DESIGN-db.md D8 and section 7.5. Paged and parallel runs use their own pipeline
+docs/db/design.md D8 and docs/db/modes.md. Paged and parallel runs use their own pipeline
 name, never the incremental's, so these configs use `core_banking_snapshot`.
 """
 

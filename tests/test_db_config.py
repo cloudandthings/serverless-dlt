@@ -1,4 +1,4 @@
-"""db_bronze: config schema and static validation (DESIGN-db.md sections 5 and 6.1). Offline: no database."""
+"""db_bronze: config schema and static validation (docs/db/configuration.md). Offline: no database."""
 
 from __future__ import annotations
 

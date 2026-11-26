@@ -7,7 +7,7 @@
 #                           for parallel backfill windows; invoked by hand, never scheduled
 #
 # The configs are the repo's sample files with bucket_url pointed at the platform bucket.
-# A function needs its image in ECR, so the first apply is two-phase (see README.md).
+# A function needs its image in ECR, so the first apply is two-phase (see terraform/README.md).
 
 locals {
   bucket_url = "s3://${module.platform.bronze_bucket}/bronze"
@@ -17,7 +17,7 @@ locals {
   vendor_countries = merge(jsondecode(file("${path.module}/../../../examples/vendor_countries.json")), { bucket_url = local.bucket_url })
 
   # Parallel backfills must not share a pipeline name with the incremental: they still
-  # write dlt state rows (README "Orchestration").
+  # write dlt state rows (docs/deployment.md "Orchestration").
   vendor_orders_backfill = merge(local.vendor_orders, { pipeline_name = "vendor_orders_backfill" })
 
   common = {
@@ -96,6 +96,6 @@ module "vendor_orders_backfill" {
   architecture  = local.common.architecture
   alarm_actions = local.common.alarm_actions
 
-  # Windows run in parallel; each is stateless for the cursor (README "Run modes").
+  # Windows run in parallel; each is stateless for the cursor (docs/api/runs.md).
   reserved_concurrency = null
 }

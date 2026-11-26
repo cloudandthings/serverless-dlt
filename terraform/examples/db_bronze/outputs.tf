@@ -1,5 +1,5 @@
 output "db_repository_url" {
-  description = "Push the db_bronze image here (see README.md)."
+  description = "Push the db_bronze image here (see terraform/README.md)."
   value       = module.platform.db_repository_url
 }
 

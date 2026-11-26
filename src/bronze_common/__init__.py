@@ -1,4 +1,4 @@
-"""Code `api_bronze` and `db_bronze` share (DESIGN-db.md D1).
+"""Code `api_bronze` and `db_bronze` share (docs/db/design.md D1).
 
 Only what is the same in both and touches no dlt internals: strict config
 building, secret lookup, and the Lambda handler's config loading, error

@@ -1,9 +1,9 @@
 # Terraform
 
 Reusable modules and runnable examples that deploy api_bronze and db_bronze as the
-operator docs describe them ([README.md](../README.md) "Deploying on Lambda"). They have
+operator docs describe them ([docs/deployment.md](../docs/deployment.md)). They have
 been planned against a mocked AWS provider only; like the rest of the project, they have
-**not been applied to a real account yet** (README "Open items" 1).
+**not been applied to a real account yet** ([docs/open-items.md](../docs/open-items.md) item 1).
 
 ```
 modules/

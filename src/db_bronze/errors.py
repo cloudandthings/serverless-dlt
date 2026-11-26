@@ -1,4 +1,4 @@
-"""db_bronze error types (DESIGN-db.md section 7.6).
+"""db_bronze error types (docs/db/errors.md).
 
 Every one derives from `DbBronzeError`, so the handler can unwrap it from dlt's
 `PipelineStepFailed` and report its class name as the Lambda `errorType`.

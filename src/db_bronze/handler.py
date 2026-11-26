@@ -39,7 +39,7 @@ Environment:
 An incremental run gets a time budget from Lambda's remaining time minus the
 safety margin (never under bronze_common.handler.MIN_BUDGET_S), and `max_time_s` in the config caps it
 further. Keyset tables stop between pages, traditional stream tables are cut by
-dlt; ConnectorX stream tables are never cut (DESIGN-db.md 7.4). The result
+dlt; ConnectorX stream tables are never cut (docs/db/design.md Chunking). The result
 reports `time_limited` and `is_empty`: the orchestrator re-invokes while
 `is_empty` is false.
 """

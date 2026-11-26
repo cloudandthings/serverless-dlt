@@ -1,6 +1,6 @@
 """db_bronze integration: the design unknowns S1 (server side), S2, S3 and S9, measured on real engines.
 
-Each test pins the behaviour a design rule rests on (DESIGN-db.md section 11),
+Each test pins the behaviour a design rule rests on (docs/db/design.md Spikes),
 so a driver or ConnectorX upgrade that changes it fails here, not in production.
 """
 

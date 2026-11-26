@@ -2,7 +2,7 @@
 
 One config document = one dlt pipeline = one Lambda function. Unknown keys are
 rejected, so a typo fails loudly instead of silently falling back to a default.
-See README.md "Config reference" for every field.
+See docs/api/configuration.md for every field.
 """
 
 from __future__ import annotations

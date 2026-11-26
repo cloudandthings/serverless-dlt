@@ -1,4 +1,4 @@
-# db_bronze on Lambda for the README sample database source (examples/core_banking.json):
+# db_bronze on Lambda for the sample database source (examples/core_banking.json):
 #
 #   core_banking           transactions (cursor, keyset) incremental every 30 min through
 #                          the split-loading loop; branches (no cursor: a snapshot table)
@@ -8,7 +8,7 @@
 #                          Start it by hand: {"source_id": "core_banking_snapshot",
 #                          "table": "transactions", "page_size": 500000}
 #
-# A function needs its image in ECR, so the first apply is two-phase (see README.md).
+# A function needs its image in ECR, so the first apply is two-phase (see terraform/README.md).
 
 locals {
   bucket_url = "s3://${module.platform.bronze_bucket}/bronze"
@@ -17,7 +17,7 @@ locals {
   core_banking = merge(jsondecode(file("${path.module}/../../../examples/core_banking.json")), { bucket_url = local.bucket_url })
 
   # Paged snapshots write dlt state rows and run in parallel: never the incremental's
-  # pipeline_name (README "Orchestration").
+  # pipeline_name (docs/deployment.md "Orchestration").
   core_banking_snapshot = merge(local.core_banking, { pipeline_name = "core_banking_snapshot" })
 
   common = {

@@ -1,4 +1,4 @@
-"""db_bronze integration: keyset chunking and the time budget on real engines (DESIGN-db.md 7.4)."""
+"""db_bronze integration: keyset chunking and the time budget on real engines (docs/db/design.md Chunking)."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ CURSOR = {"column": "UpdatedAt", "type": "timestamp", "initial_value": "2026-01-
 KEYSET = {"strategy": "keyset", "order_by": ["UpdatedAt", "TransactionId"], "page_size": 7}
 STREAM = {"strategy": "stream"}
 
-# Whether closing the traditional backend's streaming cursor early ends the query (S1, DESIGN-db.md 7.4).
+# Whether closing the traditional backend's streaming cursor early ends the query (S1, docs/db/design.md Chunking).
 # Where it does not, a `stream` table is never split-loaded and validation rejects `max_time_s` with it.
 TRADITIONAL_STREAM_STOPS_EARLY = {"postgres": True, "mysql": False, "mssql": True, "oracle": True, "db2": True}
 

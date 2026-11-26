@@ -1,5 +1,5 @@
 # EMF metrics the handler emits (namespace db_bronze, dimensions pipeline and table) when
-# one of these errors ends a run (README "Errors"). One alarm per table and metric.
+# one of these errors ends a run (docs/db/errors.md). One alarm per table and metric.
 
 locals {
   emf_alarms = {

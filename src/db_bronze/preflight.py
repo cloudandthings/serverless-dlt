@@ -1,4 +1,4 @@
-"""Preflight: reflect every table about to run and fail before anything is extracted (DESIGN-db.md section 6.2).
+"""Preflight: reflect every table about to run and fail before anything is extracted (docs/db/preflight.md).
 
 The rules are pure functions over reflected column types, so they test against
 fake metadata. `preflight()` applies them to a live engine.
@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 # matrix fills these in (spike S9); a server below the minimum fails the run, and the
 # backend is never switched silently. Postgres 11, MySQL 8.0 and SQL Server 2017 (14) are
 # the oldest series the whole integration suite has passed on (11.16, 8.0.46, 14.0.3570;
-# DESIGN-db.md section 11). SQL Server on Linux starts at 2017, so nothing older was run.
+# docs/db/design.md Spikes). SQL Server on Linux starts at 2017, so nothing older was run.
 # Oracle 19 (19c, the long-term release) by decision: 19c and 21c are accepted but UNVERIFIED.
 # Only 23 (Free 23.26) has run the suite; older servers are x86_64 only and do not start under
 # emulation on an arm64 host (S9 stays open below 23).

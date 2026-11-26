@@ -1,4 +1,4 @@
-"""Connection URLs built from the discrete connection fields (DESIGN-db.md section 5.1).
+"""Connection URLs built from the discrete connection fields (docs/db/configuration.md).
 
 The SQLAlchemy URL (traditional backends, reflection) and the ConnectorX URL differ
 in scheme (`+driver`) and in how options are spelled, so both are built here from

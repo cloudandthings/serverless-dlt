@@ -56,10 +56,10 @@ def bronze_schema(cfg: SourceConfig) -> Schema:
 
 
 def check_run_start(cfg: SourceConfig, req: RunRequest, tables: tuple[TableConfig, ...]) -> None:
-    """Fail before anything is touched when the run cannot be done (DESIGN-db.md section 7.6)."""
+    """Fail before anything is touched when the run cannot be done (docs/db/errors.md)."""
     if cfg.connection.auth.type == "kerberos":
         raise NotImplementedError(
-            'connection.auth.type "kerberos" is reserved but not implemented yet; see docs/KERBEROS.md '
+            'connection.auth.type "kerberos" is reserved but not implemented yet; see docs/db/kerberos.md '
             'for what adding it involves, or use {"type": "password"}'
         )
     by_cursor = req.mode in ("incremental", "backfill") or (req.mode == "plan" and req.plan == "backfill")

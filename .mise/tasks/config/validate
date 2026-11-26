@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+#MISE description="Validate config documents against schemas/ (api or db, picked per file by its client/connection key)"
+#USAGE arg "<file>" var=#true help="Config JSON files, e.g. examples/*.json"
+set -euo pipefail
+cd "$MISE_PROJECT_ROOT"
+
+eval "files=(${usage_file})"
+
+# The schemas catch what an editor can; config.py is authoritative (it also checks unique names,
+# keyset order_by against the cursor and columns, and the IANA zone). `validate` mode runs both.
+uv run python - "${files[@]}" <<'EOF'
+import json
+import sys
+from pathlib import Path
+
+from jsonschema import Draft202012Validator
+
+schemas = {
+    kind: Draft202012Validator(json.loads(Path(f"schemas/{kind}_bronze.config.schema.json").read_text()))
+    for kind in ("api", "db")
+}
+failed = False
+for name in sys.argv[1:]:
+    data = json.loads(Path(name).read_text())
+    if not isinstance(data, dict) or ("client" in data) == ("connection" in data):
+        print(f"{name}: skipped, not an api (client) or db (connection) config")
+        continue
+    kind = "api" if "client" in data else "db"
+    errs = sorted(schemas[kind].iter_errors(data), key=lambda e: list(e.absolute_path))
+    for e in errs:
+        print(f"{name}: /{'/'.join(map(str, e.absolute_path))}: {e.message}")
+    print(f"{name}: {kind} config {'INVALID' if errs else 'ok'}")
+    failed |= bool(errs)
+sys.exit(1 if failed else 0)
+EOF

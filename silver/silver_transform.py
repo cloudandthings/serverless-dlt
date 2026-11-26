@@ -175,7 +175,7 @@ def main(argv: Sequence[str] | None = None) -> None:  # pragma: no cover
     --dataset_root s3://bucket/bronze/vendor --table events_raw --mode incremental
     --dates 2026-11-22,2026-11-23 --silver_table glue_catalog.silver.events
     --quarantine_table glue_catalog.silver.events_quarantine
-    Fields are project-specific: define FIELDS for the source (see README).
+    Fields are project-specific: define FIELDS for the source (see docs/silver.md).
     """
     import argparse
 

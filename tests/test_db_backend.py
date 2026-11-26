@@ -1,4 +1,4 @@
-"""db_bronze: backend resolution from the config alone (DESIGN-db.md D3, section 5.3)."""
+"""db_bronze: backend resolution from the config alone (docs/db/design.md D3; docs/db/configuration.md)."""
 
 from __future__ import annotations
 

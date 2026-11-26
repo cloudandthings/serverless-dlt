@@ -1,6 +1,6 @@
 """db_bronze integration: the run modes, cursors and table options of the SQLite suite, on real engines.
 
-Every test runs on each engine and on both backends (DESIGN-db.md 7.5, 7.3).
+Every test runs on each engine and on both backends (docs/db/modes.md; docs/db/design.md Cursor handling).
 """
 
 from __future__ import annotations
@@ -153,7 +153,7 @@ def test_without_lag_a_new_row_tying_the_boundary_lands_and_a_landed_one_does_no
 
 
 def test_lag_lands_a_late_commit_and_re_lands_the_lag_window_on_every_run(source, run, tx):
-    """Prototype S4: with `lag`, dlt deduplicates nothing at the boundary (DESIGN-db.md 7.3, 12)."""
+    """Prototype S4: with `lag`, dlt deduplicates nothing at the boundary (docs/bronze-contract.md)."""
     table = tx | {"cursor": CURSOR | {"lag": 10}}
     source.transactions(*[(i, f"2026-11-20 08:00:{i * 10:02}", "JHB", i) for i in range(1, 6)])  # :10 .. :50
     run({"source_id": "core"}, table)

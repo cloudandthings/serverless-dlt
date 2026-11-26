@@ -1,4 +1,4 @@
-"""db_bronze: failure types, the backend-change guard, run logs and EMF metrics (DESIGN-db.md 7.6, D6)."""
+"""db_bronze: failure types, the backend-change guard, run logs and EMF metrics (docs/db/errors.md, D6)."""
 
 from __future__ import annotations
 

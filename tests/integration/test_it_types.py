@@ -1,6 +1,6 @@
 """db_bronze integration: the landed Arrow type of every column type, per engine and backend.
 
-The tables below are the record DESIGN-db.md section 10.1 quotes. A change in
+The tables below are the record docs/db/types.md quotes. A change in
 any landed type changes the bronze contract, so it fails here first.
 
 Each matrix column is (DDL type, literal value, ConnectorX reads it). Columns

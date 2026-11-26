@@ -1,4 +1,5 @@
-"""`{"mode": "plan"}`: split work that does not fit one invocation, for a Step Function (DESIGN-db.md D8, 7.5).
+"""`{"mode": "plan"}`: split work that does not fit one invocation, for a Step Function
+(docs/db/design.md D8; docs/db/modes.md).
 
 Nothing is extracted and nothing is written.
 

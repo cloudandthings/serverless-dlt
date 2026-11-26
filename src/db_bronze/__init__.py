@@ -1,4 +1,4 @@
-"""Relational database tables -> typed Parquet bronze with dlt, for AWS Lambda (DESIGN-db.md)."""
+"""Relational database tables -> typed Parquet bronze with dlt, for AWS Lambda (docs/db/design.md)."""
 
 from .config import ConfigError, RunRequest, SourceConfig
 from .pipeline import run_pipeline

@@ -1,4 +1,4 @@
-# Paged snapshot: plan -> Map over pages -> finalize (DESIGN-db.md D8). The template is
+# Paged snapshot: plan -> Map over pages -> finalize (docs/db/design.md D8). The template is
 # examples/db_snapshot.asl.json with the function ARN and MaxConcurrency as variables;
 # tests/test_terraform_asl.py keeps the two identical.
 #

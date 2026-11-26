@@ -1,6 +1,6 @@
 # Kerberos for db_bronze
 
-Status: **not implemented, not tested** (DESIGN-db.md D11). This guide records the research so a project that
+Status: **not implemented, not tested** ([design.md](design.md#decisions) D11). This guide records the research so a project that
 needs Kerberos can start from it. Everything below is desk research from driver documentation and package
 inspection. No item has been verified against a real KDC unless it says so. Nothing here is a tested result.
 
@@ -13,7 +13,7 @@ The `auth` schema accepts:
 ```
 
 It parses, then at run start the run fails with `NotImplementedError` (Lambda `errorType`
-`NotImplementedError`). The message points to `docs/KERBEROS.md`. Nothing lands and the cursor holds.
+`NotImplementedError`). The message points to `docs/db/kerberos.md`. Nothing lands and the cursor holds.
 Only `{"type": "password"}` is implemented.
 
 ## Per engine

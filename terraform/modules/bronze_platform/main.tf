@@ -107,9 +107,9 @@ resource "aws_s3_bucket_versioning" "config" {
 }
 
 # Bronze lifecycle: deliberately no expiration. Silver decides completeness from
-# _dlt_loads/ and dlt restores cursor state from _dlt_pipeline_state/ (README
+# _dlt_loads/ and dlt restores cursor state from _dlt_pipeline_state/ (docs/deployment.md
 # "Operations"), and deleting a dataset prefix makes dlt wipe its state. Retention for
-# those small per-run objects is still an open item (README "Open items" 6); add
+# those small per-run objects is still an open item (docs/open-items.md item 6); add
 # transitions here once it is decided. Only incomplete multipart uploads are cleaned up.
 resource "aws_s3_bucket_lifecycle_configuration" "bronze" {
   bucket = aws_s3_bucket.this["bronze"].id

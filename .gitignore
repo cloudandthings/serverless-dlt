@@ -259,4 +259,4 @@ mise.local.toml
 terraform/modules/**/.terraform.lock.hcl
 
 # Agent skill config
-.agents/
+.agents

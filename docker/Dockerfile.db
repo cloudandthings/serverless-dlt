@@ -1,4 +1,4 @@
-# Lambda container image for db_bronze (DESIGN-db.md section 9). One x86_64 image carries
+# Lambda container image for db_bronze (docs/db/design.md Packaging). One x86_64 image carries
 # every driver (D9); each Lambda function differs only by its event/config, and least
 # privilege is enforced per function through IAM, not by the image.
 #
@@ -39,7 +39,7 @@ RUN curl -fsSL "${ORACLE_IC_URL}" -o /tmp/instantclient.zip \
 ENV LD_LIBRARY_PATH=/opt/oracle/instantclient:${LD_LIBRARY_PATH} \
     ORACLE_CLIENT_LIB_DIR=/opt/oracle/instantclient
 
-# Kerberos (DESIGN-db.md section 8, docs/KERBEROS.md): not implemented in v1. A project that
+# Kerberos (docs/db/kerberos.md): not implemented in v1. A project that
 # needs it uncomments this block; only /tmp is writable on Lambda, hence the paths.
 # RUN dnf install -y krb5-libs krb5-workstation && dnf clean all
 # ENV KRB5_CONFIG=/tmp/krb5.conf \
@@ -51,7 +51,7 @@ RUN pip install --no-cache-dir --require-hashes --only-binary :all: -r /tmp/requ
       --target "${LAMBDA_TASK_ROOT}" \
  && rm /tmp/requirements-db.lock
 
-# bronze_common: the code api_bronze and db_bronze share (DESIGN-db.md D1)
+# bronze_common: the code api_bronze and db_bronze share (docs/db/design.md D1)
 COPY src/bronze_common "${LAMBDA_TASK_ROOT}/bronze_common"
 COPY src/db_bronze "${LAMBDA_TASK_ROOT}/db_bronze"
 

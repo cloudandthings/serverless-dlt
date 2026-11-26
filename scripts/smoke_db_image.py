@@ -1,4 +1,4 @@
-"""Smoke-test the built db_bronze image (DESIGN-db.md section 10, image layer).
+"""Smoke-test the built db_bronze image (docs/testing.md image layer).
 
 1. Proves the drivers inside the image: pyodbc lists ODBC Driver 18, oracledb is in thick
    mode after the handler import, ibm_db imports, and ConnectorX can load libclntsh in the

@@ -1,0 +1,612 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "db_bronze.config.schema.json",
+  "title": "db_bronze source config",
+  "description": "One JSON document per database connection = one dlt pipeline = one Lambda function (docs/db/configuration.md). src/db_bronze/config.py is authoritative; this schema mirrors it for editors and CI, including the static rules that tie tables to the connection's dialect and backend. Not expressible here, so checked only by config.py: unique table names, keyset order_by starting with the cursor column and lying inside columns, naive_timezone being a real IANA zone. Unknown keys are rejected.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pipeline_name", "dataset_name", "bucket_url", "connection", "tables"],
+  "properties": {
+    "pipeline_name": {
+      "$ref": "#/$defs/name",
+      "description": "STABLE: part of the state identity."
+    },
+    "dataset_name": {
+      "$ref": "#/$defs/name",
+      "description": "STABLE: part of the state identity."
+    },
+    "bucket_url": {
+      "type": "string",
+      "minLength": 1,
+      "description": "STABLE: bronze root, e.g. s3://bucket/bronze. Part of the state identity.",
+      "examples": ["s3://bronze-bucket/bronze"]
+    },
+    "connection": { "$ref": "#/$defs/connection" },
+    "tables": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/table" },
+      "description": "Names must be unique (checked by config.py, not by this schema)."
+    },
+    "defaults": { "$ref": "#/$defs/defaults" },
+    "parquet_compression": {
+      "enum": ["zstd", "snappy", "gzip", "none"],
+      "default": "zstd"
+    },
+    "max_time_s": {
+      "type": ["number", "null"],
+      "exclusiveMinimum": 0,
+      "description": "Caps an incremental run, for split loading. Rejected while any table's stream cannot stop early (ConnectorX streams, MySQL streams): those tables need keyset chunking."
+    }
+  },
+  "allOf": [
+    {
+      "description": "ConnectorX does not read this dialect (Db2, or another SQLAlchemy dialect): no table may resolve to connectorx, so no partition reads either. With defaults.backend connectorx, every table must set backend pyarrow.",
+      "if": { "$ref": "#/$defs/if.dialectNotConnectorx" },
+      "then": {
+        "if": { "$ref": "#/$defs/if.defaultsConnectorx" },
+        "then": { "properties": { "tables": { "items": { "$ref": "#/$defs/table.backendPyarrow" } } } },
+        "properties": {
+          "tables": {
+            "items": {
+              "properties": {
+                "backend": { "not": { "const": "connectorx" } },
+                "partition": { "type": "null" }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "SQL Server: ConnectorX applies isolation_level with a SET ahead of the query, which a partitioned read does not allow.",
+      "if": {
+        "properties": {
+          "connection": {
+            "required": ["dialect", "isolation_level"],
+            "properties": { "dialect": { "const": "mssql" }, "isolation_level": { "type": "string" } }
+          }
+        }
+      },
+      "then": { "properties": { "tables": { "items": { "properties": { "partition": { "type": "null" } } } } } }
+    },
+    {
+      "description": "MySQL: closing a stream early blocks until its query has run to the end, on either backend, so max_time_s needs keyset chunking on every table.",
+      "if": {
+        "required": ["max_time_s"],
+        "properties": {
+          "max_time_s": { "type": "number" },
+          "connection": { "properties": { "dialect": { "const": "mysql" } } }
+        }
+      },
+      "then": { "properties": { "tables": { "items": { "$ref": "#/$defs/table.isKeyset" } } } }
+    },
+    {
+      "description": "ConnectorX cannot apply this isolation_level / auth on this dialect: no table may resolve to connectorx. defaults.backend is pyarrow, so a table may not set backend connectorx.",
+      "if": {
+        "allOf": [{ "$ref": "#/$defs/if.connectorxUnusable" }, { "$ref": "#/$defs/if.defaultsPyarrow" }]
+      },
+      "then": {
+        "properties": { "tables": { "items": { "not": { "$ref": "#/$defs/table.backendConnectorx" } } } }
+      }
+    },
+    {
+      "description": "ConnectorX cannot apply this isolation_level / auth on this dialect: no table may resolve to connectorx. Tables resolve to connectorx unless they set backend pyarrow (or defaults.backend is pyarrow).",
+      "if": {
+        "allOf": [
+          { "$ref": "#/$defs/if.connectorxUnusable" },
+          { "not": { "$ref": "#/$defs/if.defaultsPyarrow" } }
+        ]
+      },
+      "then": { "properties": { "tables": { "items": { "$ref": "#/$defs/table.backendPyarrow" } } } }
+    },
+    {
+      "description": "partition is a ConnectorX read: the table must resolve to connectorx (defaults.backend is pyarrow here, so it must set backend connectorx).",
+      "if": {
+        "allOf": [{ "not": { "$ref": "#/$defs/if.dialectNotConnectorx" } }, { "$ref": "#/$defs/if.defaultsPyarrow" }]
+      },
+      "then": {
+        "properties": {
+          "tables": {
+            "items": { "if": { "$ref": "#/$defs/table.hasPartition" }, "then": { "$ref": "#/$defs/table.backendConnectorx" } }
+          }
+        }
+      }
+    },
+    {
+      "description": "partition is a ConnectorX read: the table must resolve to connectorx (so it may not set backend pyarrow).",
+      "if": {
+        "allOf": [
+          { "not": { "$ref": "#/$defs/if.dialectNotConnectorx" } },
+          { "not": { "$ref": "#/$defs/if.defaultsPyarrow" } }
+        ]
+      },
+      "then": {
+        "properties": {
+          "tables": {
+            "items": { "if": { "$ref": "#/$defs/table.hasPartition" }, "then": { "not": { "$ref": "#/$defs/table.backendPyarrow" } } }
+          }
+        }
+      }
+    },
+    {
+      "description": "max_time_s cannot stop a ConnectorX stream early: a table on connectorx needs keyset chunking (defaults.backend is pyarrow here).",
+      "if": {
+        "required": ["max_time_s"],
+        "properties": { "max_time_s": { "type": "number" } },
+        "allOf": [{ "not": { "$ref": "#/$defs/if.dialectNotConnectorx" } }, { "$ref": "#/$defs/if.defaultsPyarrow" }]
+      },
+      "then": {
+        "properties": {
+          "tables": {
+            "items": { "if": { "$ref": "#/$defs/table.backendConnectorx" }, "then": { "$ref": "#/$defs/table.isKeyset" } }
+          }
+        }
+      }
+    },
+    {
+      "description": "max_time_s cannot stop a ConnectorX stream early: a table on connectorx (any table not setting backend pyarrow) needs keyset chunking.",
+      "if": {
+        "required": ["max_time_s"],
+        "properties": { "max_time_s": { "type": "number" } },
+        "allOf": [
+          { "not": { "$ref": "#/$defs/if.dialectNotConnectorx" } },
+          { "not": { "$ref": "#/$defs/if.defaultsPyarrow" } }
+        ]
+      },
+      "then": {
+        "properties": {
+          "tables": {
+            "items": { "if": { "not": { "$ref": "#/$defs/table.backendPyarrow" } }, "then": { "$ref": "#/$defs/table.isKeyset" } }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "description": "Lowercase letters, digits and underscores, starting with a letter."
+    },
+    "columnName": {
+      "type": "string",
+      "minLength": 1,
+      "not": { "const": "_extracted_at" },
+      "description": "A source column, exactly as in the database. Not _extracted_at, which db_bronze adds to every row."
+    },
+    "columnNames": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/columnName" }
+    },
+    "isoTimestamp": {
+      "type": "string",
+      "description": "ISO-8601 timestamp as datetime.fromisoformat reads it. An offset is converted through connection.naive_timezone; a naive value is source time.",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}(?:[T ]\\d{2}(?::\\d{2}(?::\\d{2}(?:[.,]\\d+)?)?)?(?:Z|[+-]\\d{2}(?::?\\d{2}(?::?\\d{2}(?:\\.\\d+)?)?)?)?)?$",
+      "examples": ["2020-01-01T00:00:00Z"]
+    },
+    "secretRef": {
+      "title": "Secret reference",
+      "description": "Resolved at run time: {\"env\": NAME}, {\"secret_id\": id} (whole SecretString) or {\"secret_id\": id, \"key\": k} (one key of a JSON SecretString).",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["env"],
+          "properties": { "env": { "type": "string", "minLength": 1 } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["secret_id"],
+          "properties": {
+            "secret_id": { "type": "string", "minLength": 1 },
+            "key": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    },
+    "stringOrRef": {
+      "anyOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }, { "$ref": "#/$defs/secretRef" }]
+    },
+    "present": {
+      "not": { "type": "null" }
+    },
+    "isolationLevel": {
+      "enum": ["READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE", "SNAPSHOT", "AUTOCOMMIT"]
+    },
+    "connection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dialect"],
+      "properties": {
+        "dialect": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*(\\+[a-z0-9_]+)?$",
+          "description": "mssql, postgres, mysql, oracle, db2, sqlite, or another SQLAlchemy dialect name (traditional backend only).",
+          "examples": ["mssql", "postgres", "mysql", "oracle", "db2", "sqlite"]
+        },
+        "host": { "$ref": "#/$defs/stringOrRef" },
+        "port": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "integer", "minimum": 1, "maximum": 65535 },
+            { "$ref": "#/$defs/secretRef" }
+          ]
+        },
+        "database": { "$ref": "#/$defs/stringOrRef" },
+        "service_name": { "$ref": "#/$defs/stringOrRef", "description": "Oracle only, instead of database." },
+        "path": { "$ref": "#/$defs/stringOrRef", "description": "SQLite only: the database file." },
+        "username": { "$ref": "#/$defs/stringOrRef" },
+        "password": { "$ref": "#/$defs/stringOrRef" },
+        "auth": { "$ref": "#/$defs/auth" },
+        "driver_options": {
+          "type": "object",
+          "description": "Passed to the traditional driver (e.g. ODBC keywords for SQL Server).",
+          "additionalProperties": {
+            "anyOf": [{ "type": "string" }, { "type": "number" }, { "$ref": "#/$defs/secretRef" }]
+          }
+        },
+        "isolation_level": {
+          "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/isolationLevel" }],
+          "description": "Applied to the traditional backend. ConnectorX applies it only on Postgres (the four standard levels) and SQL Server (not AUTOCOMMIT; not on a partition read)."
+        },
+        "naive_timezone": {
+          "type": "string",
+          "default": "UTC",
+          "pattern": "^[A-Za-z][A-Za-z0-9_+-]*(?:/[A-Za-z0-9_+-]+)*$",
+          "description": "IANA time zone that naive source timestamps are in. Converts cursor bounds only, never data.",
+          "examples": ["UTC", "Africa/Johannesburg"]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "dialect": { "const": "sqlite" } } },
+          "then": {
+            "required": ["path"],
+            "properties": {
+              "path": { "$ref": "#/$defs/present" },
+              "host": { "type": "null" },
+              "port": { "type": "null" },
+              "database": { "type": "null" },
+              "service_name": { "type": "null" },
+              "username": { "type": "null" },
+              "password": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "dialect": { "enum": ["mssql", "postgres", "mysql", "db2"] } } },
+          "then": {
+            "required": ["host", "database"],
+            "properties": {
+              "host": { "$ref": "#/$defs/present" },
+              "database": { "$ref": "#/$defs/present" },
+              "service_name": { "type": "null" },
+              "path": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "dialect": { "const": "oracle" } } },
+          "then": {
+            "required": ["host", "service_name"],
+            "properties": {
+              "host": { "$ref": "#/$defs/present" },
+              "service_name": { "$ref": "#/$defs/present" },
+              "database": { "type": "null" },
+              "path": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "dialect": { "not": { "enum": ["mssql", "postgres", "mysql", "oracle", "db2", "sqlite"] } } } },
+          "then": {
+            "properties": { "service_name": { "type": "null" }, "path": { "type": "null" } }
+          }
+        },
+        {
+          "if": { "properties": { "dialect": { "const": "db2" } } },
+          "then": {
+            "properties": {
+              "isolation_level": { "enum": ["READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE", null] }
+            }
+          }
+        }
+      ]
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": ["password", "kerberos"],
+          "default": "password",
+          "description": "kerberos parses but fails at run start with NotImplementedError (docs/db/kerberos.md)."
+        },
+        "principal": { "type": ["string", "null"] },
+        "keytab": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/secretRef" }] },
+        "krb5_conf": { "type": ["string", "null"] }
+      },
+      "if": {
+        "required": ["type"],
+        "properties": { "type": { "const": "kerberos" } }
+      },
+      "else": {
+        "properties": {
+          "principal": { "type": "null" },
+          "keytab": { "type": "null" },
+          "krb5_conf": { "type": "null" }
+        }
+      }
+    },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "enum": ["connectorx", "pyarrow", null],
+          "description": "null resolves per table from the dialect: connectorx for mssql, postgres, mysql, oracle, sqlite; pyarrow otherwise. sqlalchemy is not built yet."
+        },
+        "batch_size": { "type": "integer", "minimum": 1, "default": 50000 }
+      }
+    },
+    "table": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "$ref": "#/$defs/name", "description": "Bronze table name and path prefix, unique within the config." },
+        "table": { "type": ["string", "null"], "description": "Source table, exactly as in the database." },
+        "schema": { "type": ["string", "null"], "description": "Source schema; null is the connection's default." },
+        "query": {
+          "type": ["string", "null"],
+          "description": "Instead of schema/table: a view or join. Replaces schema, table, columns and where."
+        },
+        "primary_key": {
+          "$ref": "#/$defs/columnNames",
+          "description": "Source column names. Needed by lag and keyset chunking. Omit rather than null."
+        },
+        "columns": {
+          "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/columnNames" }],
+          "description": "Projection; null is every column."
+        },
+        "where": { "type": ["string", "null"], "description": "Static SQL predicate, ANDed with the cursor filter." },
+        "cursor": {
+          "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/cursor" }],
+          "description": "Omit for a snapshot table (mode=full only)."
+        },
+        "backend": {
+          "enum": ["connectorx", "pyarrow", null],
+          "description": "Overrides defaults.backend. sqlalchemy is not built yet."
+        },
+        "chunking": {
+          "$ref": "#/$defs/chunking",
+          "description": "Default {\"strategy\": \"stream\"}. Omit rather than null."
+        },
+        "batch_size": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "Rows per Arrow batch; overrides defaults.batch_size."
+        },
+        "partition": {
+          "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/partition" }],
+          "description": "ConnectorX parallel read (partition_on). Needs backend connectorx and stream chunking."
+        }
+      },
+      "allOf": [
+        {
+          "description": "Without query, the source is table (and optionally schema).",
+          "if": { "properties": { "query": { "type": "null" } } },
+          "then": { "required": ["table"], "properties": { "table": { "type": "string", "minLength": 1 } } },
+          "else": {
+            "properties": {
+              "schema": { "type": "null" },
+              "table": { "type": "null" },
+              "columns": { "type": "null" },
+              "where": { "type": "null" }
+            }
+          }
+        },
+        {
+          "description": "cursor.lag re-reads a window, and dlt needs the primary key for it.",
+          "if": {
+            "required": ["cursor"],
+            "properties": {
+              "cursor": {
+                "type": "object",
+                "required": ["lag"],
+                "properties": { "lag": { "type": "number", "exclusiveMinimum": 0 } }
+              }
+            }
+          },
+          "then": { "$ref": "#/$defs/table.hasPrimaryKey" }
+        },
+        {
+          "description": "Keyset chunking breaks ties by the primary key.",
+          "if": { "$ref": "#/$defs/table.isKeyset" },
+          "then": { "$ref": "#/$defs/table.hasPrimaryKey" }
+        },
+        {
+          "description": "Partition reads cannot be chunked.",
+          "if": { "$ref": "#/$defs/table.hasPartition" },
+          "then": { "not": { "$ref": "#/$defs/table.isKeyset" } }
+        }
+      ]
+    },
+    "cursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["column", "type", "initial_value"],
+      "properties": {
+        "column": { "$ref": "#/$defs/columnName" },
+        "type": { "enum": ["timestamp", "integer"] },
+        "initial_value": {
+          "type": ["string", "integer"],
+          "description": "ISO-8601 for a timestamp cursor, an integer for an integer cursor. Applies to the first incremental run and is the lower bound of full."
+        },
+        "lag": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Seconds (timestamp) or an integer delta (integer): re-reads a trailing window every run. Needs primary_key."
+        },
+        "include_null_cursor": {
+          "type": "boolean",
+          "default": false,
+          "description": "Adds OR cursor IS NULL: those rows land on every run."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "integer" } } },
+          "then": {
+            "properties": { "initial_value": { "type": "integer" }, "lag": { "type": ["integer", "null"] } }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "timestamp" } } },
+          "then": { "properties": { "initial_value": { "$ref": "#/$defs/isoTimestamp" } } }
+        }
+      ]
+    },
+    "chunking": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "strategy": { "enum": ["stream", "keyset"], "default": "stream" },
+        "order_by": {
+          "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/columnNames" }],
+          "description": "Keyset only: the cursor column first, then the primary key columns (all inside columns, if set)."
+        },
+        "page_size": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "Keyset only: rows per page."
+        }
+      },
+      "if": {
+        "required": ["strategy"],
+        "properties": { "strategy": { "const": "keyset" } }
+      },
+      "then": {
+        "required": ["order_by", "page_size"],
+        "properties": {
+          "order_by": { "type": "array", "minItems": 1 },
+          "page_size": { "type": "integer" }
+        }
+      },
+      "else": {
+        "properties": {
+          "order_by": { "anyOf": [{ "type": "null" }, { "type": "array", "maxItems": 0 }] },
+          "page_size": { "type": "null" }
+        }
+      }
+    },
+    "partition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["column", "num"],
+      "properties": {
+        "column": { "$ref": "#/$defs/columnName", "description": "An integer column (checked by the preflight)." },
+        "num": { "type": "integer", "minimum": 1, "description": "Number of parallel connections." }
+      }
+    },
+
+    "table.isKeyset": {
+      "required": ["chunking"],
+      "properties": {
+        "chunking": {
+          "type": "object",
+          "required": ["strategy"],
+          "properties": { "strategy": { "const": "keyset" } }
+        }
+      }
+    },
+    "table.hasPrimaryKey": {
+      "required": ["primary_key"],
+      "properties": { "primary_key": { "type": "array", "minItems": 1 } }
+    },
+    "table.hasPartition": {
+      "required": ["partition"],
+      "properties": { "partition": { "type": "object" } }
+    },
+    "table.backendConnectorx": {
+      "required": ["backend"],
+      "properties": { "backend": { "const": "connectorx" } }
+    },
+    "table.backendPyarrow": {
+      "required": ["backend"],
+      "properties": { "backend": { "const": "pyarrow" } }
+    },
+    "if.dialectNotConnectorx": {
+      "properties": {
+        "connection": {
+          "properties": { "dialect": { "not": { "enum": ["mssql", "postgres", "mysql", "oracle", "sqlite"] } } }
+        }
+      }
+    },
+    "if.defaultsPyarrow": {
+      "required": ["defaults"],
+      "properties": {
+        "defaults": {
+          "type": "object",
+          "required": ["backend"],
+          "properties": { "backend": { "const": "pyarrow" } }
+        }
+      }
+    },
+    "if.defaultsConnectorx": {
+      "required": ["defaults"],
+      "properties": {
+        "defaults": {
+          "type": "object",
+          "required": ["backend"],
+          "properties": { "backend": { "const": "connectorx" } }
+        }
+      }
+    },
+    "if.connectorxUnusable": {
+      "description": "The connection's isolation_level or auth is something ConnectorX cannot apply on its dialect.",
+      "properties": {
+        "connection": {
+          "type": "object",
+          "required": ["dialect"],
+          "anyOf": [
+            {
+              "required": ["isolation_level"],
+              "properties": {
+                "dialect": { "enum": ["mysql", "oracle", "sqlite"] },
+                "isolation_level": { "type": "string" }
+              }
+            },
+            {
+              "required": ["isolation_level"],
+              "properties": {
+                "dialect": { "const": "postgres" },
+                "isolation_level": { "enum": ["SNAPSHOT", "AUTOCOMMIT"] }
+              }
+            },
+            {
+              "required": ["isolation_level"],
+              "properties": {
+                "dialect": { "const": "mssql" },
+                "isolation_level": { "const": "AUTOCOMMIT" }
+              }
+            },
+            {
+              "required": ["auth"],
+              "properties": {
+                "dialect": { "enum": ["postgres", "mysql", "oracle", "sqlite"] },
+                "auth": {
+                  "type": "object",
+                  "required": ["type"],
+                  "properties": { "type": { "const": "kerberos" } }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

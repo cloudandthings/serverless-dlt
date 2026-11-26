@@ -4,7 +4,7 @@ variable "source_id" {
 }
 
 variable "config" {
-  description = "The api_bronze config document (decoded JSON, README \"API config reference\"). bucket_url, dataset_name, pipeline_name, quarantine_url and the client's secret references drive the IAM grants."
+  description = "The api_bronze config document (decoded JSON, docs/api/configuration.md). bucket_url, dataset_name, pipeline_name, quarantine_url and the client's secret references drive the IAM grants."
   type        = any
 
   validation {

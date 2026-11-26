@@ -1,5 +1,5 @@
 output "api_repository_url" {
-  description = "Push the api_bronze image here (see README.md)."
+  description = "Push the api_bronze image here (see terraform/README.md)."
   value       = module.platform.api_repository_url
 }
 

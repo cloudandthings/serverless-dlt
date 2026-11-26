@@ -1,6 +1,6 @@
 # Schedules, and the split-loading loop. An incremental run that stops at its time budget
 # returns is_empty=false; the state machine re-invokes until a run lands nothing
-# (README "Run modes", README "Time budget and re-invocation").
+# (docs/api/runs.md, docs/db/modes.md "Time budget and re-invocation").
 
 locals {
   # Transient Lambda service errors only. A handler error (BrokenPageError, ConfigError,

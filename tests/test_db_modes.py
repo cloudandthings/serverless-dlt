@@ -1,4 +1,4 @@
-"""db_bronze: `full` and `backfill` modes and table subsets, handler-level against SQLite (DESIGN-db.md 7.5)."""
+"""db_bronze: `full` and `backfill` modes and table subsets, handler-level against SQLite (docs/db/modes.md)."""
 
 from __future__ import annotations
 

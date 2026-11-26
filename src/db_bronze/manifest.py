@@ -1,4 +1,4 @@
-"""Snapshot manifests: which loads make up one complete `mode=full` snapshot of a table (DESIGN-db.md 12).
+"""Snapshot manifests: which loads make up one complete `mode=full` snapshot of a table (docs/bronze-contract.md).
 
 A `full` load counts for silver only if a manifest lists it. A single-invocation
 full run writes one manifest per table on success; paged snapshots get theirs

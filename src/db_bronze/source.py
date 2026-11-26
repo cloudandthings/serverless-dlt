@@ -1,4 +1,4 @@
-"""Build one dlt resource per configured table (DESIGN-db.md section 7.1)."""
+"""Build one dlt resource per configured table (docs/db/design.md Request flow)."""
 
 from __future__ import annotations
 

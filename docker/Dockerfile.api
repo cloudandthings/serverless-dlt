@@ -11,7 +11,7 @@ COPY docker/requirements-api.lock /tmp/requirements-api.lock
 RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements-api.lock --target "${LAMBDA_TASK_ROOT}" \
  && rm /tmp/requirements-api.lock
 
-# bronze_common: the code api_bronze and db_bronze share (DESIGN-db.md D1)
+# bronze_common: the code api_bronze and db_bronze share (docs/db/design.md D1)
 COPY src/bronze_common "${LAMBDA_TASK_ROOT}/bronze_common"
 COPY src/api_bronze "${LAMBDA_TASK_ROOT}/api_bronze"
 

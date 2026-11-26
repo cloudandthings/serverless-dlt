@@ -4,7 +4,7 @@ variable "source_id" {
 }
 
 variable "config" {
-  description = "The db_bronze config document (decoded JSON, README \"Database config reference\"). bucket_url, dataset_name, connection secrets and tables drive IAM, networking and alarms."
+  description = "The db_bronze config document (decoded JSON, docs/db/configuration.md). bucket_url, dataset_name, connection secrets and tables drive IAM, networking and alarms."
   type        = any
 
   validation {
@@ -42,7 +42,7 @@ variable "image_uri" {
 }
 
 variable "memory_mb" {
-  description = "Size from a measured validate-plus-run on the largest table (README \"Memory sizing\"); ~1 GB covers the fixed cost."
+  description = "Size from a measured validate-plus-run on the largest table (docs/deployment.md \"Memory sizing\"); ~1 GB covers the fixed cost."
   type        = number
   default     = 1024
 }
@@ -66,7 +66,7 @@ variable "safety_margin_s" {
 }
 
 variable "reserved_concurrency" {
-  description = "Keep 1 for incremental functions. Null only for a paged-snapshot or parallel-backfill function whose config has its own pipeline_name (README \"Orchestration\")."
+  description = "Keep 1 for incremental functions. Null only for a paged-snapshot or parallel-backfill function whose config has its own pipeline_name (docs/deployment.md \"Orchestration\")."
   type        = number
   default     = 1
   nullable    = true

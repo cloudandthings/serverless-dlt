@@ -1,4 +1,4 @@
-# Source engines for the db_bronze integration suite (DESIGN-db.md section 10).
+# Source engines for the db_bronze integration suite (docs/testing.md).
 # `mise run test:integration` brings this up; the tests also bring it up themselves
 # (idempotent) when run with `pytest -m integration`. Later engines join as services here.
 #
@@ -88,7 +88,7 @@ services:
     # su's "-bash" loses its dash: no login shell, no profile, "db2start: command not found", and no
     # database. su reads /etc/environment (pam_env), so BASH_ENV makes every such shell read the profile.
     # Not on the 11.5 images (RHEL 7, whose su skips pam_env for root): there, under Rosetta, start
-    # it by hand once the setup has finished (DESIGN-db.md S9).
+    # it by hand once the setup has finished (docs/db/design.md S9).
     volumes: ["./db2-environment:/etc/environment:ro"]
     healthcheck:
       test: ["CMD-SHELL", "su - db2inst1 -c '. ~/sqllib/db2profile && db2 connect to BRONZE' >/dev/null 2>&1"]

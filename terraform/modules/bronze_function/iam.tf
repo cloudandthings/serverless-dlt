@@ -1,5 +1,5 @@
 # Function role. The S3 grants are scoped to the prefixes the wrapper derives from the
-# config; confirm the minimal action set on the first real-S3 run (README "Open items" 1:
+# config; confirm the minimal action set on the first real-S3 run (docs/open-items.md item 1:
 # s3fs and dlt's filesystem destination have only run against file:// so far).
 
 locals {

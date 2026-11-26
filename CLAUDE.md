@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `api_bronze`: a dlt-based AWS Lambda that lands REST API records into an S3 bronze layer as Parquet, **one row per record, with the record's JSON text cut verbatim** from the response body (never parsed and re-serialised). A separate Spark/Glue job (`silver/silver_transform.py`) parses bronze into typed silver columns.
 
-README.md is the operator-facing spec for both packages (shared bronze layout, then an "API sources" and a "Database sources" section, then deployment, silver, testing, open items). DESIGN-api.md explains every design decision and the evidence behind it. Read DESIGN-api.md before changing behaviour. `dlt-lambda-ingestion-assessment.md` is the earlier feasibility study (background only).
+Documentation: README.md is the only documentation in the repo root besides this CLAUDE.md (overview, status, quick start, and a pointer to `docs/README.md`, the documentation guide); keep it that way. Everything else lives under `docs/`: `bronze-contract.md` (shared layout and what silver relies on), `deployment.md`, `silver.md`, `testing.md`, `open-items.md`, `api/` (`configuration.md`, `runs.md`, `broken-responses.md`, `design.md`), `db/` (see below) and `background/` (the earlier feasibility study, background only). Operator docs state only what the code accepts; each package's `design.md` explains every design decision and the evidence behind it. Read `docs/api/design.md` before changing api_bronze behaviour. Put new docs in the topic file they belong to (or a new file under `docs/`, added to `docs/README.md`), not in README.
 
-`db_bronze` is the sibling package for relational sources: typed Parquet with source column names, same bronze layout. Its operator spec is README.md's "Database sources" section and its design record is DESIGN-db.md; read DESIGN-db.md before changing db_bronze behaviour. `tests/test_db_readme.py` fails when a config key, event key, mode, errorType or metric is missing from that section (it reads only the text between ``## Database sources (`db_bronze`)`` and the next `## ` heading, and the errors from its `### Errors`), so update README.md in the same change and keep those headings.
+`db_bronze` is the sibling package for relational sources: typed Parquet with source column names, same bronze layout. Its operator spec is `docs/db/configuration.md`, `modes.md`, `preflight.md`, `errors.md` and `types.md`; its design record is `docs/db/design.md` (decisions D1–D12, spikes S1–S9) and its engine research `docs/db/engines.md`. Read `docs/db/design.md` before changing db_bronze behaviour. `tests/test_db_docs.py` fails when a config key, event key, mode, errorType or metric is missing from the four operator docs `configuration.md`, `modes.md`, `preflight.md`, `errors.md` (errors from the `## Errors` section of `errors.md`, server minimums from `preflight.md`'s table), so update them in the same change and keep those headings.
 
 ## Commands
 
@@ -23,6 +23,7 @@ mise run test:unit                         # no Spark/Java
 mise run test:spark                        # installs silver group, runs Spark tests
 mise run test tests/test_modes.py::test_name   # extra args go to pytest (also test:unit / test:spark)
 mise run check                             # lint + test
+mise run config:validate examples/*.json   # config files against schemas/ (api or db by client/connection key)
 mise run docker:lock                       # regenerate docker/requirements-api.lock from uv.lock (--db: requirements-db.lock)
 mise run docker:build                      # lock + image (-t tag, -p linux/arm64|linux/amd64; --db: db_bronze image, amd64 only)
 mise run docker:smoke                      # build + invoke via Lambda Runtime Interface Emulator (--db: db_bronze image)
@@ -36,11 +37,13 @@ mise run tf                                # Terraform: tf:fmt (--fix), tf:valid
 
 `terraform/` holds deployment modules and examples (see terraform/README.md). Its db snapshot state machine template must stay identical to `examples/db_snapshot.asl.json` (`tests/test_terraform_examples.py`); change both together.
 
+`schemas/api_bronze.config.schema.json` and `schemas/db_bronze.config.schema.json` mirror the two `config.py` files (config.py is authoritative; the Lambda never reads them). `tests/test_config_schema.py` checks fields, enums and that schema and config.py agree on a corpus of configs plus a dialect/backend matrix, so change a schema in the same change as its `config.py`. Rules JSON Schema can't express are marked `PYTHON_ONLY` there.
+
 `docker/requirements-api.lock` and `docker/requirements-db.lock` must be regenerated whenever dependencies change; the image installs with `--require-hashes` (`docker:build` does it automatically).
 
 Tests need no network or AWS: `tests/conftest.py` runs an in-process fake REST API (`EventsAPI`, routable bytes overrides, 500s, auth checks) and uses a local directory as the bucket (`file://`). `tests/test_silver.py` imports `silver_transform` by inserting `silver/` on `sys.path`.
 
-db_bronze unit tests (`tests/test_db_*.py`) run end to end on SQLite (a file in `tmp_path`) on both backends. `tests/integration/` needs Docker; SQL Server needs Rosetta on arm64, Db2 and its tests are x86_64 only (see DESIGN-db.md section 10).
+db_bronze unit tests (`tests/test_db_*.py`) run end to end on SQLite (a file in `tmp_path`) on both backends. `tests/integration/` needs Docker; SQL Server needs Rosetta on arm64, Db2 and its tests are x86_64 only (see docs/testing.md).
 
 ## Architecture
 
@@ -55,7 +58,7 @@ Request flow: `handler.handler` → `config.SourceConfig` / `RunRequest` → `pi
 
 ## bronze_common
 
-`src/bronze_common/` holds what api_bronze and db_bronze share and that touches **no dlt internals** (DESIGN-db.md D1): `config.strict_builder` (unknown-key-rejecting dataclass builder, raising the package's own `ConfigError`), `secrets` (`REF_KEYS`, `lookup`, the Secrets Manager cache, `clear_cache`), and `handler` (`load_config`, `lambda_budget` with `SAFETY_MARGIN_S`/`MIN_BUDGET_S`, `find_in_chain`). Both packages' `handler`/`config`/`secrets` are thin over it, and both Dockerfiles copy it into the image. Keep dlt-facing code out of it: a dlt behaviour one package relies on must never bind the other.
+`src/bronze_common/` holds what api_bronze and db_bronze share and that touches **no dlt internals** (docs/db/design.md D1): `config.strict_builder` (unknown-key-rejecting dataclass builder, raising the package's own `ConfigError`), `secrets` (`REF_KEYS`, `lookup`, the Secrets Manager cache, `clear_cache`), and `handler` (`load_config`, `lambda_budget` with `SAFETY_MARGIN_S`/`MIN_BUDGET_S`, `find_in_chain`). Both packages' `handler`/`config`/`secrets` are thin over it, and both Dockerfiles copy it into the image. Keep dlt-facing code out of it: a dlt behaviour one package relies on must never bind the other.
 
 ## Invariants and dlt gotchas (don't break these)
 
@@ -90,11 +93,11 @@ Request flow: `handler.handler` → `config.SourceConfig` / `RunRequest` → `pi
 - `lag` re-lands its whole window every run (dlt deduplicates nothing under `lag`); silver deduplicates on (`primary_key`, cursor) by latest `_extracted_at`.
 - A `full` load counts only if a manifest lists it; the manifest is written after every load succeeded.
 - Paged snapshots and parallel backfills use their own `pipeline_name`, never the incremental's.
-- Rules that depend on a type or engine need integration evidence: DESIGN-db.md labels each finding *researched*, *prototyped* or *integration*. Keep the label honest.
+- Rules that depend on a type or engine need integration evidence: docs/db/design.md and docs/db/engines.md label each finding *researched*, *prototyped* or *integration*. Keep the label honest.
 
 ## Status
 
-Unit/integration tested locally and image smoke-tested via the emulator. Not yet validated: real S3, real Lambda, Glue 6.0. db_bronze additionally passed its integration suite on Postgres, MySQL, SQL Server, Oracle and Db2, with the unverified items listed in README "Open items". `silver_transform.merge_into_iceberg` and `main` are untested sketches. See README "Open items".
+Unit/integration tested locally and image smoke-tested via the emulator. Not yet validated: real S3, real Lambda, Glue 6.0. db_bronze additionally passed its integration suite on Postgres, MySQL, SQL Server, Oracle and Db2, with the unverified items listed in docs/open-items.md. `silver_transform.merge_into_iceberg` and `main` are untested sketches. See docs/open-items.md.
 
 ## Agent skills
 

@@ -1,4 +1,4 @@
-"""db_bronze: Oracle always runs thick (DESIGN-db.md D10), initialised when the handler module is imported.
+"""db_bronze: Oracle always runs thick (docs/db/design.md D10), initialised when the handler module is imported.
 
 The image sets ORACLE_CLIENT_LIB_DIR to its Instant Client. Without it (local runs, these
 tests) oracledb stays in thin mode. Each case runs in a fresh interpreter because thick mode

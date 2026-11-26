@@ -1,4 +1,5 @@
-"""Every source engine db_bronze knows, in one table (DESIGN-db.md sections 3, 5.1 and 6).
+"""Every source engine db_bronze knows, in one table (docs/db/engines.md,
+configuration.md and preflight.md).
 
 The config names an engine one way (`postgres`, `db2`), SQLAlchemy another
 (`postgresql`, `ibm_db_sa`), and its URL a third (`postgresql+psycopg`,
@@ -34,7 +35,7 @@ class Dialect:
     # query in the same batch (so not on a partitioned read, which ConnectorX parses as one SELECT).
     connectorx_isolation: tuple[str, ...] = ()
     connectorx_isolation_in_batch: bool = False
-    connectorx_kerberos: bool = False  # ConnectorX supports Kerberos on this engine (docs/KERBEROS.md)
+    connectorx_kerberos: bool = False  # ConnectorX supports Kerberos on this engine (docs/db/kerberos.md)
     # ConnectorX upper-cases a partition_on column in its range query, quoted or not (integration, Oracle).
     connectorx_partition_upper_cases: bool = False
     isolation_levels: tuple[str, ...] = ISOLATION_LEVELS  # what the traditional backend can apply

@@ -1,4 +1,4 @@
-"""db_bronze: opt-in partitioned ConnectorX reads (DESIGN-db.md sections 3.1, 5.2, 6.1), against SQLite."""
+"""db_bronze: opt-in partitioned ConnectorX reads (docs/db/engines.md; docs/db/configuration.md), against SQLite."""
 
 from __future__ import annotations
 

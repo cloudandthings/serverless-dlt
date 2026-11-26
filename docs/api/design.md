@@ -1,11 +1,15 @@
 # Design: raw REST API bronze with dlt on Lambda
 
-This records why `api-bronze` works the way it does: the requirement, what dlt
+This records why `api_bronze` works the way it does: the requirement, what dlt
 does by default, the options that were compared, the chosen design, and the
 evidence behind each choice. Everything marked *verified* was checked by
 running code against dlt 1.32.0, pyarrow 26.0.1, Python 3.12 (November 2026).
 Most of it is covered by this package's own tests; the rest was measured in a
 separate evaluation workspace, and the numbers are reproduced here.
+
+What the package accepts and does is specified in [configuration.md](configuration.md),
+[runs.md](runs.md), [broken-responses.md](broken-responses.md) and
+[../bronze-contract.md](../bronze-contract.md); this document is the why.
 
 ## 1. Requirement
 
@@ -84,7 +88,7 @@ because of the empty-page behaviour in §5.4.
 
 ### 5.1 Arrow items bypass the normaliser
 
-The resource yields `pyarrow.Table`s with a fixed schema (README "Row schema (one row per API record)").
+The resource yields `pyarrow.Table`s with a fixed schema ([../bronze-contract.md](../bronze-contract.md#api-rows-api_bronze)).
 dlt writes Arrow items to Parquet as given: no flattening, renaming, coercion
 or timestamp rewriting. It still applies incremental filtering on the cursor
 column, writes the layout, and records `_dlt_loads` and state. The REST client

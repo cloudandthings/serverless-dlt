@@ -1,4 +1,4 @@
-# One database source = one config document + one VPC function (README "Deploying on Lambda").
+# One database source = one config document + one VPC function (docs/deployment.md).
 # The image is x86_64 only: ibm_db has no aarch64 wheel.
 
 locals {

@@ -1,4 +1,4 @@
-"""db_bronze: SQLAlchemy and ConnectorX URLs built from the discrete connection fields (DESIGN-db.md 5.1).
+"""db_bronze: SQLAlchemy and ConnectorX URLs built from the discrete connection fields (docs/db/configuration.md).
 
 Offline: URLs are built and, for MSSQL, turned into the ODBC connection string, without any driver.
 """

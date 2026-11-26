@@ -1,4 +1,4 @@
-"""Resolve secret references in connection fields at run time (DESIGN-db.md section 5.1).
+"""Resolve secret references in connection fields at run time (docs/db/configuration.md).
 
 Any connection field may be a reference instead of a literal, so config documents
 never hold credentials:

@@ -1,5 +1,5 @@
 {
-  "Comment": "db_bronze paged snapshot of one table (DESIGN-db.md D8, 7.5): plan -> Map over pages -> finalize. Execution input: {\"source_id\": \"core_banking_snapshot\", \"table\": \"transactions\", \"page_size\": 500000}. The source config must use its own pipeline_name (here core_banking_snapshot), never the incremental's: pages write dlt state rows and run in parallel. Replace the FunctionName with the snapshot function's ARN.",
+  "Comment": "db_bronze paged snapshot of one table (docs/db/design.md D8; docs/db/modes.md): plan -> Map over pages -> finalize. Execution input: {\"source_id\": \"core_banking_snapshot\", \"table\": \"transactions\", \"page_size\": 500000}. The source config must use its own pipeline_name (here core_banking_snapshot), never the incremental's: pages write dlt state rows and run in parallel. Replace the FunctionName with the snapshot function's ARN.",
   "StartAt": "Plan",
   "States": {
     "Plan": {

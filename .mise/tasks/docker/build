@@ -12,7 +12,7 @@ cd "$MISE_PROJECT_ROOT"
 if [[ "${usage_db:-false}" == "true" ]]; then
   platform="${usage_platform:-linux/amd64}"
   if [[ "$platform" != "linux/amd64" ]]; then
-    echo "docker:build --db: the db image is linux/amd64 only (ibm_db has no aarch64 wheel; DESIGN-db.md D9)" >&2
+    echo "docker:build --db: the db image is linux/amd64 only (ibm_db has no aarch64 wheel; docs/db/design.md D9)" >&2
     exit 2
   fi
   mise run docker:lock --db

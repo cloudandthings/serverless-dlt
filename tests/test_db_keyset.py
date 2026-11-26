@@ -1,4 +1,4 @@
-"""db_bronze: keyset chunking and the time budget, handler-level against SQLite (DESIGN-db.md 7.4)."""
+"""db_bronze: keyset chunking and the time budget, handler-level against SQLite (docs/db/design.md Chunking)."""
 
 from __future__ import annotations
 

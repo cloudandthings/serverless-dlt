@@ -95,7 +95,7 @@ def test_kerberos_fails_at_run_start_with_not_implemented_and_nothing_lands(invo
     with pytest.raises(Exception) as failure:
         invoke(connection={"auth": kerberos})
     assert error_type(failure.value) == "NotImplementedError"
-    assert "docs/KERBEROS.md" in str(failure.value)
+    assert "docs/db/kerberos.md" in str(failure.value)
     assert nothing_landed(bucket)
 
 
