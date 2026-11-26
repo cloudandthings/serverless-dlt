@@ -257,3 +257,6 @@ mise.local.toml
 !*.tfvars.example
 .tflint.d/
 terraform/modules/**/.terraform.lock.hcl
+
+# Agent skill config
+.agents/
